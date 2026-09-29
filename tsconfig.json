@@ -1,0 +1,7 @@
+{
+  "extends": "@jayyuen666/dsh-plugin-shared/config/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
+  "include": ["host.ts", "lib/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+}

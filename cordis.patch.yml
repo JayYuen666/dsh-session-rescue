@@ -1,0 +1,25 @@
+# session-rescue：通用自动续跑 + 编辑重发/重试/排队撤回/停止重问/续写/设置卡。
+# 替代已移除的 dsh-chat-recovery 与已退役的 baidu-429-auto-resume（退役，
+# 通用化续跑由其接管；百度路由的专属 retryPolicy 仍在 settings.yaml 中保留）。
+# 审查修复（依据真实会话事件流取证）：
+#   1) completed 成功回合重置续跑配额——原缺陷 counts 只增不清，配合 maxResumes=3
+#      等于每会话一生仅 3 次，长跑会话"用完即哑"直到重启；
+#   2) 冷却时间戳按 kind 独立——原共享单个 lastFireAt，resume 的 120s 冷却会跨类
+#      误拦 continue/unfinished；
+#   3) PI_AI_ERROR + "Provider finish_reason: ..." 归为瞬时——原落 unclassified 被
+#      保守判永久，实测该类上游异常永不重试；
+#   4) 新增第三类注入 unfinished：completed 回合但本回合自己写的待办清单仍未闭合
+#      → 自动补跑（结构化信号，零文本猜测）；模型在等用户回答（ask_user_question）
+#      或该回合由 goal 轮次驱动（source.kind=goal）时不注入，清单闭合后配额恢复。
+# request-error 429 重试加指数退避（2s/5s/10s/20s/30s，中止委托 next()）。
+# PI_AI_ERROR + "Provider returned an empty response"（OpenRouter 空响应原文，
+#   pi-ai 认不出措辞故兜底 PI_AI_ERROR）归为瞬时——同上一条第 3) 项的口径，此前
+#   落 unclassified 判永久，实测同一形状连失 5 个回合且无日志（措辞不疑似限流）。
+#
+# 组合包层：本文件由 package.json 的 dsh.bundle.patch
+# 指向，随 `dsh plugin --profile web add/remove ./plugins/session-rescue` 维护。
+# 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
+# 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
+- insert:
+    - id: session-rescue
+      name: "@jayyuen666/dsh-session-rescue"
