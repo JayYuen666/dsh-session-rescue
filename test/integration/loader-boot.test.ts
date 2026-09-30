@@ -36,7 +36,7 @@ const AGENT_STATUS_EVENT = "agent/status";
 // cordis loader 走 Node 原生 import 载入，v8 会把两份实例的覆盖记录按偏移合并，
 // 真实命中被冲成 0（host.ts 与它 import 的 lib/*.ts 全部受影响），阈值 100 下恒红。
 // 本包自己的 `./lib/...` 需要跟着复制（副本相对路径才成立）；跨包依赖已是裸包名
-// （@jayyuen666/dsh-plugin-shared/lib/*），由 .tmp/ 向上到本包 node_modules 正常解析，无需搬运。
+// （@jayyuen66/dsh-plugin-shared/lib/*），由 .tmp/ 向上到本包 node_modules 正常解析，无需搬运。
 //
 // 两份装载对象各有职责，不是重复：
 //   - .tmp/pkg/host.ts：源码态（绝对路径直载 .ts，即 Node 类型剥离那条路）；

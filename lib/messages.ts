@@ -8,7 +8,7 @@
 // 键集一致由 tsc 保证：zh / en 两份都标注同一个 Messages 类型，少键多键都在编译期红。
 // console.* 的日志文案不在此列——那是给排障的人看的，不随界面语言切换。apply 的宿主契约
 // 违规抛错也不在此列：抛错发生在 settings 面尚未通过守卫之前，那一刻读不到语言偏好。
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包 host 侧产出的全部人读文案。 */
 export interface SessionRescueMessages {

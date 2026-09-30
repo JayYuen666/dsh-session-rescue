@@ -7,7 +7,7 @@
 // （`LocaleDictOf<NS> = Record<NS 的键, string>`），带变量的整句走官方 Translate 的
 // `{name}` 插值（宿主 `LocaleRuntime.translate` 同语义：`{x}` 缺失时原样留占位符）。
 import type { TranslateNS as OfficialTranslateNS } from "@deepseek-ai/dsh-client-ui-slots";
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包 client 侧（dock + 设置卡）产出的全部界面文案。 */
 export interface UiMessages {

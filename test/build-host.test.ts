@@ -2,7 +2,7 @@
 //
 // 为什么值得一条测试（两个坏方向都不报错、只在线上发作）：发布形态下 host.js 躺在
 // node_modules 里被 dsh 载入——
-//   1) 内联：`@jayyuen666/dsh-plugin-shared/lib/http` 这类**子路径**说明符一旦被打进产物，shared 的
+//   1) 内联：`@jayyuen66/dsh-plugin-shared/lib/http` 这类**子路径**说明符一旦被打进产物，shared 的
 //      模块级状态就在每个插件里各复制一份；rolldown 的 external 字符串项是精确匹配，
 //      只列包名会漏掉子路径，故 build-host.mjs 按「包名段」判定（该坑已在脚本注释登记）。
 //   2) 残留：产物里只要还剩 `./lib/xxx.ts`，Node 载入即抛 ERR_UNSUPPORTED_NODE_MODULES_
@@ -54,11 +54,11 @@ describe("buildHost()", () => {
     // 本包 client 半是**结构性例外**：build-client.mjs 只 external react（浏览器侧解析不了
     // 裸说明符），故 client.js 里仍是内联的 brandString——那条不由外部化裁定消灭。
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/http"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/http"'),
       "shared/http 必须外部化",
     );
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/record"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/record"'),
       "shared/record 必须外部化（SP-D 起 isRecord/fieldOf 单点在 shared，内联即复制判据）",
     );
     // 自有薄包装（x-rescue-csrf 头名）确已并入单文件：证明"内联了自己的代码"这一步
@@ -79,7 +79,7 @@ describe("闸门的外部化面（shared/lib/trust）", () => {
     // external 的字符串项是精确匹配，子路径一旦漏掉就把整份判据复制进本包产物（判据分叉的起点）。
     const out = await buildHost();
     assert.ok(
-      out.includes('from "@jayyuen666/dsh-plugin-shared/lib/trust"'),
+      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/trust"'),
       "shared/trust 必须外部化",
     );
     assert.ok(!/^function guardTrust\(/mu.test(out), "产物不得内联 guardTrust 的函数体");

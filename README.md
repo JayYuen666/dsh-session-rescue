@@ -1,4 +1,4 @@
-# @jayyuen666/dsh-session-rescue
+# @jayyuen66/dsh-session-rescue
 
 [中文](#中文) · [English](#english)
 
@@ -44,21 +44,19 @@
 ### 安装
 
 ```sh
-npm config --global @jayyuen666:registry=https://npm.pkg.github.com
-printf '//npm.pkg.github.com/:_authToken=<PAT:read:packages>\n' >> ~/.npmrc
-dsh plugin --profile web add @jayyuen666/dsh-session-rescue
+dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 ```
 
 - 需要 dsh `>=0.2.0-rc.2`：真源是 `package.json` 里 `peerDependencies` 下的 `@deepseek-ai/dsh`（宿主自 0.1.7-rc 起在装插件时校验它；alpha.1 还没有这道门）。`engines.dsh` 同值但无人读。
-- GitHub Packages 连「读」也要凭据，缺 token 在拉包阶段就失败。
-- 卸载：`dsh plugin --profile web remove @jayyuen666/dsh-session-rescue`。许可 MIT，源码仓见 `package.json` 的 `repository.url`。
+- 包在公共 npm 上，安装不需要凭据。
+- 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`。许可 MIT，源码仓见 `package.json` 的 `repository.url`。
 
 ### 在 dsh 里启用
 
-- 组合包形态：包内 `cordis.patch.yml` 带 `- id: session-rescue` + `name: "@jayyuen666/dsh-session-rescue"`，由 `package.json` 的 `dsh.bundle.patch` 指向，`dsh plugin add` 自动登记。
+- 组合包形态：包内 `cordis.patch.yml` 带 `- id: session-rescue` + `name: "@jayyuen66/dsh-session-rescue"`，由 `package.json` 的 `dsh.bundle.patch` 指向，`dsh plugin add` 自动登记。
   - 发布态入口是 `prepack` 重建的 `host.js` 与 `client.js`。
 - host 半硬依赖 `timer` 与 `settings`（`inject: ["timer", "settings"]`）；`webServer` 走子 fiber 依赖，所以没有 webServer 的宿主（TUI）自动续跑照常、只是那六条路由不存在。
-- 设置卡在插件管理页的 `plugins.bundle.config`（该槽按 bundle 包名 keyed，key = `@jayyuen666/dsh-session-rescue`，即 `~/.dsh/profiles/web/package.json` 里 `dsh.profile.bundles` 的那一行；`configForms.get()` 与 settings 命名空间仍是裸条目 id `session-rescue`）：改动点「保存」才写 settings、「撤销」丢弃。
+- 设置卡在插件管理页的 `plugins.bundle.config`（该槽按 bundle 包名 keyed，key = `@jayyuen66/dsh-session-rescue`，即 `~/.dsh/profiles/web/package.json` 里 `dsh.profile.bundles` 的那一行；`configForms.get()` 与 settings 命名空间仍是裸条目 id `session-rescue`）：改动点「保存」才写 settings、「撤销」丢弃。
 - 不想开 UI 时部署默认值写在注册行 `config:` 上，优先级 = 设置卡运行时值 > 行 `config` > 内置默认，配置非法则插件加载失败（响亮报错）。
 
 ### 设置项
@@ -105,8 +103,8 @@ dsh plugin --profile web add @jayyuen666/dsh-session-rescue
 - 为什么有时模型停了却没自动续跑：日志找 `[session-rescue] <sid>: auto-<kind> skipped (<reason>)`（`pending`/`cooldown`/`max-resumes`）或 `vetoed at fire time (<reason>)`；配额是连续语义，跑完一回合就恢复。
 - 会不会打断「它在问我」：不会，`ask_user_question` 之后不注入；goal 轮次驱动的回合三类全部让路。
 - 补跑从不触发：它要求该回合自己写过 `todo/write` 且清单里仍有非 `completed` 项——从不用待办工具的会话结构性不会触发（`openTodos` 为 `null`）。
-- 装不上：401 多半是 `~/.npmrc` 里缺 `read:packages` token。
-  - 404 通常是同组库包 `@jayyuen666/dsh-plugin-shared` 还没上 registry——本包值 import 它的 `lib/locale` 与 `lib/http`，缺了就是 `ERR_MODULE_NOT_FOUND`。
+- 装不上：404 多半是该版本还没发到 npmjs（先看 `dist-tags.latest`）。
+  - 404 通常是同组库包 `@jayyuen66/dsh-plugin-shared` 还没上 registry——本包值 import 它的 `lib/locale` 与 `lib/http`，缺了就是 `ERR_MODULE_NOT_FOUND`。
 - 判定有没有测试兜着：`test/` 覆盖瞬时失败续跑、成功回合重置配额、待办未闭合补跑、等用户回答不注入四条主链。
   - 其中 `test/integration/loader-boot.test.ts` 用真实 cordis loader 装载发布产物端到端验。
 
@@ -154,21 +152,19 @@ dsh plugin --profile web add @jayyuen666/dsh-session-rescue
 ### Install
 
 ```sh
-npm config --global @jayyuen666:registry=https://npm.pkg.github.com
-printf '//npm.pkg.github.com/:_authToken=<PAT:read:packages>\n' >> ~/.npmrc
-dsh plugin --profile web add @jayyuen666/dsh-session-rescue
+dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 ```
 
 - Requires dsh `>=0.2.0-rc.2`: the source of truth is the `@deepseek-ai/dsh` entry under `peerDependencies` (the host checks it on plugin install from 0.1.7-rc; alpha.1 has no such gate yet). `engines.dsh` carries the same value but nothing reads it.
-- GitHub Packages demands credentials even for reads, so a missing token fails during fetch.
-- Remove with `dsh plugin --profile web remove @jayyuen666/dsh-session-rescue`. MIT licensed; the source repository is in `repository.url` of `package.json`.
+- The packages are on the public npm registry, so installation needs no credentials.
+- Remove with `dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`. MIT licensed; the source repository is in `repository.url` of `package.json`.
 
 ### Enabling it in dsh
 
-- Bundle form: the package's own `cordis.patch.yml` carries `- id: session-rescue` + `name: "@jayyuen666/dsh-session-rescue"` and is pointed at by `dsh.bundle.patch` in `package.json`, so `dsh plugin add` registers it.
+- Bundle form: the package's own `cordis.patch.yml` carries `- id: session-rescue` + `name: "@jayyuen66/dsh-session-rescue"` and is pointed at by `dsh.bundle.patch` in `package.json`, so `dsh plugin add` registers it.
   - The published entry points are the `prepack`-rebuilt `host.js` and `client.js`.
 - The host half hard-depends on `timer` and `settings` (`inject: ["timer", "settings"]`); `webServer` is required through a child fiber, so a host without webServer (TUI) keeps auto-resume working and simply never gets the six routes.
-- The settings card lives in `plugins.bundle.config` on the plugin page, keyed by the bundle package name `@jayyuen666/dsh-session-rescue` (that is the `dsh.profile.bundles` row in `~/.dsh/profiles/web/package.json`).
+- The settings card lives in `plugins.bundle.config` on the plugin page, keyed by the bundle package name `@jayyuen66/dsh-session-rescue` (that is the `dsh.profile.bundles` row in `~/.dsh/profiles/web/package.json`).
   - `configForms.get()` and the settings namespace stay the bare entry id `session-rescue`; edits are staged, Save writes them into settings, Revert discards them.
 - Without UI, deployment defaults go on the registration line's `config:`; precedence = card runtime value > line `config` > schema `.default()`, and an invalid `config` fails the plugin load loudly.
 
@@ -217,7 +213,7 @@ Namespace `session-rescue`: since 0.1.7 the namespace is registered implicitly (
 - Why did it stop without resuming: look for `[session-rescue] <sid>: auto-<kind> skipped (<reason>)` (`pending`/`cooldown`/`max-resumes`) or `vetoed at fire time (<reason>)` in the log; the budget is consecutive-semantics and one finished turn refills it.
 - Will it interrupt a question aimed at me: no. Nothing is injected after `ask_user_question`, and goal-round driven turns are skipped by all three kinds.
 - The re-run never fires: it requires that turn to have written a `todo/write` list that still holds non-`completed` items - sessions that never use the todo tool structurally cannot trigger it (`openTodos` stays `null`).
-- Install fails: 401 usually means no `read:packages` token in `~/.npmrc`.
-  - 404 usually means the sibling library package `@jayyuen666/dsh-plugin-shared` is not on the registry yet - this package value-imports its `lib/locale` and `lib/http`, so a missing one is `ERR_MODULE_NOT_FOUND`.
+- Install fails with 404: that version was never published to npmjs (check `dist-tags.latest`).
+  - 404 usually means the sibling library package `@jayyuen66/dsh-plugin-shared` is not on the registry yet - this package value-imports its `lib/locale` and `lib/http`, so a missing one is `ERR_MODULE_NOT_FOUND`.
 - What backs these decisions: `test/` covers the four main chains - transient failure resumes, a successful turn refills the quota, an open todo list re-runs, and a waiting-for-user turn stays untouched.
   - `test/integration/loader-boot.test.ts` boots the published artifact through the real cordis loader.

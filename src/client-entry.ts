@@ -80,7 +80,7 @@ import type {
 } from "../lib/dock-state.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 // NS 的字面量形态是**承重**的：test/profile-bundle.ts 的漂移针从产物里按
 // `const NS = "…"` 抓这条声明，再与 cordis.patch.yml 的裸 `- id:` 比对（写成别名
@@ -128,7 +128,7 @@ declare module "@deepseek-ai/dsh-api-session-controller/client" {
  *  下一行的 `SessionReferenceSource` 赋值仍然钉得住（改了 merge 键或改了 NS 都当场红）。 */
 export const REFERENCE_SOURCE_KEY = NS;
 const SESSION_RESCUE_SOURCE: SessionReferenceSource = REFERENCE_SOURCE_KEY;
-const BUNDLE_PKG = "@jayyuen666/dsh-session-rescue";
+const BUNDLE_PKG = "@jayyuen66/dsh-session-rescue";
 
 /** 从对象安全读字段：字面量键走变量参数，绕开 dot-notation 与
  *  noPropertyAccessFromIndexSignature（tsc 禁索引签名点访问）的互斥。 */

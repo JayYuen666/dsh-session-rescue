@@ -94,7 +94,7 @@ import {
   LOCALE_SETTINGS_NAMESPACE,
   messagesFor,
   resolveLocalePreference,
-} from "@jayyuen666/dsh-plugin-shared/lib/locale";
+} from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 // 共享 webServer 样板：sendJson/queryParam/guardBody（自家 isCrossOrigin 支在信任闸门
 // 落地后不可达，已随那道闸门收敛）
@@ -102,14 +102,14 @@ import {
 // checkCsrf 各插件 header 名不同，本文件留薄包装传 x-rescue-csrf。
 // guardBody 覆盖「跨域 → CSRF → 读 body（Buffer 累积、UTF-8 字节上限）→
 // 413/400」整条 POST 前置链，本包 retry-policy 端点即用它。
-import { sendJson, queryParam, checkCsrf, guardBody } from "@jayyuen666/dsh-plugin-shared/lib/http";
+import { sendJson, queryParam, checkCsrf, guardBody } from "@jayyuen66/dsh-plugin-shared/lib/http";
 // 信任闸门：六条路由 handler 的第一条语句。
-import { guardTrust } from "@jayyuen666/dsh-plugin-shared/lib/trust";
+import { guardTrust } from "@jayyuen66/dsh-plugin-shared/lib/trust";
 // lesson bus 收口：lesson-loop 的 report/pass 已异步落库（返回 Promise），只包一层同步
 // try/catch 抓不到 rejection——失败既被静默吞掉又给宿主进程留一枚未处理拒绝。
 // 同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
-import { settleLessonCall } from "@jayyuen666/dsh-plugin-shared/lib/lesson-bus";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 const PLUGIN_NAME = "session-rescue";
 const STATE_PATH = "/_dsh/session-rescue/state";

@@ -28,7 +28,7 @@
 import { z } from "zod";
 import type { SessionEvent, SessionHeader, SessionLogOffset } from "@deepseek-ai/dsh-session";
 import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import type { TurnReview } from "./turn-review.ts";
 
 /** 本包投影单元的注册键（host-only：不声明 wire ⇒ 不进客户端快照）。 */

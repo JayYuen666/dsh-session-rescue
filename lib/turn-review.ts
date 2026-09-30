@@ -25,7 +25,7 @@
  *  不声明成具体 interface——那只会把 `unknown` 换成需要断言的假精确。 */
 
 /** 事件类型（非对象/缺 type → 空串）。 */
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 function typeOf(ev: unknown): string {
   const type = fieldOf(ev, "type");

@@ -5,7 +5,7 @@
  */
 
 import type { LlmFailure } from "@deepseek-ai/dsh-llm";
-import { isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** harness `LlmFailure` 的本插件读面子集：字段名与类型逐位取自官方声明
  *  （`message`/`code`/`status`/`providerRetryAfterMs`/`requestId`/`offloadImages`），
