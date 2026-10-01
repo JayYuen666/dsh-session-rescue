@@ -10,7 +10,7 @@
  *
  * 双模式消费：
  *   Node/测试: 直接 ESM import 本文件。
- *   Web:       build-client.mjs 经 esbuild 把 src/client-entry.ts 与本文件
+ *   Web:       build-client.mjs 经 rolldown 把 src/client-entry.ts 与本文件
  *              一起打包进 client.js（无 EXPORT-GUARD 拼接，旧 hack 已废除）。
  * 因此本文件必须是 Node 与浏览器都能安全求值的纯函数模块（无 I/O、无 DOM）。
  *

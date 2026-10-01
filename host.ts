@@ -168,7 +168,7 @@ export const RESCUE_SOURCE_KIND_KEY: "plugin:session-rescue" = RESCUE_SOURCE_KIN
  *  原型键无从命中）处理——那里才是外部输入面。
  *  E2：闭合集之外的 kind 一律**抛错**，绝不静默回退到任何一份 approved 文案
  *  （错文案比不发危害更大，而调用方已无 null 分支可走）。
- *  文案表由调用点经 `hostMessages(runtime)` 取（语言随官方 locale 偏好走），
+ *  文案表由调用点经 `runtime.localeMessages()` 取（语言随官方 locale 偏好走、读一次即缓存），
  *  本函数只做 kind → 键的映射，不再持有字符串常量。 */
 export function textForKind(kind: string, messages: SessionRescueMessages): string {
   if (kind === "resume") {
@@ -189,12 +189,18 @@ export function textForKind(kind: string, messages: SessionRescueMessages): stri
  *  `value`。该条目未投影（宿主没装 client-locale，或它的 Config 一个 `.volatile()` 都没有）
  *  → `find` 取不到 → undefined → 中文默认；用户在「设置 → 常规」改语言后，下一次注入即
  *  新文案（不重启、不再开一个本包自己的 locale 设置项）。 */
+/** 已取到的 locale 偏好值 → 文案表。`hostMessages`（纯函数，测试直接 import）与 apply
+ *  侧那条带缓存的取用口共用这一条，故两边的语言口径逐字同源。
+ * @param described describe() 里 locale 那条的 value；undefined = 条目缺席（中文默认）。
+ * @returns 对应语言的消息表。
+ */
+function messagesForPreference(described: unknown): SessionRescueMessages {
+  return messagesFor(MESSAGES, resolveLocalePreference(described));
+}
+
 export function hostMessages(svc: HostCtx): SessionRescueMessages {
-  return messagesFor(
-    MESSAGES,
-    resolveLocalePreference(
-      svc.settings.describe().find((row) => row.ns === LOCALE_SETTINGS_NAMESPACE)?.value,
-    ),
+  return messagesForPreference(
+    svc.settings.describe().find((row) => row.ns === LOCALE_SETTINGS_NAMESPACE)?.value,
   );
 }
 
@@ -461,7 +467,8 @@ export interface HostCtx {
     ((
       event: "agent/disposed",
       listener: (payload: { agent?: { session?: { id?: unknown } } }) => void,
-    ) => unknown);
+    ) => unknown) &
+    ((event: "settings/document-updated", listener: (ns: unknown) => void) => unknown);
 }
 
 /** 对象守卫（本文件通用防御）：typeof 收窄为 Record 而不经断言。 */
@@ -739,6 +746,12 @@ interface ApplyRuntime {
   /** 投影读口：`ctx.sessionProjections` 到位时由 inject 回调装上（缺席/迟到 ⇒
    *  undefined ⇒ 三处判定走回退扫描）。装箱同 msgSeq 那批：回调晚于本对象构造。 */
   facts: { value: FactsReader | undefined };
+  /** 本包 host 文案表（语言随官方 locale 偏好走）。apply 内建的**带缓存**取用口：
+   *  跨命名空间读只剩 settings.describe() 一条路，而它对每个活跃条目都要
+   *  schema.toJSON() + JSON.stringify 算 revision 再投影三份。`hostMessages` 保持纯函数
+   *  （`textForKind` 那族单测直接 import 它断言语言选取），缓存只挂在 apply 这一侧，
+   *  失效靠宿主推送的 `settings/document-updated`。 */
+  localeMessages: () => SessionRescueMessages;
 }
 
 /** 一条挂起的续跑快照（断连窗口内保留，重连后按原 fireAt 恢复）。 */
@@ -1289,7 +1302,7 @@ function resumeAfterReconnect(runtime: ApplyRuntime): void {
       // kind 恒为 RescueKind（待办由 scheduler 进程内产生，无持久化/跨版本反序列化），
       // textForKind 的返回类型因此收敛为 `string`：调用方不再需要 null 降级分支
       // （这层的防御改在 textForKind 内部对闭合集之外的 kind 直接抛错）。
-      const text = textForKind(item.pending.kind, hostMessages(runtime.svc));
+      const text = textForKind(item.pending.kind, runtime.localeMessages());
       // 剩余时间走调度器注入时钟的 remainingMsFor(fireAt)（与 state 路由
       // 同一算式）。此前是 restorePending 之后再 `remainingMs(sessionId)` 读回——
       // restorePending 返回 true 即已把 pending 写进同一条记录，紧随其后的同步读
@@ -1454,7 +1467,7 @@ function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): vo
     agent,
     turn,
     kind: "resume",
-    text: hostMessages(runtime.svc).resumeText,
+    text: runtime.localeMessages().resumeText,
     chainDelayMs,
   });
 }
@@ -1501,7 +1514,7 @@ function handleCompletedTurn(
     return;
   }
   // 总线沉淀：带着未闭合待办结束回合（等用户/goal 驱动的合法收尾不计）。
-  const messages = hostMessages(runtime.svc);
+  const messages = runtime.localeMessages();
   reportLesson(runtime, {
     category: "unfinished-turn",
     signature: "open-todos",
@@ -1572,11 +1585,14 @@ function handleAgentStatus(
       );
       return;
     }
+    // 文案一次取全：这一分支要用两处（lesson detail + 续跑正文），拆成两次调用
+    // 只会让同一回合里读两遍同一张表。
+    const messages = runtime.localeMessages();
     // 总线沉淀：输出截断（provider 维度签名——长输出任务撞顶是可改进的工作方式问题）。
     reportLesson(runtime, {
       category: "max-tokens",
       signature: agent.options?.provider ?? "unknown",
-      detail: hostMessages(runtime.svc).maxTokensLessonDetail,
+      detail: messages.maxTokensLessonDetail,
       agent,
       turn: review.lastTurn,
     });
@@ -1584,7 +1600,7 @@ function handleAgentStatus(
       agent,
       turn: review.lastTurn,
       kind: "continue",
-      text: hostMessages(runtime.svc).continueText,
+      text: messages.continueText,
     });
     return;
   }
@@ -2153,6 +2169,17 @@ function apply(ctx: Context, config: PluginConfig): void {
   const csrf = randomUUID();
   // per-apply 写操作令牌；state GET 下发，POST 回填校验
   const requestRetryCounts = new Map<string, number>();
+  // locale 偏好读一次即缓存：跨命名空间读只剩 describe() 一条路，而它对每个活跃条目
+  // 都要 schema.toJSON() + JSON.stringify 算 revision 再投影 value/base/user 三份。
+  // 失效链：写配置 → app-boot/config-reload → SettingsForms invalidate() → 微任务里
+  // describe() → 对 raw 变化的条目 emit('settings/document-updated', ns, revision)。
+  let cachedPreference: unknown = undefined;
+  let hasCachedPreference = false;
+  svc.on("settings/document-updated", (ns: unknown) => {
+    if (ns === LOCALE_SETTINGS_NAMESPACE) {
+      hasCachedPreference = false;
+    }
+  });
   const runtime: ApplyRuntime = {
     svc,
     config,
@@ -2165,6 +2192,18 @@ function apply(ctx: Context, config: PluginConfig): void {
     suspendedSnapshots: { value: [] },
     transientPasses: { value: [] },
     facts: { value: undefined },
+    // **缺席不缓存**：locale 条目可能晚于本条目才到位，缓存一次缺席就把语言跟随永久
+    // 钉死——代价只是缺席时每次取用多一次 describe()。
+    localeMessages: (): SessionRescueMessages => {
+      if (!hasCachedPreference) {
+        const row = svc.settings.describe().find((item) => item.ns === LOCALE_SETTINGS_NAMESPACE);
+        if (row !== undefined) {
+          cachedPreference = row.value;
+          hasCachedPreference = true;
+        }
+      }
+      return messagesForPreference(hasCachedPreference ? cachedPreference : undefined);
+    },
   };
 
   // 回合事实投影（把「agent/status→idle 每次全量 readEvents 是 O(n)」这条发现收口）：

@@ -9,6 +9,7 @@
     "url": "git+https://github.com/JayYuen666/dsh-session-rescue.git"
   },
   "files": [
+    "icon.svg",
     "host.js",
     "client.js",
     "cordis.patch.yml"
@@ -93,9 +94,7 @@
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitest/coverage-v8": "catalog:",
-    "esbuild": "^0.28.2",
     "eslint-plugin-sonarjs": "catalog:",
-    "fallow": "catalog:",
     "happy-dom": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
@@ -115,6 +114,7 @@
       "optional": true
     }
   },
+  "icon": "icon.svg",
   "engines": {
     "dsh": ">=0.2.0-rc.2"
   },

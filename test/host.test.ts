@@ -20,6 +20,10 @@ const RESUME = "/_dsh/session-rescue/resume";
 const TURN_START_EVENT = "turn/start";
 const USER_MESSAGE_EVENT = "user/message";
 const AGENT_ERROR_EVENT = "agent/error";
+/** 设置文档变更事件名：locale 偏好缓存据此失效，宿主按命名空间逐条推送。 */
+const SETTINGS_UPDATED = "settings/document-updated";
+/** 本包的 locale 命名空间（官方 client-locale 那条设置行投影出来的 ns）。 */
+const LOCALE_NS = "locale";
 const AGENT_STATUS_EVENT = "agent/status";
 const MAX_TOKENS_REASON = "max-tokens";
 
@@ -369,6 +373,12 @@ function createMockCtx(): MockCtx {
   return ctx;
 }
 
+/** 假件把注入记在 followupCalls[0]，注入正文取其首条 text。 */
+function injectTextOf(agent: MockAgent): string {
+  const call = agent.followupCalls[0] as { content: { text: string }[] };
+  return call.content[0]?.text ?? "";
+}
+
 function makeAgent(
   id: string,
   provider?: string,
@@ -419,6 +429,16 @@ function openRescueTurn(agent: MockAgent, turn: number): void {
 function payload(agent: MockAgent, turn: number, failure: unknown): Record<string, unknown> {
   const err = failure === undefined || failure === null ? null : { failure };
   return { agent, turn, step: 1, error: err };
+}
+
+/** 走一次「agent/error → 自动续跑注入」，回注入正文。两个 locale 缓存用例共用这一条：
+ *  会话 id 是唯一的自由度（换会话避开冷却/配额），其余路径完全同形。 */
+function runRescueInjectText(ctx: MockCtx, sessionId: string): string {
+  const agent = makeAgent(sessionId, "tokenrouter");
+  register(ctx, agent);
+  ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
+  ctx.tick();
+  return injectTextOf(agent);
 }
 
 function makeRes(): {
@@ -743,6 +763,72 @@ describe("调度与触发", () => {
       "kind 须是本插件的 producer-owned 串（与读回侧 openedBySource 同一身份）",
     );
     assert.equal(source["plugin"], undefined, "退役包装的 plugin 字段不得再出现");
+  });
+
+  it("locale 偏好读一次即缓存：重复判定不重复 describe，推送失效信号后才重读", () => {
+    // 注入正文经 runtime.localeMessages() 取，而跨命名空间读只剩 describe() 一条路
+    // （它对每个活跃条目都要 schema.toJSON() + JSON.stringify 算 revision）。
+    ctx.localePreference = "zh-CN";
+    let describeCalls = 0;
+    const base = ctx.settings.describe;
+    ctx.settings.describe = (): { ns: string; value: unknown }[] => {
+      describeCalls += 1;
+      return base();
+    };
+
+    assert.match(runRescueInjectText(ctx, "s-warm"), /一/u, "首次判定取到中文");
+    const warm = describeCalls;
+    assert.ok(warm > 0, "首次判定读了 describe");
+
+    // 缓存已捂热：换一个会话再走同一路，不该再读。
+    assert.match(runRescueInjectText(ctx, "s-next"), /一/u, "第二个会话仍走缓存");
+    assert.equal(describeCalls, warm, "缓存捂热后不再读 describe()");
+
+    ctx.fire(SETTINGS_UPDATED, "llm-pi-ai");
+    assert.match(runRescueInjectText(ctx, "s-other-ns"), /一/u, "别的命名空间变更后仍走缓存");
+    assert.equal(describeCalls, warm, "别的命名空间变更不误伤本包的缓存");
+
+    // 宿主推 locale 失效 → 下一趟重读一次；描述符此刻还是 zh-CN。
+    ctx.fire(SETTINGS_UPDATED, LOCALE_NS);
+    assert.match(
+      runRescueInjectText(ctx, "s-invalidated"),
+      /一/u,
+      "失效后重读到的是当时的描述符（仍中文）",
+    );
+    assert.equal(describeCalls, warm + 1, "locale 失效后重读一次");
+
+    // 描述符真变了，宿主再推一次 → 文案跟着换语言。
+    ctx.localePreference = "en-US";
+    ctx.fire(SETTINGS_UPDATED, LOCALE_NS);
+    assert.doesNotMatch(
+      runRescueInjectText(ctx, "s-switched"),
+      /[一-鿿]/u,
+      "重读后注入正文换成英文",
+    );
+    assert.equal(describeCalls, warm + 2, "换语言那趟又读了一次");
+  });
+
+  it("缺席不缓存：locale 条目迟到时每趟都重读，语言不会被永久钉死", () => {
+    // localePreference 未设 = 官方 client-locale 那条目没被投影 → find 取不到行。
+    // 缓存一次缺席会把语言跟随永久钉死成中文，故缺席期间每趟都重读。
+    let describeCalls = 0;
+    const base = ctx.settings.describe;
+    ctx.settings.describe = (): { ns: string; value: unknown }[] => {
+      describeCalls += 1;
+      return base();
+    };
+    assert.match(runRescueInjectText(ctx, "s-absent-1"), /一/u, "缺席时走中文");
+    const afterFirst = describeCalls;
+    assert.ok(afterFirst > 0, "缺席的那一趟读了 describe");
+    assert.match(runRescueInjectText(ctx, "s-absent-2"), /一/u, "缺席时第二次仍走中文");
+    assert.ok(describeCalls > afterFirst, "缺席不缓存：第二趟又读了一次");
+
+    ctx.localePreference = "en-US";
+    assert.doesNotMatch(
+      runRescueInjectText(ctx, "s-arrives"),
+      /[一-鿿]/u,
+      "条目到位后立即跟上语言",
+    );
   });
 
   it("英文偏好下走同一条调度路径 → 注入正文取自 en 字典", () => {

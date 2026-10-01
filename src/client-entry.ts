@@ -1,4 +1,4 @@
-// src/client-entry.ts — session-rescue client UI 主体（esbuild 打包入口）。
+// src/client-entry.ts — session-rescue client UI 主体（rolldown 打包入口）。
 // 打包：pnpm build:client → build-client.mjs 把本文件 + lib/transcript.ts 一起
 // 打成 client.js（window.__ModuleLoader__.load UMD factory）。react 外部化：
 // factory 的 require('react') 由模块系统提供。React 只用 createElement；
