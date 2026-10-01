@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-session-rescue",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Session rescue for dsh web: generalized auto-resume on transient model failures (host, TypeScript) + edit-resend / retry / queue-withdraw / stop-and-reask / max-tokens-continue / settings card (client, built artifact). Replaces dsh-chat-recovery and baidu-429-auto-resume.",
   "license": "MIT",
   "author": "JayYuen",
@@ -48,7 +48,7 @@
   "dependencies": {
     "@deepseek-ai/dsh-brand": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
-    "@jayyuen66/dsh-plugin-shared": "^1.0.0",
+    "@jayyuen66/dsh-plugin-shared": "^0.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
