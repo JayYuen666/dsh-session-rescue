@@ -4,3 +4,4 @@ client.js
 .tmp/
 host.js
 coverage/
+types/

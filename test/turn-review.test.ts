@@ -219,6 +219,40 @@ describe("reviewLastTurn — goal 驱动回合（避免与 goal 轮次双重注�
   });
 });
 
+describe("reviewLastTurn — Schedule 驱动回合（避免与官方定时提醒双重注入）", () => {
+  it("最后回合的首条 user 消息 source.kind=schedule → scheduleDrivenTurn=true", () => {
+    const result = reviewLastTurn([
+      turnStart(9),
+      userMsg({ kind: "schedule" }),
+      turnEnd(9, "completed"),
+    ]);
+    assert.equal(result.scheduleDrivenTurn, true);
+  });
+
+  it("普通用户消息 → scheduleDrivenTurn=false", () => {
+    const result = reviewLastTurn([
+      turnStart(9),
+      userMsg({ kind: "user", rpcId: "r1" }),
+      turnEnd(9, "completed"),
+    ]);
+    assert.equal(result.scheduleDrivenTurn, false);
+  });
+
+  it("goal 回合不算 schedule 驱动（两个身份互斥）", () => {
+    const result = reviewLastTurn([
+      turnStart(9),
+      userMsg({ kind: "goal", goalId: "g1", revision: 1, round: 2 }),
+      turnEnd(9, "completed"),
+    ]);
+    assert.equal(result.scheduleDrivenTurn, false);
+    assert.equal(result.goalDrivenTurn, true);
+  });
+
+  it("回合内没有 user/message → scheduleDrivenTurn=false", () => {
+    assert.equal(reviewLastTurn([turnStart(9), turnEnd(9, "completed")]).scheduleDrivenTurn, false);
+  });
+});
+
 describe("reviewLastTurn — 鲁棒性", () => {
   it("非数组输入 → 空结论", () => {
     const result = reviewLastTurn(undefined);

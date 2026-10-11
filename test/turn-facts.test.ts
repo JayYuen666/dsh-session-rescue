@@ -55,6 +55,7 @@ const DONE = { content: "b", status: "completed" };
 const GOAL = { kind: "goal", goalId: "g1", revision: 1, round: 2 };
 const USER = { kind: "user", rpcId: "r1" };
 const RESCUE = { kind: "plugin:session-rescue" };
+const SCHEDULE = { kind: "schedule" };
 
 /** 一轮干净的回合：start → opener → end。 */
 function round(turnNo: number, opener: unknown, reason = "completed"): Ev[] {
@@ -123,6 +124,14 @@ describe("投影 ≡ 旧扫描（干净日志）", () => {
     assert.equal(reviewFromFacts(state)?.goalDrivenTurn, true);
     assert.equal(reviewLastTurn(goalTurn).goalDrivenTurn, true);
     assertEquivalent(goalTurn);
+  });
+
+  it("schedule 回合：scheduleDrivenTurn 两侧同为 true", () => {
+    const scheduleTurn = round(1, SCHEDULE);
+    const state = foldEvents(scheduleTurn);
+    assert.equal(reviewFromFacts(state)?.scheduleDrivenTurn, true);
+    assert.equal(reviewLastTurn(scheduleTurn).scheduleDrivenTurn, true);
+    assertEquivalent(scheduleTurn);
   });
 
   it("本插件续跑回合开启：opener kind 两侧同为 plugin:session-rescue", () => {
@@ -414,6 +423,7 @@ describe("投影单元与状态形状", () => {
       todoUpdatedInTurn: false,
       awaitsUser: false,
       goalDrivenTurn: false,
+      scheduleDrivenTurn: false,
       aligned: true,
     });
     assert.equal(two.start, null, "turn/end 定稿后清空本回合累加器");

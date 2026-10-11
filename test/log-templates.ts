@@ -22,6 +22,8 @@ export const LOG_TEMPLATES: readonly string[] = [
   "dropped (disabled: plugin off or session toggle off)",
   "is goal-driven — continue suppressed",
   "is goal-driven — resume suppressed (goal-round-driver owns it)",
+  "is schedule-driven — continue suppressed",
+  "is schedule-driven — resume suppressed (dsh-schedule owns it)",
   "message sent",
   "message sent after reconnect",
   "ms cap — delegating to llm-retry",

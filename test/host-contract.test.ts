@@ -685,7 +685,7 @@ describe("载荷边界（防御式）", () => {
 });
 
 describe("用户中止/打断的回合不消耗配额，判定只在 agent/status 侧", () => {
-  // 为什么 agent/error 侧**没有**中止判定（item 10 核实结论，源码为证）：
+  // 为什么 agent/error 侧**没有**中止判定（源码为证）：
   //   packages/core/agent-loop/src/agent.ts 的 turn() 里 `catch` 先
   //   `throwError(error)` → emit('agent/error')，`finally` 才
   //   `session.append('turn/end', …)`；且 signal.aborted 分支直接 rethrow、
@@ -1047,7 +1047,7 @@ describe("webServer 路由方法守卫与 body 上限", () => {
     );
   });
 
-  it("retry-policy 原型键 preset 不得绕过 400 闸门（item 4）", async () => {
+  it("retry-policy 原型键 preset 不得绕过 400 闸门", async () => {
     const presets = ["constructor", "toString", "__proto__", "hasOwnProperty"];
     // 并发发起（循环内 await 被 no-await-in-loop 禁掉；四条 POST 之间无依赖）。
     const results = await Promise.all(
@@ -1187,7 +1187,7 @@ describe("resumeAfterReconnect 分支", () => {
 });
 
 // ── 审计修复回归：webServer 依赖 / 退避正确性 / 载荷防御 ───────────────────
-describe("webServer 依赖（item 3：路由归属方必须建立依赖而非只读一次）", () => {
+describe("webServer 依赖：路由归属方必须建立依赖而非只读一次", () => {
   it("webServer 后装载：依赖到位时补注册六条路由", () => {
     const ctx = createCtx({ webServer: false });
     applyPlugin(ctx);
@@ -1255,7 +1255,7 @@ const evt = (extra: Record<string, unknown>): unknown => ({
   signal: undefined,
 });
 
-describe("请求级退避正确性（item 7）", () => {
+describe("请求级退避正确性", () => {
   it("provider Retry-After 生效：退避取提供方时长而非固定阶梯", async () => {
     const ctx = createCtx();
     applyPlugin(ctx);

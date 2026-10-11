@@ -1,5 +1,5 @@
-// session-rescue host 半（TypeScript 版）：回合非正常收尾时的通用自动注入
-// （baidu-429-auto-resume 的通用化替代）+ client 状态/取消/会话开关 webServer 端点。
+// session-rescue host 半（TypeScript 版）：回合非正常收尾时的三类通用自动注入
+// （瞬时失败续跑 / 截断续写 / 待办未闭合补跑）+ client 状态/取消/会话开关 webServer 端点。
 //
 // 三类注入（各自独立的延迟/冷却/次数上限，互不跨类误拦）：
 //   - resume     ← agent/error 且 classifyFailure 判为瞬时（限流/5xx/超时/传输…）
@@ -7,7 +7,7 @@
 //   - unfinished ← 回合以 'completed' 收尾，但**本回合自己写的**待办清单仍未闭合
 //                  （结构化信号，见 lib/turn-review.ts；零文本猜测）
 //
-// 设计依据全部见计划「已验证 API 事实」表，要点：
+// 判据要点（改动任一条之前，先核对宿主实际交付的形状，别只信类型面）：
 //   - agent/error 是回合级终态（内置 dsh-llm-retry 已耗尽），只做转发决策；
 //   - 仅根会话；失败必须被 classifyFailure 判为瞬时；
 //   - 调度状态机在 lib/resume-scheduler.ts（单待办/限次/按 kind 独立的冷却）；
@@ -28,16 +28,16 @@
 //     投影（lib/turn-facts.ts，`stateOf` 同步水位读）；注册表缺席/迟到、opener 被窗口
 //     淘汰、或最后一条 turn/end 对不上它的 start 时，回退 `snapshotEvents()` 全量扫描。
 //     两条读法逐项同解，等价用例见 test/turn-facts.test.ts。
-//   - 设置面（0.1.7 起）是**隐式注册**的：命名空间 = profile 条目 id（`session-rescue`，
+//   - 设置面是**隐式注册**的：命名空间 = profile 条目 id（`session-rescue`，
 //     见 cordis.patch.yml），可编辑项由导出 `Config` 上的 `.volatile()` 决定，内置默认
-//     逐字段落在 `.default()`（不再有 `settings.register(ns, schema, { base })` 那层底座）。
+//     逐字段落在 `.default()`（本包不调 `settings.register`，也不交 `{ base }` 底座）。
 //     十三项**全部**要标 volatile：漏一项就从设置卡上静默消失，全漏则整条不被投影
 //     （写入抛 `has no volatile fields`）——那等于用户再也打不开续跑开关。读侧一律
 //     `config.<field>.get()`（见 settingsOf），跨命名空间读只剩 `settings.describe()`。
 //
 // 运行方式：dsh 的 cordis Loader 直接 import 本 .ts 文件（Node ≥22.18 类型剥离）。
 // 运行时值导入两枚：@deepseek-ai/dsh-brand（在 dependencies，产物留裸
-// 说明符；它只在 `brandString<MessageId>` 那一处用）与 schemastery，且 0.1.7 起必须是**宿主 fork** @deepseek-ai/schemastery：
+// 说明符；它只在 `brandString<MessageId>` 那一处用）与 schemastery，且必须是**宿主 fork** @deepseek-ai/schemastery：
 // 只有它的 resolve 会把标了 .volatile() 的字段包成 Volatile 引用（公共 schemastery@3.18.0
 // 既没有 .volatile()，解析出来的也仍是普通值，设置卡写进去的值永远读不到）。
 // @deepseek-ai/* 里另有**一处**值导入：`@deepseek-ai/dsh-brand` 的 `brandString`。注入消息
@@ -61,7 +61,7 @@ import type { Context, Events, Fiber, Volatile } from "@deepseek-ai/cordis";
 // 结构面全部钉回官方声明：`Agent`/`Inbox` 出自 @deepseek-ai/dsh-agent（安装态
 // lib/types/runtime-types.d.ts，Agent 的成员由 `declare module './types.ts'` 增强挂上：
 // options :141、session :143、inbox :145、status :147、followup :192），`Session` 出自
-// @deepseek-ai/dsh-session（lib/types/index.d.ts：id :122、header :118、snapshotEvents :192）。
+// @deepseek-ai/dsh-session（lib/types/index.d.ts：id :154、header :150、snapshotEvents :224）。
 // 这两个包都是**类型面**依赖（type-only + 一处 dsh-brand 值导入，见文件头）。
 import type { Agent, AgentRegistry, Inbox } from "@deepseek-ai/dsh-agent";
 import type { WebServer } from "@deepseek-ai/dsh-host-webserver";
@@ -88,7 +88,7 @@ import {
 import type { RescueFacts } from "./lib/turn-facts.ts";
 import { MESSAGES } from "./lib/messages.ts";
 import type { SessionRescueMessages } from "./lib/messages.ts";
-// host 侧文案语言跟官方 locale 插件的偏好同源：0.1.7 起跨命名空间只有 `settings.describe()`
+// host 侧文案语言跟官方 locale 插件的偏好同源：跨命名空间只有 `settings.describe()`
 // 一条路，挑出 `locale` 那一条的 value（该条目未被投影即中文）。
 import {
   LOCALE_SETTINGS_NAMESPACE,
@@ -103,8 +103,9 @@ import {
 // guardBody 覆盖「跨域 → CSRF → 读 body（Buffer 累积、UTF-8 字节上限）→
 // 413/400」整条 POST 前置链，本包 retry-policy 端点即用它。
 import { sendJson, queryParam, checkCsrf, guardBody } from "@jayyuen66/dsh-plugin-shared/lib/http";
-// 信任闸门：六条路由 handler 的第一条语句。
-import { guardTrust } from "@jayyuen66/dsh-plugin-shared/lib/trust";
+// 信任闸门：六条路由 handler 的第一条语句。绑定地址的「是否非回环」也由它给出谓词
+// （isNonLoopbackBindHost），本文件不再自己比字面量。
+import { guardTrust, isNonLoopbackBindHost } from "@jayyuen66/dsh-plugin-shared/lib/trust";
 // lesson bus 收口：lesson-loop 的 report/pass 已异步落库（返回 Promise），只包一层同步
 // try/catch 抓不到 rejection——失败既被静默吞掉又给宿主进程留一枚未处理拒绝。
 // 同步抛错与异步拒绝共用这一个出口（三个包的调用点降级口径一致）。
@@ -127,6 +128,13 @@ const PI_AI_NS = "llm-pi-ai";
  *  `source: { kind: 'goal', goalId, revision, round }`）。该类回合由 goal 机制
  *  自己驱动续跑，本插件三类注入都要让路。 */
 const GOAL_SOURCE_KIND = "goal";
+
+/** 官方 Schedule 开轮时的 source.kind（packages/schedule/schedule/src/runtime.ts：
+ *  `createUserMessage({ …, source: { kind: 'schedule' } })` 后 `agent.followup`）。
+ *  0.2.1-alpha.1 起 `@deepseek-ai/dsh-schedule` 进入 base bundle 的默认 Web profile，
+ *  与 goal 同为「外部机制开的回合」：本插件三类注入都要让路，否则提醒回合会被
+ *  「未闭合待办」判据读成一次失败收尾，再补一条本没人要的救援消息。 */
+const SCHEDULE_SOURCE_KIND = "schedule";
 
 /** 本插件注入消息的 producer-owned source.kind。0.1.7 的 V4 准入拒收旧的
  *  `{ kind: 'plugin', plugin }` 包装（session-format-v3-to-v4 message-sources.ts
@@ -184,8 +192,8 @@ export function textForKind(kind: string, messages: SessionRescueMessages): stri
 }
 
 /** 取本包 host 文案表：语言与官方 dsh-client-locale 的偏好同源（该包在 settings 的
- *  `locale` 命名空间里持久化 `preference`）。0.1.7 起跨命名空间读只剩 `describe()`
- *  一条路（`settings.get(ns)` 已随隐式注册一起移除）：挑出 `ns === 'locale'` 那一条的
+ *  `locale` 命名空间里持久化 `preference`）。跨命名空间读只有 `describe()`
+ *  一条路（`settings.get(ns)` 随隐式注册一起退场）：挑出 `ns === 'locale'` 那一条的
  *  `value`。该条目未投影（宿主没装 client-locale，或它的 Config 一个 `.volatile()` 都没有）
  *  → `find` 取不到 → undefined → 中文默认；用户在「设置 → 常规」改语言后，下一次注入即
  *  新文案（不重启、不再开一个本包自己的 locale 设置项）。 */
@@ -233,9 +241,9 @@ const MAX_TRANSIENT_PASS_PENDING = 64;
 
 /**
  * 会话事件流的本插件读面：**官方 `Session` 的成员投影**
- * （@deepseek-ai/dsh-session 安装态 `lib/types/index.d.ts`：`get id(): SessionId` :122、
- * `readonly header: SessionHeader` :118、
- * `snapshotEvents(fromSeq?: SessionLogOffset, toSeqExclusive?: SessionLogOffset): readonly SessionEvent[]` :192）。
+ * （@deepseek-ai/dsh-session 安装态 `lib/types/index.d.ts`：`get id(): SessionId` :154、
+ * `readonly header: SessionHeader` :150、
+ * `snapshotEvents(fromSeq?: SessionLogOffset, toSeqExclusive?: SessionLogOffset): readonly SessionEvent[]` :224）。
  * 三个成员的形状一位都不再本地复述——官方换形状就编译不过。
  *
  * `Session` 是**类面**（`private log` 等私有字段让它按名义比较），所以只 `Pick` 成员、
@@ -247,14 +255,14 @@ const MAX_TRANSIENT_PASS_PENDING = 64;
  *   写成可缺失会在五处读取上各凭空长出一条宿主永不可能交付的兜底分支，而本包的
  *   100% 分支门槛正好不收这种测不到的分支。
  *   品牌是**单向**的：`SessionId` 读出来当 string 用（Map/Set 键、日志插值）不受影响。
- * - `header` / `snapshotEvents` 官方都是必选成员（:118 / :192，:110-117 还写明宿主自己
+ * - `header` / `snapshotEvents` 官方都是必选成员（:150 / :224，:142-149 还写明宿主自己
  *   new 的 Session 一定合成一份最小 header 故 `header` 恒在位），但本面收的是**跨进程
  *   边界送来的宿主对象**，在位与否只能运行时判（`hasEventReader` 的 typeof 守卫、
  *   `agent.session.header?.cwd`）。官方类型描述宿主**承诺**什么，守卫负责宿主**交付**什么。
  *   `SessionHeader.cwd` 官方即 `readonly cwd?: string`（types.d.ts:69），读法不变。
  *
  * `snapshotEvents` 的返回就此绑成官方 `readonly SessionEvent[]`（那枚 `@deprecated`
- * "new calls are prohibited" :186-187 也一并进来，见 readEvents 里带理由的 lint 豁免）。
+ * "new calls are prohibited" :218-219 也一并进来，见 readEvents 里带理由的 lint 豁免）。
  * 它现在只服务**回退扫描**（主路径是 lib/turn-facts.ts 的投影读）；返回仍交回
  * `readonly unknown[]` 并逐字段守卫（lib/turn-facts.ts 的 `typeOf` / `numIn` /
  * `sourceKindOf`）：日志条目跨版本缺字段是真事，判据面不能因为"类型说必存在"就省掉守卫。
@@ -390,12 +398,12 @@ export type RequestErrorAction = { kind: "retry" } | undefined;
 
 /**
  * webServer 服务的本插件读面 = 官方 `WebServer`（installed
- * @deepseek-ai/dsh-host-webserver/lib/types/index.d.ts:67 起，cordis `Service` 子类 + 一整套
- * private 路由表字段 → 名义比较）的 `register` **方法面投影**（:90）。
+ * @deepseek-ai/dsh-host-webserver/lib/types/index.d.ts:119 起，cordis `Service` 子类 + 一整套
+ * private 路由表字段 → 名义比较）的 `register` **方法面投影**（:157）。
  * 旧镜像自己抄了一枚 `type WebRouteKind = "exact" | "prefix"`（注释还指向 harness 源码的
  * 行号）并逐个重述 `WebRoute` 的三位——官方那张表改 kind 或 handler 形状时，抄本会安静地
- * 继续编译通过。现在路由字面量直接受官方 `WebRoute`（同文件 :33-39，`kind` 是官方
- * `WebRouteKind` :31）约束，disposer 也按官方 `() => void` 收。
+ * 继续编译通过。现在路由字面量直接受官方 `WebRoute`（同文件 :34-40，`kind` 是官方
+ * `WebRouteKind` :32）约束，disposer 也按官方 `() => void` 收。
  */
 export type RescueWebServer = Pick<WebServer, "register" | "host">;
 
@@ -554,7 +562,7 @@ function checkRescueCsrf(req: IncomingMessage, token: string): boolean {
 }
 
 /** 守卫收窄到的那一份：`snapshotEvents` 已确认在位。官方把它记成必选成员
- *  （@deepseek-ai/dsh-session lib/types/index.d.ts:192），本面按可缺失收（见
+ *  （@deepseek-ai/dsh-session lib/types/index.d.ts:224），本面按可缺失收（见
  *  SessionEventsLike 的 Partial）——这一条守卫同时挡「整个面缺席」与「宿主没实现」。
  *  谓词钉的是**成员**而不是整面，调用方因此既不必再判一次、也不经断言、更不必 `.call`。 */
 type SessionWithReader = SessionEventsLike & {
@@ -565,17 +573,17 @@ function hasEventReader(session: SessionEventsLike | undefined): session is Sess
   return typeof fieldOf(session, "snapshotEvents") === "function";
 }
 
-/** 读会话事件流的统一入口（dsh 0.1.2-alpha.4：snapshotEvents() 取代 Session.events）。
+/** 读会话事件流的统一入口（宿主交出来的面是 `snapshotEvents()`）。
  *  session 缺失 / 未实现 / 返回非数组 → 空数组（触发前校验宁可误 veto 也不误发，
- *  判定失败优于崩溃）。item 8：直接返回宿主数组，调用方就地倒扫，不复制事件日志。
- *  官方零参即「从日志首读到末尾」（index.d.ts:188-189 的 @param 注记：fromSeq 缺省为日志
+ *  判定失败优于崩溃）。直接返回宿主数组，调用方就地倒扫，不复制事件日志。
+ *  官方零参即「从日志首读到末尾」（index.d.ts:220 的 @param 注记：fromSeq 缺省为日志
  *  起点），故本包不给 `SessionLogOffset` 造品牌——包内唯一的 brand 值导入是注入 id 那位
  *  `brandString<MessageId>`（见文件头）。 */
 function readEvents(session: SessionEventsLike | undefined): readonly unknown[] {
   if (!hasEventReader(session)) {
     return [];
   }
-  // 官方 snapshotEvents 自带 @deprecated（index.d.ts:186-187 "new calls are prohibited"）：
+  // 官方 snapshotEvents 自带 @deprecated（index.d.ts:218-219 "new calls are prohibited"）：
   // 把返回形状钉回官方成员之后，lint 的 typescript/no-deprecated 才**第一次**看得见它——
   // 旧手抄镜像没有那枚标记，那条绿一直是假的。如今这条读只剩**回退**用途（三类判定的主路径
   // 是 lib/turn-facts.ts 的投影读）：注册表缺席/迟到（未装 dsh-session-projection 的 profile、
@@ -590,7 +598,7 @@ function readEvents(session: SessionEventsLike | undefined): readonly unknown[] 
 
 /**
  * `ctx.sessionProjections` 的本包读面：官方 `SessionProjectionRegistry` 的成员投影
- * （installed lib/types/index.d.ts：host-only `register(definition)` 第二重载 :150 附近、
+ * （installed lib/types/index.d.ts：host-only `register(definition)` 第二重载 :159、
  * `stateOf(session, key)` :167-175）。`stateOf` 的第一参官方钉名义类 `Session`，本包的
  * 会话替身永远满足不了 ⇒ 这里按 `unknown` 收，返回值再经 `asFacts` 过一次 stateSchema
  * （wukil-plugins/wukil-dev-tools.ts 的 ProjectionsRegistry 同形）。
@@ -630,7 +638,7 @@ function reviewOf(runtime: ApplyRuntime, agent: RescueAgent): TurnReview {
  * 该回合在窗口内 ⇒ 增量折叠的当前态（O(1) 读）；否则回退全量扫描（注册表缺席/迟到、
  * opener 被窗口淘汰）。两条读法在同一串事件上逐项同解，判据见 lib/turn-facts.ts 文件头
  * 与 test/turn-facts.test.ts。读回的是会话事件流里的持久 source，与注入点发出的是同一个
- * producer-owned kind（0.1.7 起不再有 `{ kind: 'plugin', plugin }` 包装可比）。
+ * producer-owned kind（官方没有 `{ kind: 'plugin', plugin }` 包装可比）。
  */
 function openerKindOf(runtime: ApplyRuntime, agent: RescueAgent, turn: number): string | null {
   const state = factsOf(runtime, agent.session);
@@ -653,8 +661,8 @@ export interface RescueInbox {
   readonly nextStep?: Inbox["nextStep"] | undefined;
 }
 
-/** Inbox 是否有待处理消息（0.1.5-alpha.1 起 Inbox 收敛为类型接口，hasPending 不再是公共
- *  API → 待处理判定读两个待办队列）。 */
+/** Inbox 是否有待处理消息（Inbox 是类型接口，`hasPending` 不在公共
+ *  API 上 → 待处理判定读两个待办队列）。 */
 function inboxHasPending(inbox: RescueInbox | null | undefined): boolean {
   if (inbox === null || inbox === undefined) {
     return false;
@@ -734,7 +742,7 @@ interface ApplyRuntime {
   scheduler: ResumeScheduler;
   disabledSessions: Set<string>;
   requestRetryCounts: Map<string, number>;
-  /** 在途的请求级退避 sleep 释放器集合（item 7）：这些定时器不属于 scheduler，
+  /** 在途的请求级退避 sleep 释放器集合：这些定时器不属于 scheduler，
    *  disposeAll() 管不到它们，插件卸载必须逐个回收，否则卸载后还会唤醒注入。 */
   backoffs: Set<() => void>;
   csrf: string;
@@ -1073,9 +1081,9 @@ async function sleepWithAbort(
 
 /** 本次重试该等多久（ms）。返回 null = 提供方要求等待超过本插件封顶，等不起，
  *  直接交回 next()（官方 llm-retry 的策略面 maxDelayMs 更大，由它接手）。
- *  item 7：优先服从 provider 的 Retry-After（harness llm-retry/src/index.ts:227
- *  同规则），此前固定阶梯把它完全忽略——429 带 `Retry-After: 120` 时我们仍在
- *  2s 后重发，等于对着限流窗口继续砸请求。
+ *  优先服从 provider 的 Retry-After（harness llm-retry/src/index.ts:227 同规则），
+ *  固定阶梯不得盖过它——429 带 `Retry-After: 120` 时若仍按 2s 重发，等于对着
+ *  限流窗口继续砸请求。
  *  阶梯与封顶都由 entry config 交进来（cap 与 providerRetryAfterMs 同单位 ms），
  *  函数不再回读模块常量——常量只剩 schema 的 `.default()` 一处。 */
 function requestBackoffMs(
@@ -1107,10 +1115,13 @@ function requestBackoffMs(
   return pickedMs;
 }
 
-/** agent/request-error：请求级 429 自动重试（不打断模型运行）。waterfall
- *  返回 {kind:'retry'} → agent-loop 同一回合重发；退避优先服从 provider
- *  Retry-After，否则走固定阶梯，超出 REQUEST_RETRY_MAX 交给 llm-retry（让官方
- *  兜底）。与 agent/error（回合级续跑）互补：请求级先重试，耗尽仍失败才续跑。
+/** agent/request-error：**无重试策略的 provider** 上的 429 自动重试（不打断模型运行）。
+ *  waterfall 返回 {kind:'retry'} → agent-loop 同一回合重发；退避优先服从 provider
+ *  Retry-After，否则走固定阶梯，超出封顶则委托 next()。
+ *
+ *  与官方 llm-retry 的分工由宿主解析出的 `retryPolicy` 划线：有策略 → 委托，本函数不参与；
+ *  无策略（`retryPolicy === undefined`）→ 官方自己也会 `return next()`，本函数的阶梯是唯一
+ *  的兜底。与 agent/error（回合级续跑）互补：请求级先重试，耗尽仍失败才续跑。
  *  等待中 signal 中止 → 委托 next() 终结，不重发**也不占重试名额**。 */
 async function handleRequestError(
   runtime: ApplyRuntime,
@@ -1138,6 +1149,15 @@ async function handleRequestError(
   if (!isRateLimit) {
     return next();
   }
+  // 让位给官方 llm-retry：宿主已经为本次请求解析出 retryPolicy 时，重试归它。
+  //
+  // 两条链挂在同一个 waterfall 上，先返回 {kind:'retry'} 的那个赢，后注册的永远轮不到。
+  // 本插件的固定阶梯因此只能当**无策略 provider 的兜底**：不主动让位，等于把官方那套
+  // （retryableCodes 过滤、providerRetryAfterMs、抖动、写入持久日志的 llm/retry 事件）
+  // 整体顶掉，而设置卡上的 `default` 预设（unset）恰好就是「无策略」——那条路仍然归本包。
+  if (payload.retryPolicy !== undefined) {
+    return next();
+  }
   const sessionId = agent.session.id;
   const retryCount = runtime.requestRetryCounts.get(sessionId) ?? 0;
   if (retryCount >= cfg.requestRetryMax) {
@@ -1157,8 +1177,8 @@ async function handleRequestError(
     return next();
   }
   // 退避等待：第 n 次重试取阶梯第 n 档；等待中回合被中止（用户停止/会话关闭）
-  // → 委托 next() 终结，不重发。名额只在真的要重发时才占用（item 7：原先
-  // 先 ++ 再判 abort，白等一场还要烧掉一次配额）。
+  // → 委托 next() 终结，不重发。名额只在真的要重发时才占用：先 ++ 再判 abort 的话，
+  // 白等一场还要烧掉一次配额。
   if (delayMs > 0) {
     const abortedDuringWait = await sleepWithAbort(
       runtime.svc.timer,
@@ -1458,6 +1478,14 @@ function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): vo
     );
     return;
   }
+  // Schedule 提醒回合同理：回合由官方定时任务开启，本插件无从判断这次失败该不该由自己
+  // 续跑——提醒本身就是用户安排的动作，不是被打断的工作。
+  if (opener === SCHEDULE_SOURCE_KIND) {
+    console.info(
+      `[session-rescue] ${sessionId}: turn ${turn} is schedule-driven — resume suppressed (dsh-schedule owns it)`,
+    );
+    return;
+  }
   // 链式例外：失败轮由本插件上次 fire 开启 → 不受冷却拦截，改按
   // max(resumeDelayMs, chainResumeDelayMs) 重调度（跨出限流窗口）。
   // 曾经这里是 `|| CHAIN_RESUME_DELAY_MS_DEFAULT`：schema 的 min(1000) 让 0 不可表示
@@ -1479,6 +1507,7 @@ interface CompletedTurnOptions {
   todoUpdatedInTurn: boolean;
   awaitsUser: boolean;
   goalDrivenTurn: boolean;
+  scheduleDrivenTurn: boolean;
 }
 
 function handleCompletedTurn(
@@ -1513,7 +1542,12 @@ function handleCompletedTurn(
   if (opts.goalDrivenTurn) {
     return;
   }
-  // 总线沉淀：带着未闭合待办结束回合（等用户/goal 驱动的合法收尾不计）。
+  // 官方 Schedule 开的回合同理：提醒本身就是用户安排的动作，它带来的未闭合待办不该被
+  // 读成「模型自己撂下没做完」。
+  if (opts.scheduleDrivenTurn) {
+    return;
+  }
+  // 总线沉淀：带着未闭合待办结束回合（等用户/goal/schedule 驱动的合法收尾不计）。
   const messages = runtime.localeMessages();
   reportLesson(runtime, {
     category: "unfinished-turn",
@@ -1585,6 +1619,12 @@ function handleAgentStatus(
       );
       return;
     }
+    if (review.scheduleDrivenTurn) {
+      console.info(
+        `[session-rescue] ${sessionId}: turn ${review.lastTurn} is schedule-driven — continue suppressed`,
+      );
+      return;
+    }
     // 文案一次取全：这一分支要用两处（lesson detail + 续跑正文），拆成两次调用
     // 只会让同一回合里读两遍同一张表。
     const messages = runtime.localeMessages();
@@ -1613,6 +1653,7 @@ function handleAgentStatus(
     todoUpdatedInTurn: review.todoUpdatedInTurn,
     awaitsUser: review.awaitsUser,
     goalDrivenTurn: review.goalDrivenTurn,
+    scheduleDrivenTurn: review.scheduleDrivenTurn,
   });
 }
 
@@ -1632,7 +1673,7 @@ function handleAgentStatus(
 // 用 Map 而不是字面量 Record：preset 名来自 POST body（不可信输入），
 // `RETRY_PRESETS["constructor"]` / `["toString"]` / `["__proto__"]` 在对象表上
 // 都**不是** undefined —— 400 闸门被原型键绕过，`value: undefined` 被发给
-// settings.mutate 并回 200（item 4）。Map.get 只看自有条目，原型链无从命中。
+// settings.mutate 并回 200。Map.get 只看自有条目，原型链无从命中。
 type RetryPreset =
   | { readonly op: "set"; readonly value: Record<string, unknown> }
   | { readonly op: "unset" };
@@ -1695,9 +1736,9 @@ function piAiProviders(runtime: ApplyRuntime): Record<string, { retryPolicy?: un
   }
 }
 
-/** retry-policy 的异步体（item 6）。跨域 → CSRF → 读 body → 413/400 整条前置链
- *  交给 shared `guardBody`：原先手写 `req.on("data"/"end")` 只监听这两个事件，
- *  流 error/abort 没有任何路径（响应就那么挂着），且 `raw += String(chunk)` 会把
+/** retry-policy 的异步体。跨域 → CSRF → 读 body → 413/400 整条前置链
+ *  交给 shared `guardBody`：只监听 `req.on("data"/"end")` 两个事件时，流 error/abort
+ *  没有任何路径（响应就那么挂着），且 `raw += String(chunk)` 会把
  *  跨 chunk 边界的多字节字符解成 U+FFFD —— 仍是合法 JSON，静默写坏用户配置。
  *  shared 版按 UTF-8 字节累积 Buffer、先查 content-length 再收流。
  *  本函数总（total）：唯一的抛错点 settings.mutate 已就地 catch 成 500，其余
@@ -2030,8 +2071,12 @@ function registerRoutesInto(runtime: ApplyRuntime, disposers: (() => void)[]): v
     // 不注册任何路由（功能面退化为无 UI），也不留释放器。
     return;
   }
-  // 非回环服务面唯一的可读信号（installed dsh-host-webserver d.ts `:50`/`:83`）。
-  const servingNonLoopback = webServer.host === "0.0.0.0";
+  // 非回环服务面的判据。宿主 0.2.1-alpha.2 起 `Config.host` 是任意本机接口 IP 字面量，通配
+  // 地址（0.0.0.0、`::` 及其映射形）在载入时就被拒（installed dsh-host-webserver
+  // lib/types/index.d.ts：`Config.host` :61-70，口径对齐官方 `isLoopbackHost` :100）。旧的
+  // `host === "0.0.0.0"` 因此恒为 false：真绑到网卡地址服务局域网时，六条路由会被信任闸门
+  // 整片拒成 403。谓词取 shared 的那份——本包对 @deepseek-ai/* 一律 type-only，不值导入。
+  const servingNonLoopback = isNonLoopbackBindHost(webServer.host);
   const add: AddRescueRoute = (route) => {
     disposers.push(webServer.register(route));
   };
@@ -2043,9 +2088,9 @@ function registerRoutesInto(runtime: ApplyRuntime, disposers: (() => void)[]): v
   registerRetryPolicyRoute(runtime, servingNonLoopback, add);
 }
 
-/** webServer 路由注册入口（曾内嵌于 apply 的 ctx.effect，拆出降 apply 行数）。
+/** webServer 路由注册入口（独立成模块，apply 只留装配与订阅）。
  *  由 apply 的 `ctx.inject(["webServer"], …)` 触发：webServer 到位（或重启换实例）
- *  时才会跑到这里（item 3）。
+ *  时才会跑到这里。
  *  register() 抛错时把已挂上的路由全部注销再上抛——不留"半个插件"的孤儿路由
  *  （它们会一直占着这些 path，而拿不到注销器的我们再也没机会释放它们），
  *  也不静默吞错：注册失败必须可见。 */
@@ -2235,13 +2280,17 @@ function apply(ctx: Context, config: PluginConfig): void {
     dropTransientPasses(runtime, sid);
   });
 
-  // ── 请求级 429 自动重试（用户裁决：所有平台 429 限流都要自动
-  //    重试、不打断模型运行；后来补退避）。agent/request-error 是
+  // ── 请求级 429 自动重试（口径：所有平台的 429 限流都自动
+  //    重试、不打断模型运行，等待按阶梯退避）。agent/request-error 是
   //    waterfall：返回 {kind:'retry'} → agent-loop 同一回合重发该请求——
-  //    已核实 agent-loop 对 retry 是裸 continue（lib/index.ts:656-665 无任何延迟），
+  //    已核实 agent-loop 对 retry 是裸 continue（packages/core/agent-loop/src/agent.ts:523-526
+  //    只有 `action?.kind !== 'retry'` 才抛，否则 `continue`，无任何延迟），
   //    不退避的 5 连发会加重限流。退避走固定阶梯（对齐官方 llm-retry 量纲：
   //    首退避短、逐级拉长、30s 封顶），sleep 用宿主 timer（插件卸载可回收、
   //    测试 tick 可控）；sleep 期间 signal 中止 → 委托 next() 终结，不重发。
+  //    0.2.1-alpha.2 起每次 attempt 都会在同回合补一条 runtime-context
+  //    `user/message`（同文件 :425-440，`contextAdmitted` 改为按 attempt 复位，
+  //    alpha.1 那份是整回合一次），代价是重发的 token 数——阶梯的次数上限就是它的上限。
   svc.on("agent/request-error", (payloadRaw, next) =>
     handleRequestError(runtime, payloadRaw, next),
   );
@@ -2260,11 +2309,11 @@ function apply(ctx: Context, config: PluginConfig): void {
     handleAgentStatus(runtime, payload);
   });
 
-  // item 3：路由归属方必须对 webServer 建立**依赖**，而不是只读一次。
+  // 路由归属方必须对 webServer 建立**依赖**，而不是只读一次。
   // `ctx.get` 是无 inject 语义的存储读（cordis reflect.ts:226 "Read a service from
   // the store without the inject requirement"）——未提供时静默返回 undefined，
   // 于是 webServer 后装载/重启换实例时这六条路由永不注册。harness 的路由归属方
-  // 都声明 inject:['webServer']（packages/bundle/web-app/src/index.ts:41）；
+  // 都声明 inject:['webServer']（packages/bundle/web-app/src/index.ts:40）；
   // ctx.inject 的子 fiber 在依赖到位时才激活、依赖变化时先卸后装（cordis
   // registry.ts:169 "the callback is unloaded and re-run whenever a required
   // service changes"），故 effect 挂在**子 ctx** 上即得到「后到即注册、重启即重注册」。
@@ -2277,7 +2326,7 @@ function apply(ctx: Context, config: PluginConfig): void {
   svc.effect(
     () => () => {
       scheduler.disposeAll();
-      // 退避 sleep 的定时器不归 scheduler（item 7）：disposeAll 只回收调度器待办，
+      // 退避 sleep 的定时器不归 scheduler：disposeAll 只回收调度器待办，
       // 这些在途 sleep 必须逐个结算为「已中止」，否则插件卸载后它照样唤醒。
       const pending: (() => void)[] = [...runtime.backoffs];
       runtime.backoffs.clear();

@@ -16,9 +16,9 @@
  * 所有字段读取都是防御式的：缺字段/坏载荷只降级为"无从判断"，绝不抛错——
  * 本模块运行在事件热路径上。
  *
- * 入参是宿主 `snapshotEvents()` 返回的**原始**只读数组（item 8）：此前签名要
- * `ReviewEvent[]`，调用方必须先把整份会话日志逐条投影复制一遍——每个回合收口
- * 一次 O(n)，一个会话累计 O(n²)。现在直接在宿主数组上就地扫，零分配。
+ * 入参是宿主 `snapshotEvents()` 返回的**原始**只读数组：签名若要 `ReviewEvent[]`，
+ * 调用方必须先把整份会话日志逐条投影复制一遍——每个回合收口
+ * 一次 O(n)，一个会话累计 O(n²)。这里直接在宿主数组上就地扫，零分配。
  */
 
 /** 会话事件的本插件读面：元素来自宿主（跨版本字段会缺），一律守卫投影，
@@ -69,10 +69,13 @@ export interface TurnReview {
   awaitsUser: boolean;
   /** 最后回合由 goal 轮次开启 → 交 goal 机制驱动，本插件不得注入。 */
   goalDrivenTurn: boolean;
+  /** 最后回合由官方 Schedule 提醒开启 → 交定时任务驱动，本插件不得注入。 */
+  scheduleDrivenTurn: boolean;
 }
 
 const USER_QUESTION_TOOL = "ask_user_question";
 const GOAL_SOURCE_KIND = "goal";
+const SCHEDULE_SOURCE_KIND = "schedule";
 
 /** 从 todo/write 载荷算未闭合条数；载荷非法返回 undefined（表示"这份快照不可用"）。 */
 function openCountOf(todos: unknown): number | undefined {
@@ -187,6 +190,21 @@ function scanGoalDriven(
   return false;
 }
 
+/** 该回合的首条 user/message 注入身份是否为官方 Schedule（只看首条，判据与 goal 同）。 */
+function scanScheduleDriven(
+  events: readonly unknown[],
+  scanFrom: number,
+  lastEndIndex: number,
+): boolean {
+  for (let i = scanFrom; i < lastEndIndex; i += 1) {
+    const ev = events[i];
+    if (typeOf(ev) === "user/message") {
+      return nestedStr(ev, "source", "kind") === SCHEDULE_SOURCE_KIND;
+    }
+  }
+  return false;
+}
+
 /**
  * 复盘最后一个回合。events 为宿主 snapshotEvents() 的原始产物（按 seq 升序的
  * 完整日志）；本函数只就地扫，不复制、不改写。
@@ -199,6 +217,7 @@ export function reviewLastTurn(events: readonly unknown[] | undefined | null): T
     todoUpdatedInTurn: false,
     awaitsUser: false,
     goalDrivenTurn: false,
+    scheduleDrivenTurn: false,
   };
   if (!Array.isArray(events) || events.length === 0) {
     return empty;
@@ -218,10 +237,19 @@ export function reviewLastTurn(events: readonly unknown[] | undefined | null): T
   // 3) 会话当前 todo 清单：正扫到终态为止（陈旧清单不能当"本回合没做完"的证据）。
   const { openTodos, todoUpdatedInTurn } = todosSnapshot(events, lastEndIndex, inTurn);
 
-  // 4) 等待用户 + 5) goal 驱动。
+  // 4) 等待用户 + 5) goal 驱动 + 6) Schedule 驱动。
   const awaitsUser = scanAwaitsUser(events, lastTurn, lastEndIndex, inTurn);
   const scanFrom = Math.max(turnStartIndex, 0);
   const goalDrivenTurn = scanGoalDriven(events, scanFrom, lastEndIndex);
+  const scheduleDrivenTurn = scanScheduleDriven(events, scanFrom, lastEndIndex);
 
-  return { lastTurn, lastReasonKind, openTodos, todoUpdatedInTurn, awaitsUser, goalDrivenTurn };
+  return {
+    lastTurn,
+    lastReasonKind,
+    openTodos,
+    todoUpdatedInTurn,
+    awaitsUser,
+    goalDrivenTurn,
+    scheduleDrivenTurn,
+  };
 }

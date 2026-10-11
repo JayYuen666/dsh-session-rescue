@@ -16,6 +16,9 @@ import {
   turnHasToolActivity,
 } from "../lib/turn-scope.ts";
 import type { TranscriptNode, TranscriptView } from "../lib/turn-scope.ts";
+// 官方 `ToolCallHead.args` 自 0.2.1-alpha.1 起是必选位，类型是 `PartialArguments`——一个带
+// private 字段的**类**，造不出字面量，只能走静态工厂（测试期依赖，生产面不引）。
+import { PartialArguments } from "@deepseek-ai/dsh-util-values";
 
 /** 投影里「本回合带模型错误」的节点 kind：fixture 与断言共用同一个字形。 */
 const TURN_ERROR_KIND = "turn-error";
@@ -237,7 +240,10 @@ describe("轮内失败节点识别", () => {
     // 官方 `RunningToolCall` 的必选成员齐备（argsRaw/time/subCalls 都不能少）：
     // 旧夹具只写 4 位，是因为本包把该元素抄成了带索引签名的松散形状。
     // rc.2 起该类型是 `PreparingToolCall | StartedToolCall`，判别字段 `phase` 必选
-    // （带 argsRaw 的这一支是 'start'）。
+    // （带 argsRaw 的这一支是 'start'）；0.2.1-alpha.1 起 `ToolCallHead` 又添了必选的 `args`，
+    // 类型是官方 `PartialArguments` 这个类，所以走静态工厂而不是字面量。
+    // 官方件再改形状，这条夹具就会红——那正是它该做的：生产面是原样透传 legacy.runningCalls，
+    // 不构造这些对象（透传处见 src/client-entry.ts）。
     const v3 = mkView({
       runningCalls: [
         {
@@ -245,6 +251,7 @@ describe("轮内失败节点识别", () => {
           name: "bash",
           phase: "start",
           argsRaw: "{}",
+          args: PartialArguments.fromText("{}"),
           turn: 4,
           step: 0,
           time: 0,

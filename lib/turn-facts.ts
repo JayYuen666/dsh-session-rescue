@@ -37,6 +37,9 @@ export const RESCUE_FACTS_KEY = "session-rescue.turnFacts";
 /** 与 goal-round-driver 的注入身份对齐（turn-review.ts 同一位常量）。 */
 const GOAL_SOURCE_KIND = "goal";
 
+/** 与官方 Schedule 的注入身份对齐（turn-review.ts 同一位常量）。 */
+const SCHEDULE_SOURCE_KIND = "schedule";
+
 /** 等待用户澄清的工具名（turn-review.ts 同判据）。 */
 const USER_QUESTION_TOOL = "ask_user_question";
 
@@ -80,6 +83,7 @@ export interface EndRow {
   todoUpdatedInTurn: boolean;
   awaitsUser: boolean;
   goalDrivenTurn: boolean;
+  scheduleDrivenTurn: boolean;
   /** 本行是否可信：定稿那一刻是否对得上最近一条 turn/start（false ⇒ 读侧回退扫描）。 */
   aligned: boolean;
 }
@@ -121,6 +125,7 @@ const endRowSchema = z.object({
   todoUpdatedInTurn: z.boolean(),
   awaitsUser: z.boolean(),
   goalDrivenTurn: z.boolean(),
+  scheduleDrivenTurn: z.boolean(),
   aligned: z.boolean(),
 });
 
@@ -277,8 +282,14 @@ function foldTurnEnd(state: RescueFacts, event: unknown): RescueFacts {
         todoUpdatedInTurn: start.todoWritten,
         awaitsUser: start.ask,
         goalDrivenTurn: start.seenFirst && start.kind === GOAL_SOURCE_KIND,
+        scheduleDrivenTurn: start.seenFirst && start.kind === SCHEDULE_SOURCE_KIND,
       }
-    : { todoUpdatedInTurn: false, awaitsUser: false, goalDrivenTurn: false };
+    : {
+        todoUpdatedInTurn: false,
+        awaitsUser: false,
+        goalDrivenTurn: false,
+        scheduleDrivenTurn: false,
+      };
   return {
     ...state,
     end: {
@@ -367,6 +378,7 @@ export function reviewFromFacts(state: RescueFacts): TurnReview | undefined {
       todoUpdatedInTurn: false,
       awaitsUser: false,
       goalDrivenTurn: false,
+      scheduleDrivenTurn: false,
     };
   }
   // 不可采信（end 对不上它自己的 start）⇒ undefined ⇒ 调用方回退扫描。
@@ -378,6 +390,7 @@ export function reviewFromFacts(state: RescueFacts): TurnReview | undefined {
         todoUpdatedInTurn: end.todoUpdatedInTurn,
         awaitsUser: end.awaitsUser,
         goalDrivenTurn: end.goalDrivenTurn,
+        scheduleDrivenTurn: end.scheduleDrivenTurn,
       }
     : undefined;
 }

@@ -5,7 +5,7 @@ import { applyRescue } from "./config-refs.ts";
 
 // E5：用户主动中止/打断的回合绝不能烧掉 maxResumes/maxContinues 配额。
 //
-// 判定位置（item 10 核实后修正）：中止信号在事件流里是 turn/end
+// 判定位置（按宿主事件流核实过）：中止信号在事件流里是 turn/end
 // reason.kind='aborted'（'interrupted' 同视），而 harness 的 agent-loop 在
 // `catch` 里 emit('agent/error')、在 `finally` 里才 append('turn/end')，且被
 // abort 的回合直接 rethrow、**根本不发 agent/error**（core/agent-loop/src/agent.ts

@@ -2,13 +2,13 @@
 //
 // 背景（这一条就是排查时查出来的真缺陷）：`plugins.bundle.config` 是**按 bundle 包名**
 // keyed 的槽位，宿主派发时拿注册项的 key 与该 bundle 的包名做精确相等匹配：
-//   installed dsh-client-ui-plugin-manager/lib/client.js:1821
+//   installed dsh-client-ui-plugin-manager/lib/client.js:2762
 //     renderSlot("plugins.bundle.config", { view: "page" }, { entryKey: pkg.name })
 //   installed dsh-client-ui-renderer/lib/client.js:1154
 //     host.entriesOfSlot(slotKey).find((e) => e.options.key === opts?.entryKey)
-//   同插件页 :2698 的「这个 bundle 有没有配置卡」位 = ledger.bundles.has(openPkg.name)，
-//   而 ledger.bundles 就是上面那批注册 key 的集合（:51 `keysOf("plugins.bundle.config")`）
-//   installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:96-100
+//   同插件页 :3791 的「这个 bundle 有没有配置卡」位 = ledger.bundles.has(openPkg.name)，
+//   而 ledger.bundles 就是上面那批注册 key 的集合（:62 `keysOf("plugins.bundle.config")`）
+//   installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:111-113
 //     —— "keyed by the bundle's package name"，key 必填
 //   首方先例 installed dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661
 //     —— key 写的就是 bundle 包名
