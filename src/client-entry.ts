@@ -14,7 +14,7 @@ import type { CSSProperties, ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 // plugin-manager 是 `plugins.bundle.config` 这条 keyed 槽的**属主**（installed
-// `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:100-104`，文件头明写
+// `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:111-116`，文件头明写
 // 「A registrant merges this contract with `import type` and registers through `ctx.slots`;
 // it never imports this package at runtime」）。本包不再手抄那份 merge 的形状，改为直接
 // 用属主交出的两位：`PluginConfigViewProps['view']`（卡片的两视图判别位，见
@@ -28,8 +28,8 @@ import type {
 // `useSession` 的席位类型是 dsh-client-ui-session 交出的 `SessionSnapshotSelector`
 //（其 lib/types/client/index.d.ts:9，同文件 :77-84 把它 merge 进 `SessionStandardProps`，
 // 一并 merge 的还有 `sessionId: SessionId` 与 `useProjection`）；`useChat` 是
-// dsh-client-ui-chat 的 `UseChat`（其 contract/slots.d.ts:16
-// `= SnapshotSelectorHook<ChatSnapshot>`，:179-182 merge 进同一张表）。
+// dsh-client-ui-chat 的 `UseChat`（其 contract/slots.d.ts:20
+// `= SnapshotSelectorHook<ChatSnapshot>`，:275-279 merge 进同一张表）。
 // 引这两个名字同时起到「把那两条 `declare module` 载入本 program」的作用——
 // 不载入的话 `SessionStandardProps` 上根本看不见这四位。
 import type { UseChat } from "@deepseek-ai/dsh-client-ui-chat/client";
@@ -97,11 +97,11 @@ const TOGGLE_URL = "/_dsh/session-rescue/toggle";
 //  - 下面这个常量 = 本包在 profile 里那条 bundle 的**包名**，只当槽位 key 用。
 // `plugins.bundle.config` 是按 bundle 包名 keyed 的槽位：宿主把注册项的 key 与
 // bundle 包名精确相等匹配后才渲染（installed
-// dsh-client-ui-plugin-manager/lib/client.js:1821 的
+// dsh-client-ui-plugin-manager/lib/client.js:2762 的
 // `renderSlot("plugins.bundle.config", { view: "page" }, { entryKey: pkg.name })` →
 // dsh-client-ui-renderer/lib/client.js:1154 的 `e.options.key === opts?.entryKey`；
-// 同文件 :2698 的 `configured: ledger.bundles.has(openPkg.name)` 读的就是这批 key），
-// 契约文本 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:96-100
+// 同文件 :3791 的 `configured: ledger.bundles.has(openPkg.name)` 读的就是这批 key），
+// 契约文本 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:111-113
 // （"keyed by the bundle's package name"），首方先例
 // dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661。
 // 写成裸条目 id（`session-rescue`）时 ledger 里没有这个键 → 插件页永不出卡。
@@ -506,7 +506,7 @@ interface ActionResult {
 
 /**
  * `ctx.sessions` 在本包用到的三位上：直接索引官方 `ISessions`（installed
- * `dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-153`）。
+ * `dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-157`）。
  * 旧镜像有三处与官方不符，都由这次改绑暴露：
  *  1. `binding(id)` 官方返回 **`SessionBinding | undefined`**（其 `.session` 是
  *     `SessionFace`），镜像写成 `{ session: SessionBinding }` 等于把 `SessionFace`
@@ -516,7 +516,7 @@ interface ActionResult {
  *     都没有该成员，且 `sessions.list` 的注释明写「navigation belongs to view owners」；
  *     首方 Chat 的 fork 流程是 `ctx.sessions.fork(...).then((childId) =>
  *     ctx.uiWorkspace.openSession(childId))`（installed
- *     `dsh-client-ui-chat/lib/client.js:11790-11798`）。本包照旧镜像调 `sessions.open`
+ *     `dsh-client-ui-chat/lib/client.js:13876-13886`）。本包照旧镜像调 `sessions.open`
  *     会在真宿主上 TypeError，并被 `forkAndSend` 的 catch 收成一次「操作失败」，
  *     测试因为按同一份镜像造假 sessions 而永远看不见。
  */
@@ -710,7 +710,7 @@ function createActions(
  * `SessionStandardProps`（installed `@deepseek-ai/dsh-client-ui-slots/lib/types/index.d.ts:191`）
  * 是一张由各方 merge 的空表——`sessionId` / `useSession` / `useProjection` 由
  * `@deepseek-ai/dsh-client-ui-session`（其 lib/types/client/index.d.ts:77-84）合入，
- * `useChat` 由 `@deepseek-ai/dsh-client-ui-chat`（其 contract/slots.d.ts:179-182）合入，
+ * `useChat` 由 `@deepseek-ai/dsh-client-ui-chat`（其 contract/slots.d.ts:275-279）合入，
  * 于是本包 selector 读到的 `snap.running` / `snap.legacy.nodes` 等成员的形状、只读性、
  * 品牌（`sessionId: SessionId`）都由宿主侧的那份声明交出。旧实现把这四位手抄成
  * `sessionId: string` + 三个自造 selector 签名，`slots` 也因此只能跟着降级成本地面
@@ -1271,7 +1271,7 @@ async function runAction(
 function RescueDockView(props: DockProps): ReactNode {
   const { sessionId, actions, t } = props;
   const view = useTranscriptView(props);
-  // 0.1.6：队列数据源 = inbox 投影（useSession.queue 已移除，直读会 undefined）。
+  // 队列数据源 = inbox 投影（官方没有 `useSession.queue` 那一位，直读会 undefined）。
   // useProjection 缺失（框架版本不含该 seat）时同样回空，不抛错。
   const inbox =
     typeof props.useProjection === "function" ? props.useProjection("inbox") : undefined;
@@ -1283,9 +1283,9 @@ function RescueDockView(props: DockProps): ReactNode {
   const [dockEditing, setDockEditing] = useState(false);
   const [dockBusy, setDockBusy] = useState(false);
   const [dockError, setDockError] = useState<string | null>(null);
-  // 取消/开关两条 host 写通道的失败面（item 9）：postCancel/postToggle 返回
+  // 取消/开关两条 host 写通道的失败面：postCancel/postToggle 返回
   // {ok:false}（403 csrf 过期、host 重启、网络中断）时**什么都没发生**——倒计时
-  // 照跑、待办照发。原先 `void postCancel(...)` 把它当成功，用户按了取消却仍被
+  // 照跑、待办照发。把它当成功（`void postCancel(...)`）会让用户按了取消却仍被
   // 自动注入。这里必须把结果消费掉并显式报错。
   const [hostActionError, setHostActionError] = useState<string | null>(null);
 
@@ -1444,16 +1444,16 @@ export type EntryForm = ConfigForm<Record<string, unknown>>;
 /**
  * 本条目那张表单的官方快照面（值面是任意 JSON 形状，由 host 半的 Config 把关）。
  * 锚在**槽位属主包**交给配置页的那份状态上（`ConfigPageForm['state']`，installed
- * `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:150-155`——它本身就是
+ * `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:166-171`——它本身就是
  * `ConfigFormSnapshot<Record<string, unknown>>` 的具名投影），而不是本地再写一遍泛型实参：
  * 宿主换表单快照形状时这一位跟着红，本地重述的泛型则会悄悄继续编译。
  */
 type FormSnapshot = ConfigPageForm["state"];
 
 /**
- * 写入一个字段并**复读快照确认落地**（item 5）。
+ * 写入一个字段并**复读快照确认落地**。
  *
- * 0.1.7 的 `ConfigForm.set` 在宿主校验拒绝时既不抛也不改快照：它走 recover 分支
+ * `ConfigForm.set` 在宿主校验拒绝时既不抛也不改快照：它走 recover 分支
  * 重载 Host 状态（installed `config-form.d.ts:83` 的 `private recover`），回
  * `false`；写入被跳过（memory 模式等）同样回 `false` 而不是抛（同文件
  * `config-form-types.d.ts`："false for refusal or skipped writes"）。本卡仍以事后
@@ -1797,9 +1797,9 @@ function settingsSectionTitle(text: string, bordered: boolean): ReactNode {
   );
 }
 
-/** 单个 provider 的落盘 POST。返回 null=已落盘，返回文案=host 拒绝（item 2）。
- *  fetch 只因网络/中止 reject，**不会因 4xx/5xx reject**——原注释说反了：
- *  403/400/500 全都落到"成功"分支清空 pending，用户以为档位已保存。 */
+/** 单个 provider 的落盘 POST。返回 null=已落盘，返回文案=host 拒绝。
+ *  fetch 只因网络/中止 reject，**不会因 4xx/5xx reject**——把 403/400/500 落到
+ *  "成功"分支就会清空 pending，用户以为档位已保存。 */
 const applyPreset = async (provider: string, preset: string): Promise<string | null> => {
   if (rescueCsrfStore.token === "") {
     // csrf 缺失：先拉 state 回填；仍失败则 POST 裸发 403（不阻断，交由 host 判定）。
@@ -2073,8 +2073,8 @@ function excludesDraftToArray(draft: string): string[] {
 
 /** 落盘当前 touched 草稿：逐字段异步写入（宿主 schema 在写处把关），并把
  *  「复读确认未落地」的字段汇总成用户可见的失败文案（null=全部落地）。
- *  item 5：原先 set 自己 catch 并只 console.error，这里的 try 永远看不到失败，
- *  被宿主拒绝的值也会报"已保存"——现在 set 返回 promise 且必须 await。 */
+ *  set 的失败只体现在返回值，且必须 await：让它自己 catch 并 console.error 的话，
+ *  这里的 try 永远看不到失败，被宿主拒绝的值也会报"已保存"。 */
 async function commitTouched(
   props: SettingsCardProps,
   touched: Record<string, unknown>,

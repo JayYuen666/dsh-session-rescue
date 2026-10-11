@@ -512,7 +512,7 @@ describe('onSuccess 重置连续失败计数（长跑会话不得"用完即哑"�
   });
 });
 
-describe("MAX_SESSIONS：会话记录上限（审查修复，防长驻 Map 无界膨胀）", () => {
+describe("MAX_SESSIONS：会话记录上限（防长驻 Map 无界膨胀）", () => {
   const entryBase = {
     turn: 1,
     kind: "resume" as const,

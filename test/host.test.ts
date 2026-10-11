@@ -1524,6 +1524,54 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
     assert.equal(ctx.timers.length, 0);
   });
 
+  it("schedule 驱动的回合 → 抑制（交官方定时任务，不双重注入）", () => {
+    const agent = makeAgent("s-sched", "tokenrouter", {
+      session: {
+        id: "s-sched",
+        snapshotEvents: () => [
+          { type: TURN_START_EVENT, seq: 0, time: 0, data: { turn: 7 } },
+          {
+            type: USER_MESSAGE_EVENT,
+            seq: 1,
+            time: 1,
+            data: { role: "user", content: [], source: { kind: "schedule" } },
+          },
+          evTodo(OPEN),
+          { type: "turn/end", seq: 4, time: 4, data: { turn: 7, reason: { kind: "completed" } } },
+        ],
+      },
+    });
+    register(ctx, agent);
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 0, "Schedule 开的回合不该触发 auto-unfinished");
+  });
+
+  it("schedule 驱动且以 max-tokens 收尾的回合 → 也不触发 auto-continue", () => {
+    const agent = makeAgent("s-sched-cont", "tokenrouter", {
+      session: {
+        id: "s-sched-cont",
+        snapshotEvents: () => [
+          { type: TURN_START_EVENT, seq: 0, time: 0, data: { turn: 4 } },
+          {
+            type: USER_MESSAGE_EVENT,
+            seq: 1,
+            time: 1,
+            data: { role: "user", content: [], source: { kind: "schedule" } },
+          },
+          {
+            type: "turn/end",
+            seq: 4,
+            time: 4,
+            data: { turn: 4, reason: { kind: MAX_TOKENS_REASON } },
+          },
+        ],
+      },
+    });
+    register(ctx, agent);
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 0, "Schedule 开的回合不该触发 auto-continue");
+  });
+
   it("非 completed（error/aborted/max-tokens）→ 不走 unfinished 路径", () => {
     for (const kind of ["error", "aborted", MAX_TOKENS_REASON]) {
       const localCtx = createMockCtx();
@@ -1742,7 +1790,7 @@ describe("max-tokens 自动继续（agent/status→idle 检测）", () => {
   });
 });
 
-// ── agent/request-error：请求级 429 自动重试（用户裁决：
+// ── agent/request-error：请求级 429 自动重试（口径：
 //    所有平台 429 限流都要自动重试、不打断模型运行；waterfall 返回
 //    {kind:'retry'} 触发同回合重发，与 agent/error 回合级续跑互补） ──
 const quotaEvt = (agentId: string): Record<string, unknown> => ({
@@ -1780,8 +1828,8 @@ describe("agent/request-error 请求级 429 重试", () => {
     return result;
   }
 
-  /** 顺序触发 n 次 request-error：每次都要等上一次结算完（退避名额现在在
-   *  「真的重发」时才占用，见 item 7）。写成递归而非 for+await，避开
+  /** 顺序触发 n 次 request-error：每次都要等上一次结算完（退避名额只在
+   *  「真的重发」时才占用，先 ++ 再判 abort 会白烧一次配额）。写成递归而非 for+await，避开
    *  no-await-in-loop。 */
   async function fireSequence(box: MockCtx, evt: unknown, times: number): Promise<unknown[]> {
     const listener = box.handlers["agent/request-error"] as unknown as (
@@ -1818,6 +1866,35 @@ describe("agent/request-error 请求级 429 重试", () => {
       signal: undefined,
     });
     assert.deepEqual(act, retryAction);
+  });
+
+  it("宿主已解析出 retryPolicy → 委托 next()，本包阶梯不参与（官方 llm-retry 优先）", async () => {
+    // 两条链共用同一个 waterfall，先返回 {kind:'retry'} 的赢。不让位就等于把官方那套
+    // （retryableCodes / providerRetryAfterMs / 抖动 / 持久化 llm/retry 事件）整体顶掉。
+    const agent = makeAgent("re-policy", "sensenova");
+    let delegated = false;
+    const act = await reListener(ctx)(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider: "sensenova",
+        failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
+        retryPolicy: {
+          mode: "normal",
+          maxRetries: 12,
+          retryableCodes: ["QUOTA"],
+          backoff: { initialDelayMs: 8000, maxDelayMs: 60_000, jitterRatio: 0.2 },
+        },
+        signal: undefined,
+      },
+      async () => {
+        delegated = true;
+        // 下游的终结结论：undefined = 不重试。
+      },
+    );
+    assert.equal(delegated, true, "有 retryPolicy 时必须让位给下游");
+    assert.equal(act, undefined, "本包不返回 retry 决策");
   });
 
   it("文本含 429 / rate limit / quota 且无 status 字段（pi-ai 丢 status 形态）→ retry", async () => {
@@ -2605,6 +2682,15 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
     assert.equal(scans.value, 0);
+  });
+
+  it("schedule 轮次驱动的失败回合 → 投影路径同样让路（不抢官方定时任务的话）", () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const agent = agentWithEvents(ctx, openedTurn(5, "schedule"));
+    attach(ctx);
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 0);
   });
 
   it("rescue 开出的回合再失败 → 投影路径仍走链式例外（60s 跨出限流窗口）", () => {
