@@ -4,11 +4,11 @@
 //
 // 分层：
 //   渲染类用例（dock / 设置卡 / 重试策略区块）→ 挂真实组件树、按 DOM 断言；
-//   纯逻辑用例（diffTouched / rescueState 轮询 / postCancel / postToggle /
+//   纯逻辑用例（rescueState 轮询 / postCancel / postToggle /
 //   notifyHostConnected / apply 装配 / createActions）→ 直调导出函数。
 //
 // 注意：本文件 import client-entry.ts 并依赖浏览器全局（document/window），
-// 与 client-csrf.test.ts 同属 client 侧测试，tsconfig.json 含 DOM lib。
+// client 侧测试；tsconfig.json 含 DOM lib。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { Window } from "happy-dom";
@@ -16,16 +16,16 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
 import {
-  rescueCsrfStore,
   rescueState,
   rescueStoreBinding,
   nextPollMs,
+  backoffMs,
   ACTIVE_POLL_MS,
   IDLE_POLL_MS,
+  DEAD_POLL_CEILING_MS,
   postCancel,
   postToggle,
   notifyHostConnected,
-  diffTouched,
   apply as clientApply,
 } from "../src/client-entry.ts";
 // 0.1.7 隐式注册的单源桩件：条目 id 直接读 cordis.patch.yml，不在测试里抄一遍。
@@ -33,6 +33,7 @@ import { patchEntryId } from "./config-refs.ts";
 // 卡片槽位 key 的单源桩件：bundle 包名直接读 ~/.dsh/profiles/web/package.json。
 import { profileBundleName } from "./profile-bundle.ts";
 import type { RescueStateBody } from "../lib/dock-state.ts";
+import type { RescueReader } from "../src/remote.ts";
 // 注册 ns 在本文件写字面量：src/ui-messages.ts 那枚本源经 `LocaleNs` 标注钉在
 // client-entry.ts 的 `NS` 上（分叉即编译期红），断言若再 import 本源就成了同义反复；
 // 写真串才是「运行时注册的到底是哪个命名空间」的判据（下面还与 cordis.patch.yml 比对）。
@@ -43,7 +44,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 /** 本条目那张共享表单的官方面（src/client-entry.ts 的 EntryForm 同源）。 */
 type EntryForm = ConfigForm<Record<string, unknown>>;
 
-/** 官方快照面：7 位全必选。 */
+/** 官方快照面：6 位全必选。 */
 type FormSnapshot = ConfigFormSnapshot<Record<string, unknown>>;
 
 /** 本卡渲染视模型的形状（src 的 CardSnapshot：status/writable 在官方快照上必选）。 */
@@ -53,7 +54,7 @@ interface CardSnapshotView {
   value: Record<string, unknown>;
 }
 
-/** 官方 `ConfigFormSnapshot` 的合法形状（7 位全必选）；首个快照受理前 value/revision
+/** 官方 `ConfigFormSnapshot` 的合法形状（6 位全必选）；首个快照受理前 value/revision
  *  为 undefined，memory 模式 writable 永假——这两态正是卡片要渲染的「还没数据/只读」。 */
 function snap(over: Partial<FormSnapshot> = {}): FormSnapshot {
   return {
@@ -63,7 +64,6 @@ function snap(over: Partial<FormSnapshot> = {}): FormSnapshot {
     user: {},
     revision: 3,
     writable: true,
-    mode: "host",
     ...over,
   };
 }
@@ -197,11 +197,15 @@ function makeGate(): Gate {
   return { promise, release: resolve, reject };
 }
 
-const STATE_URL = "/_dsh/session-rescue/state";
-const CANCEL_URL = "/_dsh/session-rescue/cancel";
-const TOGGLE_URL = "/_dsh/session-rescue/toggle";
-const PROVIDERS_URL = "/_dsh/session-rescue/retry-providers";
-const POLICY_URL = "/_dsh/session-rescue/retry-policy";
+// 测试适配器 `readerFromFetch` 的传输标签：生产读面走官方 Remote，这里用 fetch 替身
+// 驱动同一批 UI 分支，故按读方法各给一条稳定 URL（只在本文件内路由，不是线上路径）。
+const STATE_URL = "rescue/state";
+const CANCEL_URL = "rescue/cancel";
+const TOGGLE_URL = "rescue/toggle";
+const PROVIDERS_URL = "rescue/retry-providers";
+const POLICY_URL = "rescue/retry-policy";
+/** host 侧写端点的拒因文案（dock 只负责把它显示出来）。 */
+const HOST_REJECT_TEXT = "host rejected the write";
 
 // ── 槽位名：测试按名字取注册项，名字写错就是「取到 undefined ⇒ 用例空转」。 ──
 /** dock 的 list 槽位名。 */
@@ -213,6 +217,8 @@ const BUNDLE_CONFIG_SLOT = "plugins.bundle.config";
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
 const RETRY_SAVE_BUTTON_SELECTOR = '[data-field="retry-save"]';
 const RESUME_DELAY_INPUT_SELECTOR = 'input[data-field="resumeDelayMs"]';
+/** 排除名单输入框：它没有 data-field，按占位符定位（三处用例共用一枚常量）。 */
+const EXCLUDES_INPUT_SELECTOR = 'input[placeholder^="例如"]';
 /** 「启用自动续跑」开关（role=switch + 中文 label，zh 面）。 */
 const ENABLE_TOGGLE_SELECTOR = 'button[role="switch"][aria-label="启用自动续跑"]';
 
@@ -223,8 +229,6 @@ const SESSION_UNAVAILABLE_CODE = "session-unavailable";
 const NO_PROVIDERS_ERROR = "no providers";
 /** 替身 settings 写入被拒时抛/回的消息。 */
 const SETTINGS_REJECT_REASON = "settings-rejected";
-/** 替身编辑重发被拒时 reject 的理由。 */
-const RAW_EDIT_REJECT_REASON = "raw-edit-fail";
 /** 替身运输层抛错的消息。 */
 const CARRIER_DOWN_MESSAGE = "carrier down";
 /** 故意不是记录形状的 /state pending 值。 */
@@ -232,13 +236,44 @@ const NOT_A_RECORD_VALUE = "not-a-record";
 /** fork 重发按钮的 zh 文案（按文本找按钮的锚点）。 */
 const FORK_RESEND_LABEL = "Fork 重发（新分支）";
 
+async function postFetch(url: string, body?: unknown): Promise<unknown> {
+  const res = await fetch(url, {
+    method: "POST",
+    ...(body === undefined
+      ? {}
+      : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+  });
+  return (await res.json()) as unknown;
+}
+
+/** 测试适配器：把既有的 fetch 替身接到官方 Remote 读面形状上（生产代码不经过它）。 */
+function readerFromFetch(): RescueReader {
+  return {
+    state: async () => {
+      const res = await fetch(STATE_URL);
+      return (await res.json()) as unknown;
+    },
+    cancel: async (sessionId) =>
+      postFetch(`${CANCEL_URL}?sessionId=${encodeURIComponent(sessionId)}`),
+    toggle: async (sessionId) =>
+      postFetch(`${TOGGLE_URL}?sessionId=${encodeURIComponent(sessionId)}`),
+    resume: async () => postFetch("rescue/resume", { connected: true }),
+    retryProviders: async () => {
+      const res = await fetch(PROVIDERS_URL);
+      return (await res.json()) as unknown;
+    },
+    retryPolicy: async (provider, preset) => postFetch(POLICY_URL, { provider, preset }),
+  };
+}
+
 function resetStateStore(): void {
   rescueState.data = null;
   rescueState.stableKey = "";
   rescueState.listeners.clear();
   rescueState.stop();
   rescueState.inFlight = false;
-  rescueCsrfStore.token = "";
+  rescueState.failStreak = 0;
+  rescueState.reader = readerFromFetch();
 }
 
 /** 只数 /state 这一条 URL 的请求次数（轮询放大与否的观测量）。 */
@@ -267,6 +302,25 @@ async function unmountRoot(): Promise<void> {
     });
     root = null;
   }
+}
+
+/** 当前挂载容器里的元素（模块级函数而不是用例内闭包：它们不捕获任何父作用域变量，
+ *  写成闭包会撞 unicorn/consistent-function-scoping）。 */
+function mountedInput(selector: string): HTMLInputElement {
+  const input = mountHost.querySelector<HTMLInputElement>(selector);
+  assert.ok(input, `挂载容器里应有 ${selector}`);
+  return input;
+}
+
+function mountedSaveButton(): HTMLButtonElement {
+  const button = mountHost.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
+  assert.ok(button, "保存按钮应在");
+  return button;
+}
+
+/** 不写盘的 set 替身（只观察快照变化之后的草稿归属）。 */
+function noopSet(): void {
+  /* 卡片只在保存时读 set 的结论，本用例不触发保存 */
 }
 
 // happy-dom 运行环境夹具。本文件有 21 个并列的顶层套件，夹具必须对**每一条用例**生效：
@@ -346,21 +400,6 @@ function buttonContaining(el: HTMLElement, text: string): HTMLButtonElement | nu
   return allButtons(el).find((btn) => btn.textContent.includes(text)) ?? null;
 }
 
-// ── 纯函数：diffTouched ──────────────────────────────────────────────────
-
-describe("diffTouched（touched 层与快照的差异字段）", () => {
-  beforeEach(resetDomEnv);
-  afterEach(teardownDomEnv);
-
-  it("值语义比较：undefined 与缺失等价，变化字段列出", () => {
-    assert.deepEqual(diffTouched({ a: 1 }, { a: 1 }), []);
-    assert.deepEqual(diffTouched({ a: undefined }, {}), []);
-    assert.deepEqual(diffTouched({ a: 1 }, { a: 2 }), ["a"]);
-    // 第二个数据键取有意义的名字（`a` 在 id-length 白名单里、`b` 不在），断言不变。
-    assert.deepEqual(diffTouched({ a: 1, note: "x" }, { a: 1 }), ["note"]);
-  });
-});
-
 // ── rescueState 轮询（快慢两档、自排循环、订阅启停）───────────────────────
 
 describe("rescueState 轮询契约", () => {
@@ -377,7 +416,6 @@ describe("rescueState 轮询契约", () => {
     await rescueState.refresh();
     const first = rescueState.data;
     assert.ok(first !== null);
-    assert.equal(rescueCsrfStore.token, "t1");
     await rescueState.refresh();
     assert.equal(rescueState.data, first, "内容不变时保留旧引用");
     body = {
@@ -389,6 +427,14 @@ describe("rescueState 轮询契约", () => {
     assert.notEqual(rescueState.data, first, "内容变化才替换引用");
   });
 
+  it("读面缺席 → 一跳直接落空，不炸也不改快照", async () => {
+    resetStateStore();
+    rescueState.reader = undefined;
+    await rescueState.refresh();
+    assert.equal(rescueState.data, null);
+    resetStateStore();
+  });
+
   it("refresh：HTTP 非 ok 或 body.ok!==true → 不更新 data", async () => {
     stubFetch(() => ({ ok: false, body: null }));
     await rescueState.refresh();
@@ -398,7 +444,7 @@ describe("rescueState 轮询契约", () => {
     assert.equal(rescueState.data, null);
   });
 
-  it("refresh：fetch 抛错静默（轮询不炸），listener 仍收到通知", async () => {
+  it("refresh：fetch 抛错静默（轮询不炸），内容没变就不惊动订阅者", async () => {
     let notified = 0;
     rescueState.listeners.add(() => {
       notified += 1;
@@ -407,9 +453,73 @@ describe("rescueState 轮询契约", () => {
       throw new Error("network down");
     });
     await rescueState.refresh();
-    assert.equal(notified, 1);
+    // 抛错与「非 ok / 坏形状」同档：这一跳没读到有效快照。data 本来就是 null（首帧），
+    // 没有内容变化 ⇒ 不该把订阅者 schedule 进 React——旧实现每 tick 都通知一次。
+    assert.equal(notified, 0, "空跳不通知");
     assert.equal(rescueState.data, null);
+    assert.equal(rescueState.failStreak, 1, "连跳计数用于退避与过期判定");
     rescueState.listeners.clear();
+  });
+
+  it("连着读不到：到档才把快照判为过期，且只在那一跳通知一次", async () => {
+    stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
+    await rescueState.refresh();
+    assert.notEqual(rescueState.data, null, "首跳读到有效快照");
+    rescueState.failStreak = 0;
+    let notified = 0;
+    rescueState.listeners.add(() => {
+      notified += 1;
+    });
+    stubFetch(() => ({ ok: false, body: null }));
+    // 一次抖动不清快照：横幅倒计时不该因为一发 503 就消失。
+    await rescueState.refresh();
+    assert.notEqual(rescueState.data, null, "第一跳失败仍留着旧快照");
+    await rescueState.refresh();
+    assert.notEqual(rescueState.data, null, "第二跳失败仍留着旧快照");
+    assert.equal(notified, 0, "留旧快照 = 内容没变 = 不通知");
+    await rescueState.refresh();
+    assert.equal(rescueState.data, null, "第三跳起判为过期");
+    assert.equal(notified, 1, "「由有到过期」这一跳才惊动订阅者");
+    // 过期之后再空跳：内容仍是 null，不该每 tick 重渲染一遍。
+    await rescueState.refresh();
+    assert.equal(notified, 1, "过期后的空跳不再通知");
+    rescueState.listeners.clear();
+  });
+
+  it("读通一跳就把连跳清零，档位回到正常周期", async () => {
+    stubFetch(() => ({ ok: false, body: null }));
+    await rescueState.refresh();
+    await rescueState.refresh();
+    assert.equal(rescueState.failStreak, 2);
+    stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
+    await rescueState.refresh();
+    assert.equal(rescueState.failStreak, 0, "有效快照 ⇒ 退避归零");
+    assert.equal(rescueState.data?.ok, true);
+  });
+
+  it("退避：0/1 跳按原档，之后翻倍并封顶", () => {
+    assert.equal(backoffMs(IDLE_POLL_MS, 0), IDLE_POLL_MS, "上一跳有效 ⇒ 原档");
+    assert.equal(backoffMs(IDLE_POLL_MS, 1), IDLE_POLL_MS, "刚失败一次 ⇒ 仍是原档");
+    assert.equal(backoffMs(IDLE_POLL_MS, 2), IDLE_POLL_MS * 2);
+    assert.equal(backoffMs(IDLE_POLL_MS, 3), IDLE_POLL_MS * 4);
+    assert.equal(backoffMs(ACTIVE_POLL_MS, 2), ACTIVE_POLL_MS * 2, "快档同样翻倍");
+    assert.equal(backoffMs(IDLE_POLL_MS, 30), DEAD_POLL_CEILING_MS, "封顶，不指数到天");
+  });
+
+  it("读不到时下一跳按退避排程，而不是照档打 1Hz", async () => {
+    stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
+    const unsub = rescueState.subscribe(() => {
+      /* 只关心排程 */
+    });
+    await flush();
+    assert.equal(rescueState.failStreak, 0);
+    const firstTimer = rescueState.timer;
+    assert.notEqual(firstTimer, null);
+    stubFetch(() => ({ ok: false, body: null }));
+    await rescueState.refresh();
+    await rescueState.refresh();
+    assert.equal(rescueState.failStreak, 2, "两跳空 ⇒ 该退到两倍档");
+    unsub();
   });
 
   it("subscribe：立即刷新并在响应落地后按档位续表；退订归零即停", async () => {
@@ -540,17 +650,6 @@ describe("postCancel / postToggle 失败降级", () => {
     stubFetch(() => ({ ok: false, body: { ok: false, error: "403" } }));
     assert.deepEqual(await postCancel("s1"), { ok: false });
   });
-
-  it("无 token 时不带 csrf 头；有 token 时回填", async () => {
-    stubFetch(() => ({ ok: true, body: { ok: true, cancelled: true } }));
-    await postCancel("s1");
-    const call = fetchCalls[0]!;
-    assert.deepEqual(call.init.headers, {}, "无 token 不带头");
-    rescueCsrfStore.token = "tok-abc";
-    await postToggle("s1");
-    const call2 = fetchCalls[1]!;
-    assert.equal((call2.init.headers as Record<string, string>)["x-rescue-csrf"], "tok-abc");
-  });
 });
 
 // ── notifyHostConnected 的守卫面 ─────────────────────────────────────────
@@ -567,16 +666,42 @@ describe("notifyHostConnected 守卫", () => {
     assert.equal(fetchCalls.length, 0, "ctx.on 缺失时不得发出任何 fetch");
   });
 
-  it("token 为空（host 未就绪/已重启）→ 连接重置不裸发 POST", () => {
+  it("读面缺席 → 连接重置时静默跳过恢复通知", async () => {
     const listeners = new Map<string, () => void>();
+    rescueState.reader = undefined;
     notifyHostConnected({
       on: (event: string, listener: () => void) => {
         listeners.set(event, listener);
       },
     } as never);
-    stubFetch(() => ({ ok: true, body: { ok: true, restored: 0 } }));
-    listeners.get("connection/reset")?.();
-    assert.equal(fetchCalls.length, 0, "无 token 跳过恢复通知");
+    await act(async () => {
+      listeners.get("connection/reset")?.();
+      await flush();
+    });
+    assert.equal(fetchCalls.length, 0, "没有读面就什么都不发");
+  });
+
+  it("连接重置 → 调 resume；读面拒绝时吞掉并降级", async () => {
+    const listeners = new Map<string, () => void>();
+    let resumes = 0;
+    rescueState.reader = {
+      ...readerFromFetch(),
+      resume: async () => {
+        resumes += 1;
+        throw new Error(CARRIER_DOWN_MESSAGE);
+      },
+    };
+    notifyHostConnected({
+      on: (event: string, listener: () => void) => {
+        listeners.set(event, listener);
+      },
+    } as never);
+    await act(async () => {
+      listeners.get("connection/reset")?.();
+      await flush();
+    });
+    assert.equal(resumes, 1, "连接重置必须通知 host 重新武装");
+    rescueState.reader = readerFromFetch();
   });
 });
 
@@ -597,7 +722,7 @@ interface MockClientCtx {
   registers: TestSlotReg[];
   setCalls: { field: string; value: unknown }[];
   /** 本条目那张共享表单的替身：**官方 `ConfigForm` 五成员全必选**（getSnapshot /
-   *  subscribe / mutate / set / unset），快照 7 位全齐。旧的三成员 + `getSnapshot:
+   *  subscribe / mutate / set / unset），快照 6 位全齐。旧的三成员 + `getSnapshot:
    *  () => {status?: unknown}` 投影已删——那正是让 src 里的 fieldOf 再解析得以
    *  存在的形状，官方面加/改一位这里就编译失败。 */
   scope: EntryForm;
@@ -861,8 +986,6 @@ describe("apply 装配（幂等守卫 / slot 注册 / css effect）", () => {
 function actionsOf(): {
   sendSameSession: (id: string, text: string) => Promise<unknown>;
   stopAndReask: (id: string, text: string) => Promise<unknown>;
-  withdrawQueueItem: (id: string, itemId: string) => Promise<unknown>;
-  editQueueItem: (id: string, itemId: string, text: string) => Promise<unknown>;
   forkAndSend: (id: string, atSeq: number | null, text: string) => Promise<unknown>;
 } {
   const ctx = applyWithCtx();
@@ -872,8 +995,6 @@ function actionsOf(): {
     actions: {
       sendSameSession: (id: string, text: string) => Promise<unknown>;
       stopAndReask: (id: string, text: string) => Promise<unknown>;
-      withdrawQueueItem: (id: string, itemId: string) => Promise<unknown>;
-      editQueueItem: (id: string, itemId: string, text: string) => Promise<unknown>;
       forkAndSend: (id: string, atSeq: number | null, text: string) => Promise<unknown>;
     };
   };
@@ -892,16 +1013,6 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
       message: "会话不可用",
     });
     assert.deepEqual(await actions.stopAndReask("ghost", "x"), {
-      ok: false,
-      code: SESSION_UNAVAILABLE_CODE,
-      message: "会话不可用",
-    });
-    assert.deepEqual(await actions.withdrawQueueItem("ghost", "q1"), {
-      ok: false,
-      code: SESSION_UNAVAILABLE_CODE,
-      message: "会话不可用",
-    });
-    assert.deepEqual(await actions.editQueueItem("ghost", "q1", "x"), {
       ok: false,
       code: SESSION_UNAVAILABLE_CODE,
       message: "会话不可用",
@@ -958,30 +1069,6 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
       ok: false,
       message: "cancel no",
     });
-  });
-
-  it("withdrawQueueItem / editQueueItem：成功与失败", async () => {
-    const ctx = applyWithCtx();
-    const calls: { kind: string; itemId: string }[] = [];
-    const session = {
-      prompt: async () => ({ ok: true }),
-      cancel: async () => ({ ok: true }),
-      updateQueue: async (itemId: string) => {
-        calls.push({ kind: "update", itemId });
-        return { ok: true };
-      },
-    };
-    ctx.bindings.set("s1", session);
-    ctx.slots.get(DOCK_SLOT)?.();
-    const { actions } = ctx.registers[0]!.inject!() as {
-      actions: {
-        withdrawQueueItem: (sessionId: string, text: string) => Promise<unknown>;
-        editQueueItem: (sessionId: string, text: string, itemId: string) => Promise<unknown>;
-      };
-    };
-    assert.deepEqual(await actions.withdrawQueueItem("s1", "q1"), { ok: true });
-    assert.deepEqual(await actions.editQueueItem("s1", "q1", "new"), { ok: true });
-    assert.equal(calls.length, 2);
   });
 
   it("forkAndSend：fork 抛错 → fork-failed；分支 binding 缺失 → branch-unavailable", async () => {
@@ -1047,8 +1134,6 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
 interface DockActionsStub {
   sendSameSession: (id: string, text: string) => Promise<unknown>;
   stopAndReask: (id: string, text: string) => Promise<unknown>;
-  withdrawQueueItem: (id: string, itemId: string) => Promise<unknown>;
-  editQueueItem: (id: string, itemId: string, text: string) => Promise<unknown>;
   forkAndSend: (id: string, atSeq: number | null, text: string) => Promise<unknown>;
 }
 
@@ -1061,14 +1146,6 @@ function makeDockStub(): { actions: DockActionsStub; calls: { name: string; args
     },
     stopAndReask: async (id, text) => {
       calls.push({ name: "stopAndReask", args: [id, text] });
-      return { ok: true };
-    },
-    withdrawQueueItem: async (id, itemId) => {
-      calls.push({ name: "withdrawQueueItem", args: [id, itemId] });
-      return { ok: true };
-    },
-    editQueueItem: async (id, itemId, text) => {
-      calls.push({ name: "editQueueItem", args: [id, itemId, text] });
       return { ok: true };
     },
     forkAndSend: async (id, atSeq, text) => {
@@ -1150,7 +1227,6 @@ interface MountDockOptions {
 async function mountDock(
   view: Partial<DockView>,
   sessionState: unknown,
-  csrf = "",
   opts: MountDockOptions = {},
 ): Promise<{
   container: HTMLElement;
@@ -1163,7 +1239,6 @@ async function mountDock(
   const body = sessionState as RescueStateBody | null;
   rescueState.data = body;
   rescueState.stableKey = JSON.stringify(body);
-  rescueCsrfStore.token = csrf;
   // 先捕获组件（applyWithCtx 内部带默认 stub），再覆盖用例路由。
   const comp = dockComponent() as React.ComponentType<DockPropsForTest>;
   stubFetch(
@@ -1200,6 +1275,7 @@ async function mountDock(
           useProjection: (name) =>
             name === "inbox" ? { "next-turn": view2.queue ?? [] } : undefined,
         };
+  rescueState.reader = readerFromFetch();
   await mount(React.createElement(comp, withProjection(view) as DockPropsForTest));
   return {
     container: mountHost,
@@ -1216,7 +1292,7 @@ describe("RescueDockView 渲染决策", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
-  it("pending 横幅：显示倒计时；点取消 → postCancel 带 csrf", async () => {
+  it("pending 横幅：显示倒计时；点取消 → 走 cancel 读面", async () => {
     const body: RescueStateBody = {
       ok: true,
       sessions: {
@@ -1228,7 +1304,7 @@ describe("RescueDockView 渲染决策", () => {
         },
       },
     };
-    const { container, stub } = await mountDock({}, body, "dock-tok");
+    const { container, stub } = await mountDock({}, body);
     assert.match(container.textContent, /5s 后自动续跑/u, "倒计时文案");
     const cancelBtn = buttonByText(container, "取消");
     assert.ok(cancelBtn, "横幅带取消按钮");
@@ -1240,7 +1316,6 @@ describe("RescueDockView 渲染决策", () => {
     });
     const call = fetchCalls.find((entry) => entry.url.startsWith(CANCEL_URL));
     assert.ok(call, "取消走 cancel 端点");
-    assert.equal((call.init.headers as Record<string, string>)["x-rescue-csrf"], "dock-tok");
     assert.equal(stub.calls.length, 0, "取消不触发业务动作");
   });
 
@@ -1318,47 +1393,6 @@ describe("RescueDockView 渲染决策", () => {
     });
     assert.equal(stub.calls[0]?.name, "stopAndReask");
     assert.equal(stub.calls[0].args[1], "go", "重问文案用最后用户消息");
-  });
-
-  it("queued inbox：纯文本项可编辑、非文本块项无编辑按钮、编辑/撤回流程", async () => {
-    const { container, stub } = await mountDock(
-      {
-        queue: [
-          { id: "q1", content: [{ type: "text", text: "排队消息一" }] },
-          { id: "q2", content: [{ type: "image" }] },
-          { id: "q3", content: [{ type: "text", text: "排队消息三" }] },
-        ],
-      },
-      null,
-    );
-    const full = container.textContent;
-    assert.ok(full.includes("排队消息一"), "q1 预览渲染");
-    assert.ok(full.includes("[image]"), "q2 非文本块以 [type] 占位");
-    // q2 非纯文本 → 无编辑按钮
-    const editButtons = allButtons(container).filter((btn) => btn.textContent.trim() === "编辑");
-    assert.equal(editButtons.length, 2, "只有 q1/q3 可编辑");
-    assert.ok(editButtons[0]);
-    // 编辑 q1 → 输入草稿 → 保存
-    await act(async () => {
-      editButtons[0]!.click();
-    });
-    const textarea = container.querySelector("textarea");
-    assert.ok(textarea, "编辑态出现输入框");
-    await act(async () => {
-      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(textarea).onChange({
-        target: { value: "改后" },
-      });
-    });
-    const saveBtn = buttonByText(container, "保存");
-    assert.ok(saveBtn);
-    await act(async () => {
-      saveBtn.click();
-    });
-    await act(async () => {
-      await flush();
-    });
-    assert.equal(stub.calls[0]?.name, "editQueueItem");
-    assert.equal(stub.calls[0].args[2], "改后");
   });
 
   it("开关行：off 显示已关闭与开启按钮；unknown 时不显示行", async () => {
@@ -1456,6 +1490,7 @@ async function mountSettingsCard(
   const comp = settingsCardComponent() as React.ComponentType<SettingsPropsForTest>;
   stubFetch(route ?? (() => ({ ok: true, body: { ok: false, error: NO_PROVIDERS_ERROR } })));
   const setCalls: { field: string; value: unknown }[] = [];
+  rescueState.reader = readerFromFetch();
   await mount(
     React.createElement(comp, {
       view: "page",
@@ -1538,7 +1573,7 @@ describe("RescueSettingsCard 设置卡", () => {
       enabled: true,
       providerExcludes: [],
     });
-    const input = container.querySelector<HTMLInputElement>('input[placeholder^="例如"]');
+    const input = container.querySelector<HTMLInputElement>(EXCLUDES_INPUT_SELECTOR);
     assert.ok(input, "excludes 输入框存在");
     const save0 = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.equal(save0!.disabled, true, "未改动保存禁用");
@@ -1557,6 +1592,47 @@ describe("RescueSettingsCard 设置卡", () => {
     });
     const excludes = setCalls.find((entry) => entry.field === "providerExcludes");
     assert.deepEqual(excludes?.value, ["baidu-token-plan", "xkiro"], "草稿串拆分成数组");
+  });
+
+  it("外部改动落进快照：没在这边动过的草稿跟着快照走", async () => {
+    // 草稿存的是「用户输入」而不是「当前显示值」：另一次 apply / 另一个页签写了同一个
+    // 命名空间时，快照换了而这边从没动过 ⇒ 文本框与脏位都跟着快照。旧实现把挂载那帧
+    // 的文本一直揣着：显示的是旧值、保存条报「有改动」，一按保存就把别人刚写的值盖回去。
+    const comp = settingsCardComponent() as React.ComponentType<SettingsPropsForTest>;
+    stubFetch(() => ({ ok: true, body: { ok: false, error: NO_PROVIDERS_ERROR } }));
+    let excludes: string[] = [];
+    const props = (): SettingsPropsForTest => ({
+      view: "page",
+      t: tZh,
+      useCard: (sel) =>
+        sel({ status: "ready", writable: true, value: { providerExcludes: excludes } }),
+      set: noopSet,
+    });
+    await mount(React.createElement(comp, props()));
+    assert.equal(mountedInput(EXCLUDES_INPUT_SELECTOR).value, "", "初始草稿 = 快照");
+    assert.equal(mountedSaveButton().disabled, true);
+    excludes = ["baidu"];
+    await act(async () => {
+      root!.render(React.createElement(comp, props()));
+    });
+    assert.equal(mountedInput(EXCLUDES_INPUT_SELECTOR).value, "baidu", "未动过的字段镜像快照");
+    assert.equal(mountedSaveButton().disabled, true, "外部改动不是「这边的改动」");
+    // 用户动过之后反过来：编辑中的文本不被外部快照冲掉，脏位按与最新快照之差判。
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
+        mountedInput(EXCLUDES_INPUT_SELECTOR),
+      ).onChange({ target: { value: "xkiro" } });
+    });
+    excludes = ["other"];
+    await act(async () => {
+      root!.render(React.createElement(comp, props()));
+    });
+    assert.equal(
+      mountedInput(EXCLUDES_INPUT_SELECTOR).value,
+      "xkiro",
+      "编辑中的草稿不被外部快照冲掉",
+    );
+    assert.equal(mountedSaveButton().disabled, false, "与最新快照不同 ⇒ 确有改动");
   });
 
   it("数值行：Enter 提交有效值（onCommit → touched）→ 保存落盘 setField", async () => {
@@ -1614,7 +1690,7 @@ describe("RescueSettingsCard 设置卡", () => {
 
   it("撤销：清空 touched 草稿", async () => {
     const { container } = await mountSettingsCard({ enabled: true, providerExcludes: [] });
-    const input = container.querySelector<HTMLInputElement>('input[placeholder^="例如"]');
+    const input = container.querySelector<HTMLInputElement>(EXCLUDES_INPUT_SELECTOR);
     assert.ok(input);
     await act(async () => {
       reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
@@ -1714,12 +1790,39 @@ describe("RetryPolicySection 重试策略区块", () => {
     });
     const post = fetchCalls.find((entry) => entry.url === POLICY_URL);
     assert.ok(post, "落盘走 retry-policy POST");
-    assert.equal(
-      (post.init.headers as Record<string, string>)["x-rescue-csrf"],
-      "rp-tok",
-      "csrf 回填",
-    );
     assert.equal((post.init.body as string).includes('"preset":"off"'), true, "body 携带档位");
+  });
+
+  it("数字栏键入即上报这一击的新值（不是上一次渲染的旧草稿）", async () => {
+    // setDraft 到下一次渲染才生效：`onChange` 里紧跟着读闭包 `draft` 拿到的是
+    // 改动前的值，于是这条链上报的永远是上一个数——用户改了值，落盘的却是旧值。
+    const { container } = await mountSettingsCard({ enabled: true, maxResumes: 3 });
+    const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]')!;
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
+        target: { value: "5" },
+      });
+    });
+    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
+    assert.equal(saveBtn.disabled, false, "键入 5 就是一条待保存的改动");
+    // 上报的值本身必须是这一击的 5（旧写法上报的是草稿态的上一值 3 → 无改动 → 按钮不亮）。
+    assert.equal(input.value, "5", "输入框回显这一击的新值");
+  });
+
+  it("清空数字栏（全选 + Delete）不上报 0：空草稿等于没填", async () => {
+    // `Number("")` 是 **0**：不设这一道的话，抹掉 maxResumes 会被当成「设成 0」
+    // 记成改动并落盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
+    const { container, setCalls } = await mountSettingsCard({ enabled: true, maxResumes: 3 });
+    const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]');
+    assert.ok(input !== null, "maxResumes 是一枚数字栏");
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
+        target: { value: "" },
+      });
+    });
+    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
+    assert.equal(saveBtn.disabled, true, "空草稿不得被当成 0 记成改动");
+    assert.deepEqual(setCalls, [], "没有改动就没有落盘");
   });
 
   it("provider 列表不可用（ok:false）→ 错误文案", async () => {
@@ -1794,6 +1897,8 @@ describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外�
       },
     }));
     await rescueState.refresh();
+    // 会话表按条目构造（键来自服务端 JSON，`__proto__` 必须落成一行而不是换掉整张表的
+    // 原型），因此它就是普通对象，deepEqual 直接比。
     assert.deepEqual(rescueState.data, {
       ok: true,
       sessions: {
@@ -1819,6 +1924,23 @@ describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外�
     stubFetch(() => ({ ok: true, body: { ok: true, sessions: "nope" } }));
     await rescueState.refresh();
     assert.deepEqual(rescueState.data, { ok: true });
+  });
+
+  it("服务端会话键 `__proto__` 落在表里成为一行，不换掉快照表的骨架", async () => {
+    // 必须走 JSON.parse：对象字面量里的 `__proto__:` 命中的是**原型 setter**，
+    // 造不出服务端真正交回的那种「自己的键叫 __proto__」的形状。
+    const body = JSON.parse(
+      '{"ok":true,"sessions":{"__proto__":{"count":7,"lastFireAt":0,"pending":null},' +
+        '"real":{"count":1,"lastFireAt":2,"pending":null}}}',
+    ) as Record<string, unknown>;
+    stubFetch(() => ({ ok: true, body }));
+    await rescueState.refresh();
+    const sessions = rescueState.data?.sessions;
+    assert.deepEqual(Object.keys(sessions ?? {}).toSorted(), ["__proto__", "real"]);
+    // 反证据：任何其他键都不得因为原型被替换而读到别人的数（真实缺陷的形状是
+    // `sessions["__proto__"] = row` 命中原型 setter，那一行消失且全表按原型兜底）。
+    assert.equal((sessions as Record<string, { count: number }> | undefined)?.["real"]?.count, 1);
+    assert.equal(({} as Record<string, unknown>)["count"], undefined);
   });
 
   it("pending 走快档：下一跳在一秒内补发", async () => {
@@ -1947,26 +2069,6 @@ describe("createActions 成功支与残余失败支", () => {
     assert.deepEqual(binding.calls, ["prompt", "prompt", "cancel"]);
   });
 
-  it("withdrawQueueItem / editQueueItem 失败 → failResult 透传 code 与 message", async () => {
-    const ctx = applyWithCtx();
-    ctx.bindings.set(
-      "s1",
-      sessionStub({ updateQueue: { ok: false, error: { code: "gone", message: "已被消费" } } })
-        .session,
-    );
-    const actions = actionsFromCtx(ctx);
-    assert.deepEqual(await actions.withdrawQueueItem("s1", "q1"), {
-      ok: false,
-      code: "gone",
-      message: "已被消费",
-    });
-    assert.deepEqual(await actions.editQueueItem("s1", "q1", "t"), {
-      ok: false,
-      code: "gone",
-      message: "已被消费",
-    });
-  });
-
   it("forkAndSend：第一轮（atSeq null）拒绝切分；子会话 prompt 失败透传", async () => {
     const ctx = applyWithCtx();
     const actions = actionsFromCtx(ctx);
@@ -1997,88 +2099,6 @@ describe("createActions 成功支与残余失败支", () => {
 });
 
 // ── inbox 投影的宽容面（坏形状不得炸 dock）────────────────────────────────
-
-/** 取某一标签的全部按钮（队列区每行都有同名控件）。 */
-function buttonsNamed(container: HTMLElement, label: string): HTMLButtonElement[] {
-  return allButtons(container).filter((btn) => btn.textContent.trim() === label);
-}
-
-function editableButtonCount(container: HTMLElement): number {
-  return buttonsNamed(container, "编辑").length;
-}
-
-describe("inbox 投影的宽容面", () => {
-  beforeEach(resetDomEnv);
-  afterEach(teardownDomEnv);
-
-  it("next-turn 非数组 / 非对象条目 / 非字符串 id → 逐项降级，不抛错", async () => {
-    const { container: emptyRow } = await mountDock(
-      {
-        queue: [
-          "nope",
-          { content: [] },
-          { id: 7, content: [] },
-          { id: "q9" },
-        ] as unknown as DockView["queue"],
-      },
-      null,
-    );
-    assert.ok(emptyRow.textContent.includes("撤回"), "带字符串 id 的行仍渲染");
-    assert.equal(buttonsNamed(emptyRow, "撤回").length, 1, "无 id/坏 id 的行全部丢弃");
-    assert.equal(editableButtonCount(emptyRow), 0, "无 content → 不可编辑");
-    // next-turn 整个不是数组（跨版本投影换形）→ 空队列
-    const { container } = await mountDock(
-      { queue: "not-a-list" as unknown as DockView["queue"] },
-      null,
-    );
-    assert.equal(buttonsNamed(container, "撤回").length, 0, "非数组投影按空队列处理");
-  });
-
-  it("content 里的非内容块被跳过；全空文本按空串预览（match 无命中）", async () => {
-    const { container } = await mountDock(
-      {
-        queue: [
-          {
-            id: "q1",
-            content: [42, { type: "text", text: "混块" }] as unknown as {
-              type: string;
-              text?: string;
-            }[],
-          },
-          { id: "q2", content: [{ type: "text", text: "" }] },
-        ],
-      },
-      null,
-    );
-    assert.ok(container.textContent.includes("混块"), "坏块跳过、好块照常预览");
-    assert.equal(editableButtonCount(container), 2, "两条都是纯文本 → 都可编辑");
-  });
-
-  it("含非文本块的超长预览按码点截到 200 并加省略号", async () => {
-    const long = "值".repeat(250);
-    const { container } = await mountDock(
-      {
-        queue: [
-          {
-            id: "q1",
-            content: [{ type: "image" }, { type: "text", text: long }],
-          },
-        ],
-      },
-      null,
-    );
-    const previewText = container.querySelector(".sr-queue-preview")?.textContent ?? "";
-    assert.ok(previewText.startsWith("[image]"), "非文本块以 [type] 占位");
-    assert.equal(previewText.length, 201, "200 码点 + 省略号");
-    assert.ok(previewText.endsWith("…"));
-  });
-
-  it("宿主框架没有 useProjection seat → 队列按空处理", async () => {
-    const { container } = await mountDock({}, null, "", { noProjection: true });
-    assert.ok(container.querySelector(".sr-dock"), "dock 仍常驻挂载");
-    assert.equal(buttonsNamed(container, "撤回").length, 0);
-  });
-});
 
 // ── RescueEditor 全链路（发送 / fork / 键盘 / 失败呈现）───────────────────
 
@@ -2250,114 +2270,6 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
   });
 });
 
-// ── 排队区：撤回 / 保存编辑 / 取消编辑的真实点击链路 ──────────────────────
-
-const queueView: Partial<DockView> = {
-  queue: [
-    { id: "q1", content: [{ type: "text", text: "甲" }] },
-    { id: "q2", content: [{ type: "text", text: "乙" }] },
-  ],
-};
-
-describe("QueueSection 撤回与编辑保存", () => {
-  beforeEach(resetDomEnv);
-  afterEach(teardownDomEnv);
-
-  it("撤回成功不留错误条；失败 / 抛错 / 非 Error 抛错都进错误条", async () => {
-    const { container, stub } = await mountDock(queueView, null);
-    let withdraws = 0;
-    stub.actions.withdrawQueueItem = async (): Promise<unknown> => {
-      withdraws += 1;
-      return withdraws === 1 ? { ok: true } : { ok: false, code: "gone", message: "已被消费" };
-    };
-    await act(async () => {
-      buttonsNamed(container, "撤回")[0]!.click();
-    });
-    await act(async () => {
-      await flush();
-    });
-    assert.equal(container.textContent.includes("已被消费"), false, "成功撤回不报错");
-    await act(async () => {
-      buttonsNamed(container, "撤回")[0]!.click();
-    });
-    await act(async () => {
-      await flush();
-    });
-    assert.ok(container.textContent.includes("gone: 已被消费"), "失败可见（错误条渲染）");
-
-    stub.actions.withdrawQueueItem = async (): Promise<unknown> => {
-      throw new Error("queue-busy");
-    };
-    await act(async () => {
-      buttonsNamed(container, "撤回")[0]!.click();
-    });
-    await act(async () => {
-      await flush();
-    });
-    assert.ok(container.textContent.includes("queue-busy"), "抛 Error 面");
-
-    const rawWithdraw = makeGate();
-    stub.actions.withdrawQueueItem = (): Promise<unknown> => rawWithdraw.promise;
-    await act(async () => {
-      buttonsNamed(container, "撤回")[0]!.click();
-    });
-    rawWithdraw.reject("raw-queue-fail");
-    await act(async () => {
-      await flush();
-    });
-    assert.ok(container.textContent.includes("raw-queue-fail"), "抛非 Error 面");
-  });
-
-  it("保存编辑：失败保留编辑态并显示原因；取消按钮直接退出", async () => {
-    const { container, stub } = await mountDock(queueView, null);
-    await act(async () => {
-      buttonsNamed(container, "编辑")[0]!.click();
-    });
-    await act(async () => {
-      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
-        container.querySelector("textarea")!,
-      ).onChange({ target: { value: "改后" } });
-    });
-    stub.actions.editQueueItem = async (): Promise<unknown> => ({ ok: false, message: "只此一条" });
-    await act(async () => {
-      buttonsNamed(container, "保存")[0]!.click();
-    });
-    await act(async () => {
-      await flush();
-    });
-    assert.ok(container.textContent.includes("只此一条"), "保存失败文案");
-    assert.ok(container.querySelector("textarea"), "失败后仍在编辑态（不丢草稿）");
-
-    stub.actions.editQueueItem = async (): Promise<unknown> => {
-      throw new Error("edit-busy");
-    };
-    await act(async () => {
-      buttonsNamed(container, "保存")[0]!.click();
-    });
-    await act(async () => {
-      await flush();
-    });
-    assert.ok(container.textContent.includes("edit-busy"), "保存抛错面");
-
-    const rawEdit = makeGate();
-    stub.actions.editQueueItem = (): Promise<unknown> => rawEdit.promise;
-    await act(async () => {
-      buttonsNamed(container, "保存")[0]!.click();
-    });
-    rawEdit.reject(RAW_EDIT_REJECT_REASON);
-    await act(async () => {
-      await flush();
-    });
-    assert.ok(container.textContent.includes(RAW_EDIT_REJECT_REASON), "保存抛非 Error 面");
-
-    await act(async () => {
-      buttonsNamed(container, "取消")[0]!.click();
-    });
-    assert.equal(container.querySelector("textarea"), null, "取消退出编辑态");
-    assert.ok(container.textContent.includes(RAW_EDIT_REJECT_REASON), "错误条不因退出编辑而消失");
-  });
-});
-
 // ── dock 动作行与 host 写通道（取消 / 开关）的失败面 ──────────────────────
 
 const turnErrorNodes: DockNode[] = [
@@ -2496,10 +2408,10 @@ describe("dock 动作行与 host 写通道", () => {
         },
       },
     };
-    const { container } = await mountDock({}, body, "tok", {
+    const { container } = await mountDock({}, body, {
       route: (url) =>
         url.startsWith(CANCEL_URL) || url.startsWith(TOGGLE_URL)
-          ? { ok: true, body: { ok: false, error: "invalid csrf token" } }
+          ? { ok: true, body: { ok: false, error: HOST_REJECT_TEXT } }
           : { ok: true, body },
     });
     await act(async () => {
@@ -2517,7 +2429,7 @@ describe("dock 动作行与 host 写通道", () => {
     });
     assert.ok(container.textContent.includes("开关切换未生效"), "开关失败必须可见");
 
-    const { container: okHost } = await mountDock({}, body, "tok", {
+    const { container: okHost } = await mountDock({}, body, {
       route: (url) =>
         url === STATE_URL
           ? { ok: true, body }
@@ -2533,6 +2445,30 @@ describe("dock 动作行与 host 写通道", () => {
       await flush();
     });
     assert.equal(okHost.textContent.includes("未生效"), false, "成功路径不留错误条");
+  });
+
+  it("读面缺席 → 会话动作直接失败并可见", async () => {
+    const body: RescueStateBody = {
+      ok: true,
+      sessions: {
+        s1: {
+          count: 1,
+          lastFireAt: 0,
+          pending: { turn: 2, kind: "resume", fireAt: 0, remainingMs: 5000 },
+          disabled: false,
+        },
+      },
+    };
+    const { container } = await mountDock({}, body);
+    rescueState.reader = undefined;
+    await act(async () => {
+      buttonByText(container, "取消")!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("取消未生效"), "没有读面就按失败呈现");
+    rescueState.reader = readerFromFetch();
   });
 
   it("未知 kind 的 pending 用兜底文案（Map 查表，原型键无从命中）", async () => {
@@ -2666,7 +2602,7 @@ describe("cardStore：快照引用稳定化与投影降级", () => {
 
     const memory = applyWithCtx();
     memory.scope.getSnapshot = () =>
-      snap({ status: "unavailable", writable: false, mode: "memory", value: undefined });
+      snap({ status: "unavailable", writable: false, value: undefined });
     assert.deepEqual(settingsWiring(memory).card.getSnapshot(), {
       status: "unavailable",
       writable: false,
@@ -2856,74 +2792,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     assert.ok(container.textContent.includes("normal · max 0 · QUOTA ✗"));
   });
 
-  it("providers GET 非 2xx → HTTP 状态码；GET reject → 异常文案", async () => {
-    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) =>
-      url === PROVIDERS_URL
-        ? { ok: false, status: 502, body: null }
-        : { ok: true, body: { ok: true, sessions: {} } },
-    );
-    assert.ok(container.textContent.includes("官方 retryPolicy 面不可用：HTTP 502"));
-    await unmountRoot();
-    const { container: thrown } = await mountSettingsCard(
-      { enabled: true },
-      {},
-      undefined,
-      (url) => {
-        if (url === PROVIDERS_URL) {
-          throw new Error("offline");
-        }
-        return { ok: true, body: { ok: true, sessions: {} } };
-      },
-    );
-    assert.ok(thrown.textContent.includes("offline"), "拉取抛错也归不可用");
-  });
-
-  it("host 拒绝落盘 → 保留暂存并显示原因；重试不再裸拉 state", async () => {
-    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
-      if (url === PROVIDERS_URL) {
-        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
-      }
-      if (url === POLICY_URL) {
-        return { ok: true, body: { ok: false, error: SETTINGS_REJECT_REASON } };
-      }
-      return { ok: true, body: { ok: true, csrf: "tok-1", sessions: {} } };
-    });
-    await pickPreset(container, 0, "off");
-    await clickRetrySave(container);
-    const full = container.textContent;
-    assert.ok(full.includes("保存失败：xkiro→off: settings-rejected"), "host 文案可见");
-    assert.ok(full.includes("保存（1 个改动）"), "失败的档位仍是用户意图");
-    assert.equal(callsTo(STATE_URL), 1, "首轮无 token → 先回填");
-    await clickRetrySave(container);
-    assert.equal(callsTo(STATE_URL), 1, "token 已在 → 第二轮不再拉 state");
-    assert.equal(callsTo(POLICY_URL), 2, "第二轮重发 POST");
-  });
-
-  it("落盘 503 且响应体非 JSON → 按状态码报告；非 Error reject → 原值入文案", async () => {
-    let policyRoute: FetchRoute = { ok: false, status: 503, body: null, badJson: true };
-    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
-      if (url === PROVIDERS_URL) {
-        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
-      }
-      if (url === POLICY_URL) {
-        return policyRoute;
-      }
-      return { ok: true, body: { ok: true, sessions: {} } };
-    });
-    rescueCsrfStore.token = "tok-1";
-    await pickPreset(container, 0, "enhanced");
-    await clickRetrySave(container);
-    assert.ok(container.textContent.includes("xkiro→enhanced: HTTP 503"), "按状态码报告");
-    policyRoute = { ok: true, body: null, rejectWith: "carrier-bare" };
-    await clickRetrySave(container);
-    assert.ok(
-      container.textContent.includes("保存失败：carrier-bare"),
-      "非 Error reject 也进文案（不显示 undefined）",
-    );
-  });
-
-  it("csrf 回填失败（非 2xx / 非对象体）只降级不阻断：POST 仍照发", async () => {
-    let stateRoute: FetchRoute = { ok: false, status: 500, body: null };
+  it("连续两次保存各自落盘：成功清空暂存，第二次照常发", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return {
@@ -2937,18 +2806,74 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
           },
         };
       }
-      if (url === STATE_URL) {
-        return stateRoute;
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
       }
-      return { ok: true, body: { ok: true } };
+      return { ok: true, body: { ok: true, sessions: {} } };
     });
     await pickPreset(container, 0, "off");
     await clickRetrySave(container);
     assert.equal(container.textContent.includes("保存（1 个改动）"), false, "落盘成功清空暂存");
-    stateRoute = { ok: true, body: NOT_A_RECORD_VALUE };
     await pickPreset(container, 1, "always");
     await clickRetrySave(container);
-    assert.equal(callsTo(POLICY_URL), 2, "回填失败仍发出 POST（host 自己判 403）");
+    assert.equal(callsTo(POLICY_URL), 2, "第二次保存仍发出写请求");
+  });
+
+  it("host 拒绝落盘 → 保留暂存并显示原因", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: false, error: SETTINGS_REJECT_REASON } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "off");
+    await clickRetrySave(container);
+    assert.ok(container.textContent.includes(SETTINGS_REJECT_REASON), "host 文案可见");
+    assert.ok(container.textContent.includes("保存（1 个改动）"), "失败的档位仍是用户意图");
+    assert.equal(callsTo(POLICY_URL), 1, "被拒一次就交回用户，不自动重试");
+  });
+
+  it("落盘 {ok:false} 且无 error → 回退到 rejected 文案", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: false } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "off");
+    await clickRetrySave(container);
+    assert.ok(container.textContent.includes("xkiro→off: rejected"));
+  });
+
+  it("读面中途缺席 → 保存报 remote unavailable 且保留暂存", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "off");
+    rescueState.reader = undefined;
+    await clickRetrySave(container);
+    assert.ok(container.textContent.includes("xkiro→off: remote unavailable"));
+    assert.ok(container.textContent.includes("保存（1 个改动）"), "未落盘的档位必须留着");
+    rescueState.reader = readerFromFetch();
+  });
+
+  it("provider 拉取抛错 → 面板点名异常", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        throw new Error("offline");
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    assert.ok(container.textContent.includes("offline"), "拉取异常归面板不可用");
   });
 
   it("撤销清空暂存；改回当前档位等同撤销；无暂存时保存直接返回", async () => {
@@ -2961,7 +2886,6 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
       }
       return { ok: true, body: { ok: true, csrf: "tok-1", sessions: {} } };
     });
-    rescueCsrfStore.token = "tok-1";
     await pickPreset(container, 0, "off");
     assert.ok(container.textContent.includes("保存（1 个改动）"));
     await pickPreset(container, 0, "default");
@@ -3086,7 +3010,7 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
   });
 
   it("en 字典渲染 dock：横幅倒计时与按钮都是英文，不残留中文", async () => {
-    const { container } = await mountDock({}, pendingBody, "", { t: tEn });
+    const { container } = await mountDock({}, pendingBody, { t: tEn });
     const text = container.textContent;
     assert.match(text, /auto-resume in 5s/u, "英文倒计时横幅");
     assert.match(text, /Auto-resume \(this session\)/u, "英文开关行标题");
@@ -3095,7 +3019,7 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
   });
 
   it("zh 字典渲染同一条 dock 横幅：中文在位（同一渲染路径换语言）", async () => {
-    const { container } = await mountDock({}, pendingBody, "", { t: tZh });
+    const { container } = await mountDock({}, pendingBody, { t: tZh });
     assert.match(container.textContent, /5s 后自动续跑/u);
   });
 

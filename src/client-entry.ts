@@ -44,19 +44,13 @@ import type {
   SessionBinding,
   SessionReferenceSource,
 } from "@deepseek-ai/dsh-api-session-controller/client";
-// `QueueAction` 是 `/types` 子路径上的官方线格式。
-import type { QueueAction } from "@deepseek-ai/dsh-api-session-controller/types";
-// Remote 调用的统一返回包（`prompt`/`cancel`/`updateQueue` 的返回都挂在它上面）。
+// Remote 调用的统一返回包（`prompt`/`cancel` 的返回都挂在它上面）。
 import type { RemoteFailure, RemoteResult } from "@deepseek-ai/dsh-typert-protocol";
 // `openSession` 属主是 workspace 导航服务（`ctx.uiWorkspace`）——官方 `ISessions` 上
 // **没有** `open`：`sessions.list` 的注释明写「navigation belongs to view owners」。
 import type { UiWorkspace } from "@deepseek-ai/dsh-client-ui-workspace/client";
-// 宿主交回的 id 是跨进程数据：先按形状守卫，再用官方 `brandString` 落回品牌类型
-//（`@deepseek-ai/dsh-brand` 运行时恒等、零状态；本包 client.js 把它内联，不新增运行时载入）。
-import { brandString } from "@deepseek-ai/dsh-brand";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
-// `MessageId` 由 dsh-llm 拥有（`updateQueue(itemId: MessageId, …)` 的形参品牌）。
-import type { MessageId, TextBlock } from "@deepseek-ai/dsh-llm";
+import type { TextBlock } from "@deepseek-ai/dsh-llm";
 import type { SlotRegistry } from "@deepseek-ai/dsh-client-ui-renderer/client";
 import type { ConfigForm } from "@deepseek-ai/dsh-client-ui-settings/client";
 import {
@@ -71,25 +65,21 @@ import type { CompletedUserTarget } from "../lib/transcript.ts";
 // 形状必须留在读法那一层才不构成两个模块互相引用），本文件的 view 装箱与 dock 决策
 // 吃的仍是同一份投影。
 import type { TranscriptView } from "../lib/turn-scope.ts";
-import { decideDockState } from "../lib/dock-state.ts";
-import type {
-  RescuePending,
-  RescueSessionState,
-  RescueStateBody,
-  ToggleState,
-} from "../lib/dock-state.ts";
+import { decideDockState, parseStateBody } from "../lib/dock-state.ts";
+import type { RescuePending, RescueStateBody, ToggleState } from "../lib/dock-state.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { claimApply } from "@jayyuen66/dsh-plugin-shared/lib/card-apply";
+import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
+import { createRescueReader } from "./remote.ts";
+import type { RescueReader } from "./remote.ts";
 
 // NS 的字面量形态是**承重**的：test/profile-bundle.ts 的漂移针从产物里按
 // `const NS = "…"` 抓这条声明，再与 cordis.patch.yml 的裸 `- id:` 比对（写成别名
 // 就让那条针取不到值）；类型标注不改变产物，针照旧抓得到。同一条串的另外两位（文案
 // 命名空间本源、引用标签 REFERENCE_SOURCE_KEY）各自由 `LocaleNs` 与该常量本身钉住。
 const NS: LocaleNs = "session-rescue";
-const STATE_URL = "/_dsh/session-rescue/state";
-const CANCEL_URL = "/_dsh/session-rescue/cancel";
-const TOGGLE_URL = "/_dsh/session-rescue/toggle";
 
 // ⚠ 两个**不同**的标识，别混用（混用过的形状：卡片打不开 / 保存写进别的条目）：
 //  - `NS` = loader 条目 id = settings 命名空间 = `configForms.get(NS)` 的入参，
@@ -151,8 +141,6 @@ const CSS = [
   // dock 宽度对齐会话内容列（与 ._0Z7gsa_column 同款居中约束）
   ".sr-dock{box-sizing:border-box;width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;gap:4px;padding:4px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
   ".sr-banner{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border,#d8dbe2);border-radius:6px;padding:4px 8px}",
-  ".sr-queue-row{display:flex;align-items:center;gap:8px}",
-  ".sr-queue-preview{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
 ].join("\n");
 
 // ── JSX 内联样式里重复出现的那几位（CSS 数组之外的共用位）────────────────────
@@ -178,7 +166,7 @@ const FIELD_ROW_STYLE: CSSProperties = {
 };
 
 // ── host 状态轮询（自排循环：有 pending 走 1s、空闲走 5s；无订阅或页签隐藏即停）
-// 快照引用稳定化：fetch 每次产出新对象，若直接赋给 data，useSyncExternalStore
+// 快照引用稳定化：每一跳解析都产出新对象，若直接赋给 data，useSyncExternalStore
 // 的 getSnapshot 每秒返回新引用 → dock 每秒强制重渲染（即使内容未变）。
 // 稳定化策略：JSON 序列化对比，仅当内容实际变化才替换 data 引用。
 
@@ -213,6 +201,10 @@ export interface RescueStateStore {
   timer: ReturnType<typeof setTimeout> | null;
   /** /state 是否在飞。在飞期间新订阅不补发——订阅抖动才不会放大成连发。 */
   inFlight: boolean;
+  /** 官方 Remote 读面；`undefined` = 当前部署没有远程面（数据面显示读不到）。 */
+  reader: RescueReader | undefined;
+  /** 连着多少跳没读到有效快照（0=上一跳有效）。决定退避档位与快照是否过期。 */
+  failStreak: number;
   refresh: () => Promise<void>;
   schedule: () => void;
   stop: () => void;
@@ -221,87 +213,68 @@ export interface RescueStateStore {
   getSnapshot: () => RescueStateBody | null;
 }
 
-// ── CSRF 回填：host 的 mutating POST（cancel/toggle/resume）要求回填
-// state GET 下发的 per-apply token（x-rescue-csrf 头）。token 只存内存（不进
-// localStorage：apply 重启即换，与 host per-apply 生命周期一致）。导出仅供单测。
-export const rescueCsrfStore: {
-  token: string;
-  remember: (body: unknown) => void;
-} = {
-  token: "",
-  remember(body: unknown): void {
-    if (!isRecord(body)) {
-      return;
-    }
-    const { csrf } = body;
-    if (typeof csrf === "string" && csrf !== "") {
-      this.token = csrf;
-    }
-  },
-};
-
-/** 从原始 /state 载荷投影 pending（字段不全/类型不符 → null；防御纵深）。 */
-function parsePending(raw: unknown): RescuePending | null {
-  if (!isRecord(raw)) {
-    return null;
-  }
-  const { turn, kind, fireAt, remainingMs, chained, suspended } = raw;
-  if (
-    typeof turn !== "number" ||
-    typeof kind !== "string" ||
-    typeof fireAt !== "number" ||
-    typeof remainingMs !== "number"
-  ) {
-    return null;
-  }
-  return {
-    turn,
-    kind,
-    fireAt,
-    remainingMs,
-    ...(chained === true ? { chained: true } : {}),
-    ...(suspended === true ? { suspended: true } : {}),
-  };
-}
-
-/** 一条会话计数的逐字段守卫投影：非数字落回 0，pending 只认显式 `null` 与可投影对象。
- *  `disabled` 只在显式 true 时出现在结果里（缺位 ⇒ 与 `false` 判定同解，见 dock 读侧）。 */
-function parseSessionEntry(entry: Record<string, unknown>): RescueSessionState {
-  const { count, lastFireAt, disabled, pending: pendingRaw } = entry;
-  return {
-    count: typeof count === "number" ? count : 0,
-    lastFireAt: typeof lastFireAt === "number" ? lastFireAt : 0,
-    pending: pendingRaw === null ? null : parsePending(pendingRaw),
-    ...(disabled === true ? { disabled: true } : {}),
-  };
-}
-
-/** 解析 /state 载荷为内部类型：逐字段守卫投影，坏形状降级而非丢给断言。
- *  ok!==true 或 sessions 非对象 → 返回 null（refresh 保持快照不动）。 */
-function parseStateBody(parsed: Record<string, unknown>): RescueStateBody | null {
-  if (fieldOf(parsed, "ok") !== true) {
-    return null;
-  }
-  const sessions = fieldOf(parsed, "sessions");
-  if (!isRecord(sessions)) {
-    return { ok: true };
-  }
-  const entries: Record<string, RescueSessionState> = {};
-  for (const sessionId of Object.keys(sessions)) {
-    const entry = sessions[sessionId];
-    if (isRecord(entry)) {
-      entries[sessionId] = parseSessionEntry(entry);
-    }
-  }
-  return { ok: true, sessions: entries };
-}
-
 /** 有 pending 时的周期：横幅按秒走倒计时，慢档会让显示的剩余时间明显过期。 */
 export const ACTIVE_POLL_MS = 1000;
 
 /** 无 pending 时的兜底周期：没有倒计时在跑，轮询只为发现 host 侧新出现的
- *  pending。旧实现不分档位一律 1Hz，空闲页签也每秒打一发 /state。 */
+ *  pending。不分档位一律 1Hz 的老口径，空闲页签也每秒打一发 /state。 */
 export const IDLE_POLL_MS = 5000;
+
+/** 连着这么多跳读不到有效快照 ⇒ 手上那份判定为过期（交回 null = rescueKnown=false，
+ *  开关行转中性态）。留三跳的余量：一次网络抖动不该把倒计时横幅清空。 */
+const STALE_AFTER_FAILURES = 3;
+
+/** 一直读不到时的周期上限。host 压根不在（网关态、host 已退出）时还按档打 /state，
+ *  等于把「读不到」实现成本机端口上每秒一发的高频轰炸。 */
+export const DEAD_POLL_CEILING_MS = 30_000;
+
+/** 退避：连跳越多间隔越长（翻倍），封顶 DEAD_POLL_CEILING_MS（导出仅供单测）。
+ *  `failStreak` 为 0/1 都交回原档：0 是「上一跳有效」，1 是「刚失败一次」，
+ *  两者都不该让周期凭空减半或加倍。 */
+export function backoffMs(base: number, failStreak: number): number {
+  return failStreak <= 1 ? base : Math.min(base * 2 ** (failStreak - 1), DEAD_POLL_CEILING_MS);
+}
+
+/** 取一跳 /state（经官方 Remote 的 `sessionRescue.state()`）。交回非记录、`ok!==true`、
+ *  sessions 坏形状、以及远程面拒绝/传输层 reject 全部归 null =「这一跳没读到有效快照」：
+ *  读侧只按这个结论做退避与过期判定，不必分辨来路。 */
+async function readStateHop(store: RescueStateStore): Promise<RescueStateBody | null> {
+  const { reader } = store;
+  if (reader === undefined) {
+    return null;
+  }
+  try {
+    const parsed: unknown = await reader.state();
+    return isRecord(parsed) ? parseStateBody(parsed) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 有效快照落表：内容变了才换引用（状态对象小，JSON 对比开销可忽略；不换引用 ⇒
+ *  React 跳过重渲染）。返回是否该惊动订阅者。 */
+function commitHop(store: RescueStateStore, data: RescueStateBody): boolean {
+  store.failStreak = 0;
+  const key = JSON.stringify(data);
+  if (key === store.stableKey) {
+    return false;
+  }
+  store.stableKey = key;
+  store.data = data;
+  return true;
+}
+
+/** 读不到有效快照：记连跳，到档则把手上那份判为过期。交回的是**是否发生了内容变化**
+ *  ——只有「由有到过期」那一跳才该惊动订阅者，之后的空跳维持 null 不再重渲染。 */
+function noteUnreachableHop(store: RescueStateStore): boolean {
+  store.failStreak += 1;
+  if (store.failStreak < STALE_AFTER_FAILURES || store.data === null) {
+    return false;
+  }
+  store.data = null;
+  store.stableKey = "";
+  return true;
+}
 
 /** 下一跳周期：档位只由快照里有没有 pending 决定（导出仅供单测）。 */
 export function nextPollMs(data: RescueStateBody | null): number {
@@ -353,57 +326,31 @@ export const rescueState: RescueStateStore = {
   listeners: new Set(),
   timer: null,
   inFlight: false,
+  reader: undefined,
+  failStreak: 0,
   async refresh(): Promise<void> {
     if (this.inFlight) {
       return;
     }
     this.inFlight = true;
-    // 通知门控：只有快照内容变了、或这一跳没读到有效载荷（HTTP 非 ok / 坏形状 /
-    // 抛错）才惊动订阅者。旧实现在 finally 里无条件遍历 listeners，内容不变也每
-    // tick 把每个订阅者 schedule 进 React 一遍。
-    let worthNotifying = false;
-    try {
-      const res = await fetch(STATE_URL, { headers: { accept: "application/json" } });
-      let data: RescueStateBody | null = null;
-      if (res.ok) {
-        // json() 返回 any：先经 unknown 再用 isRecord 收窄，避免从 any 断言
-        const parsed: unknown = await res.json();
-        if (isRecord(parsed)) {
-          rescueCsrfStore.remember(parsed);
-          data = parseStateBody(parsed);
-        }
+    const data = await readStateHop(this);
+    // 通知门控：只有快照内容**变了**（含「由有到过期」那一种）才惊动订阅者。每 tick
+    // 无条件遍历 listeners 会把内容不变的每个订阅者都 schedule 进 React 一遍。
+    const worthNotifying = data === null ? noteUnreachableHop(this) : commitHop(this, data);
+    this.inFlight = false;
+    if (worthNotifying) {
+      for (const listener of this.listeners) {
+        listener();
       }
-      if (data === null || !data.ok) {
-        worthNotifying = true;
-      } else {
-        // 状态对象小（每会话几个数字 + 布尔），JSON 对比开销可忽略。
-        // 内容不变 → 保留旧引用 → React 跳过重渲染。
-        const key = JSON.stringify(data);
-        if (key !== this.stableKey) {
-          this.stableKey = key;
-          this.data = data;
-          worthNotifying = true;
-        }
-      }
-    } catch {
-      // 轮询失败静默：保持旧引用，下一跳由 schedule 按档位补上。
-      worthNotifying = true;
-    } finally {
-      this.inFlight = false;
-      if (worthNotifying) {
-        for (const listener of this.listeners) {
-          listener();
-        }
-      }
-      this.schedule();
     }
+    this.schedule();
   },
   schedule(): void {
     this.stop();
     if (this.listeners.size === 0 || pageHidden()) {
       return;
     }
-    const pollMs = nextPollMs(this.data);
+    const pollMs = backoffMs(nextPollMs(this.data), this.failStreak);
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.refresh();
@@ -459,41 +406,41 @@ function useRescueState(): RescueStateBody | null {
   return useSyncExternalStore(rescueStoreBinding.subscribe, rescueStoreBinding.getSnapshot);
 }
 
+/** 写侧出口的统一结果：调用方只按成败分支，宿主交回的 cancelled/disabled 由
+ *  快照轮询反映，不在这里另抄一份形状。 */
 export interface JsonResult {
   ok: boolean;
-  cancelled?: boolean;
-  disabled?: boolean;
-  turn?: number;
 }
 
-async function postEmpty(url: string): Promise<JsonResult> {
+/** 写一次并投影结果：只认 `{ok:true}`；远程面缺席或传输失败都算失败。 */
+async function postSessionAction(
+  action: "cancel" | "toggle",
+  sessionId: string,
+): Promise<JsonResult> {
+  const { reader } = rescueState;
+  if (reader === undefined) {
+    return { ok: false };
+  }
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: rescueCsrfStore.token === "" ? {} : { "x-rescue-csrf": rescueCsrfStore.token },
-    });
-    const parsed: unknown = await res.json();
-    if (!res.ok || !isRecord(parsed)) {
-      return { ok: false };
-    }
-    // 只需 ok 布尔（调用方不消费 cancelled/disabled）；省略号投影避免断言
-    const { ok } = parsed;
-    return { ok: ok === true };
+    const body =
+      action === "cancel" ? await reader.cancel(sessionId) : await reader.toggle(sessionId);
+    return { ok: isRecord(body) && body["ok"] === true };
   } catch {
     return { ok: false };
   }
 }
-// 两位都是纯转发，真正的等待在 postEmpty 里（fetch + res.json）。本包的三条 async
+
+// 两位都是纯转发，真正的等待在 postSessionAction 里的 Remote 调用。本包的三条 async
 // 规则在此咬合：`require-await`（async 函数必须有 await）、`promise-function-async`
 //（返回 promise 的函数必须是 async）与 `return-await`（不许 `return await`）。
 // 因此把等待写成落地一跳再交回——语义与调用点完全一致（调用方要么 `await`（测试），
 // 要么把返回值当 promise 交给 runHostAction）。
 export async function postCancel(sessionId: string): Promise<JsonResult> {
-  const result = await postEmpty(`${CANCEL_URL}?sessionId=${encodeURIComponent(sessionId)}`);
+  const result = await postSessionAction("cancel", sessionId);
   return result;
 }
 export async function postToggle(sessionId: string): Promise<JsonResult> {
-  const result = await postEmpty(`${TOGGLE_URL}?sessionId=${encodeURIComponent(sessionId)}`);
+  const result = await postSessionAction("toggle", sessionId);
   return result;
 }
 
@@ -507,7 +454,7 @@ interface ActionResult {
 /**
  * `ctx.sessions` 在本包用到的三位上：直接索引官方 `ISessions`（installed
  * `dsh-api-session-controller/lib/types/client/contract/sessions.d.ts:43-157`）。
- * 旧镜像有三处与官方不符，都由这次改绑暴露：
+ * 直接索引官方 `ISessions` 而不是本地重述，因为重述容易在三处把标签标错：
  *  1. `binding(id)` 官方返回 **`SessionBinding | undefined`**（其 `.session` 是
  *     `SessionFace`），镜像写成 `{ session: SessionBinding }` 等于把 `SessionFace`
  *     标成了 `SessionBinding`——属性路径巧合，标签是错的；
@@ -516,7 +463,7 @@ interface ActionResult {
  *     都没有该成员，且 `sessions.list` 的注释明写「navigation belongs to view owners」；
  *     首方 Chat 的 fork 流程是 `ctx.sessions.fork(...).then((childId) =>
  *     ctx.uiWorkspace.openSession(childId))`（installed
- *     `dsh-client-ui-chat/lib/client.js:13876-13886`）。本包照旧镜像调 `sessions.open`
+ *     `dsh-client-ui-chat/lib/client.js:13876-13886`）。本包跟着那份重述调 `sessions.open`
  *     会在真宿主上 TypeError，并被 `forkAndSend` 的 catch 收成一次「操作失败」，
  *     测试因为按同一份镜像造假 sessions 而永远看不见。
  */
@@ -525,7 +472,7 @@ export type SessionsService = Pick<ISessions, "binding" | "fork" | "using">;
 /** 导航位按官方成员面投影（`UiWorkspace` 还有 openWorkspace/forkSession 等，本包只用一位）。 */
 type WorkspaceNavigation = Pick<UiWorkspace, "openSession">;
 
-/** 会话绑定取不到时的失败码：四条动作（重发/停止重问/撤回/编辑）的开手守卫同源。 */
+/** 会话绑定取不到时的失败码：三条动作（重发/停止重问/fork 重发）的开手守卫同源。 */
 const SESSION_UNAVAILABLE_CODE = "session-unavailable";
 
 interface ActionFailure {
@@ -535,21 +482,12 @@ interface ActionFailure {
 }
 
 /**
- * 本包对卡片交出的动作面。**会话/消息标识用官方品牌**（`SessionId` / `MessageId`），
- * 因为下游每一位都是官方 API 的形参——用裸 `string` 只是把不匹配推到运行时。
+ * 本包对卡片交出的动作面。**会话标识用官方品牌**（`SessionId`），因为下游每一位都是
+ * 官方 API 的形参——用裸 `string` 只是把不匹配推到运行时。
  */
 interface Actions {
   sendSameSession: (sessionId: SessionId, text: string) => Promise<ActionResult | ActionFailure>;
   stopAndReask: (sessionId: SessionId, text: string) => Promise<ActionResult | ActionFailure>;
-  withdrawQueueItem: (
-    sessionId: SessionId,
-    itemId: MessageId,
-  ) => Promise<ActionResult | ActionFailure>;
-  editQueueItem: (
-    sessionId: SessionId,
-    itemId: MessageId,
-    text: string,
-  ) => Promise<ActionResult | ActionFailure>;
   forkAndSend: (
     sessionId: SessionId,
     forkAtSeq: number | null,
@@ -582,9 +520,9 @@ function failResult(result: Rejected): ActionFailure {
 }
 
 /**
- * 一条纯文本块：官方 `TextBlock`（dsh-llm）。`prompt` 的 `PromptContentPart` text 支与
- * `QueueAction.edit.content` 的 `readonly TextBlock[]` 都收它——写成 `PromptContentPart`
- * 反而过不了 `updateQueue`（那是含 image/file 的联合，`TextBlock` 才是它的元素类型）。
+ * 一条纯文本块：官方 `TextBlock`（dsh-llm）。`prompt` 的 `PromptContentPart` text 支收它
+ * ——写成 `PromptContentPart` 反而过不了形参（那是含 image/file 的联合，`TextBlock` 才是
+ * 它的元素类型）。
  */
 function textPart(text: string): TextBlock {
   return { type: "text", text };
@@ -592,7 +530,11 @@ function textPart(text: string): TextBlock {
 
 function createActions(
   sessions: SessionsService,
-  workspace: WorkspaceNavigation | undefined,
+  /** 现取而非 apply 时读一次：`uiWorkspace` 是可选服务且刻意不进 inject，
+   *  它在 client 模块表里完全可以**晚于**本包激活（官方 ui-chat 同样在调用点解析，
+   *  见 packages/client/ui-chat/src/client/apply.ts:292）。apply 时读一次的话，
+   *  装配线里晚到的 workspace UI 永远读成 undefined ⇒ fork 重发再也不跳转。 */
+  workspaceOf: () => WorkspaceNavigation | undefined,
   t: Translate,
 ): Actions {
   /** 官方 `binding()`：借出**已被视图 retain** 的 binding，不延长其生命周期。 */
@@ -630,32 +572,6 @@ function createActions(
     return stopped.ok ? { ok: true } : failResult(stopped);
   }
 
-  async function withdrawQueueItem(
-    sessionId: SessionId,
-    itemId: MessageId,
-  ): Promise<ActionResult | ActionFailure> {
-    const binding = bindingOf(sessionId);
-    if (binding === undefined) {
-      return { ok: false, code: SESSION_UNAVAILABLE_CODE, message: t("sessionUnavailable") };
-    }
-    const result = await binding.session.updateQueue(itemId, { kind: "remove" });
-    return result.ok ? { ok: true } : failResult(result);
-  }
-
-  async function editQueueItem(
-    sessionId: SessionId,
-    itemId: MessageId,
-    text: string,
-  ): Promise<ActionResult | ActionFailure> {
-    const binding = bindingOf(sessionId);
-    if (binding === undefined) {
-      return { ok: false, code: SESSION_UNAVAILABLE_CODE, message: t("sessionUnavailable") };
-    }
-    const action: QueueAction = { kind: "edit", content: [textPart(text)] };
-    const result = await binding.session.updateQueue(itemId, action);
-    return result.ok ? { ok: true } : failResult(result);
-  }
-
   // fork 分支重发：从 forkAtSeq（上一轮 turn/end）切出子会话 → 导航过去 → 发送。
   // forkAtSeq === null（第一轮）禁止调用，UI 已隐藏该按钮。
   //
@@ -687,7 +603,7 @@ function createActions(
     }
     // 导航是可选服务：`ctx.get` 读出不建立依赖（缺 workspace UI 的装配里，本客户端
     // 插件仍要能加载——fork 与发送是主功能，切过去只是顺带）。
-    workspace?.openSession(childId);
+    workspaceOf()?.openSession(childId);
     try {
       return await sessions.using(childId, { source: SESSION_RESCUE_SOURCE }, async (reference) => {
         const result = await reference.binding.session.prompt([textPart(text)], "queue");
@@ -695,12 +611,12 @@ function createActions(
       });
     } catch {
       // 子会话拿不到引用（retain 失败/生成期已 dispose）：用户看到的仍是「分支不可用」，
-      // 与旧实现里 `binding(childId)` 取空时的回执码同源。
+      // 与 `binding(childId)` 取空时的回执码同源。
       return { ok: false, code: "branch-unavailable", message: t("branchUnavailable") };
     }
   }
 
-  return { sendSameSession, stopAndReask, withdrawQueueItem, editQueueItem, forkAndSend };
+  return { sendSameSession, stopAndReask, forkAndSend };
 }
 
 // ── 合并 view：useChat.legacy + useSession 控制字段 ─────────────────────
@@ -712,13 +628,13 @@ function createActions(
  * `@deepseek-ai/dsh-client-ui-session`（其 lib/types/client/index.d.ts:77-84）合入，
  * `useChat` 由 `@deepseek-ai/dsh-client-ui-chat`（其 contract/slots.d.ts:275-279）合入，
  * 于是本包 selector 读到的 `snap.running` / `snap.legacy.nodes` 等成员的形状、只读性、
- * 品牌（`sessionId: SessionId`）都由宿主侧的那份声明交出。旧实现把这四位手抄成
+ * 品牌（`sessionId: SessionId`）都由宿主侧的那份声明交出。把这四位手抄成
  * `sessionId: string` + 三个自造 selector 签名，`slots` 也因此只能跟着降级成本地面
  * （官方 `register` 会按 `ComposedProps` 反变校验组件形参，抄窄了就直接红，
  * 见下面 ClientCtx.slots 处记的那条 TS2769）。
  * 只有 `actions` / `t` 是本包自有的注入位（经 `slots.register` 的 inject 面下发）。
  */
-interface DockProps extends Pick<SessionStandardProps, "sessionId" | "useProjection"> {
+interface DockProps extends Pick<SessionStandardProps, "sessionId"> {
   /** 官方席位类型（同 `SessionStandardProps['useSession']`，写成名字便于引用属主导出）。 */
   useSession: SessionSnapshotSelector;
   /** 官方席位类型（同 `SessionStandardProps['useChat']`）。 */
@@ -726,89 +642,6 @@ interface DockProps extends Pick<SessionStandardProps, "sessionId" | "useProject
   actions: Actions;
   /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
   t: Translate;
-}
-
-/** 排队行的内部视图模型（inbox UserMessage 归一化后的形态）。 */
-interface QueueItem {
-  /** 官方 `UserMessage.id`（inbox 行的身份位），下游直接喂 `updateQueue(itemId)`。 */
-  id: MessageId;
-  /** 纯文本消息的原文（编辑回填用）；含非文本块时为 null（不可安全编辑）。 */
-  text: string | null;
-  /** 扁平化预览（非 text 块以 [type] 占位，200 字截断）。 */
-  preview: string;
-}
-
-const QUEUE_PREVIEW_CHARS = 200;
-
-/** 内容块守卫（inbox UserMessage.content 的元素）。 */
-function isContentBlock(value: unknown): value is { type: string; text?: string } {
-  return isRecord(value) && typeof fieldOf(value, "type") === "string";
-}
-
-/** inbox content 数组 → { text, preview }。逐元素守卫，坏形状跳过而非抛错。 */
-function queueTextFromContent(content: unknown): { text: string | null; preview: string } {
-  if (!Array.isArray(content)) {
-    return { text: null, preview: "" };
-  }
-  const blocks: { type: string; text?: string }[] = [];
-  for (const entry of content) {
-    if (isContentBlock(entry)) {
-      blocks.push(entry);
-    }
-  }
-  const preview = blocks
-    .map((block) =>
-      block.type === "text" && typeof block.text === "string" ? block.text : `[${block.type}]`,
-    )
-    .join(" ")
-    .replaceAll(/\s+/gu, " ")
-    .trim();
-  // 纯文本判定与拼接合并成一次遍历：原先 `every(判定)` + `map(b => b.text ?? "")`
-  // 两处判据同源，`?? ""` 的右支在 allText 为真时不可达（每个块都已确认 text
-  // 是字符串），而 noUncheckedIndexedAccess/可选属性又不允许直接 `block.text`。
-  const texts: string[] = [];
-  let allText = blocks.length > 0;
-  for (const block of blocks) {
-    const body = block.text;
-    if (block.type === "text" && typeof body === "string") {
-      texts.push(body);
-    } else {
-      allText = false;
-    }
-  }
-  // 代码点截断（对齐官方 QueueDock 的 Array.from 语义）：`/./gu` 逐码点切，
-  // emoji（代理对）不被劈半。不用 Array.from（unicorn/prefer-spread 拒）也不用
-  // 展开（no-misused-spread 拒：字符串展开按 UTF-16 码元，会劈开代理对）。
-  const chars = preview.match(/./gu) ?? [];
-  return {
-    text: allText ? texts.join("") : null,
-    preview:
-      chars.length > QUEUE_PREVIEW_CHARS
-        ? `${chars.slice(0, QUEUE_PREVIEW_CHARS).join("")}…`
-        : preview,
-  };
-}
-
-/**
- * inbox "next-turn"（UserMessage 线格式）→ QueueItem[]。
- * 逐字段守卫投影，对任意输入宽容（非数组/缺 id 一律跳过），绝不抛错——
- * undefined/未就绪入参返回空数组正是防崩点。
- */
-function queueItemsOfInbox(inbox: unknown): QueueItem[] {
-  const list = fieldOf(inbox, "next-turn");
-  if (!Array.isArray(list)) {
-    return [];
-  }
-  const items: QueueItem[] = [];
-  for (const message of list) {
-    const id = isRecord(message) ? fieldOf(message, "id") : undefined;
-    if (typeof id === "string") {
-      const { text, preview } = queueTextFromContent(fieldOf(message, "content"));
-      // 守卫过的宿主串落回官方品牌：`brandString` 运行时恒等（见文件头导入处）。
-      items.push({ id: brandString<MessageId>(id), text, preview });
-    }
-  }
-  return items;
 }
 
 function useTranscriptView(props: DockProps): TranscriptView {
@@ -949,132 +782,6 @@ function RescueEditor(props: EditorProps): ReactNode {
   return editorRow;
 }
 
-/** 排队消息区：逐行渲染，含编辑/撤回（自带草稿与错误态）。 */
-interface QueueSectionProps {
-  sessionId: SessionId;
-  actions: Actions;
-  queue: QueueItem[];
-  t: Translate;
-}
-
-function QueueSection(props: QueueSectionProps): ReactNode {
-  const { sessionId, actions, queue, t } = props;
-  const [editingItemId, setEditingItemId] = useState<string | null>(null);
-  const [itemDraft, setItemDraft] = useState("");
-  const [queueError, setQueueError] = useState<string | null>(null);
-
-  const saveEdit = async (item: QueueItem): Promise<void> => {
-    setQueueError(null);
-    try {
-      const result = await actions.editQueueItem(sessionId, item.id, itemDraft);
-      if (result.ok) {
-        setEditingItemId(null);
-      } else {
-        setQueueError(errText(result, t));
-      }
-    } catch (error) {
-      setQueueError(error instanceof Error ? error.message : String(error));
-    }
-  };
-  const withdraw = async (item: QueueItem): Promise<void> => {
-    setQueueError(null);
-    try {
-      const result = await actions.withdrawQueueItem(sessionId, item.id);
-      if (!result.ok) {
-        setQueueError(errText(result, t));
-      }
-    } catch (error) {
-      setQueueError(error instanceof Error ? error.message : String(error));
-    }
-  };
-
-  const rows: ReactNode[] = [
-    createElement("div", { key: "queue-label", className: "sr-hint" }, t("queueLabel")),
-  ];
-  for (const item of queue) {
-    if (editingItemId === item.id) {
-      const textarea = createElement("textarea", {
-        className: "sr-textarea",
-        value: itemDraft,
-        autoFocus: true,
-        onChange: (ev: React.ChangeEvent<HTMLTextAreaElement>) => {
-          setItemDraft(ev.target.value);
-        },
-      });
-      const saveButton = createElement(
-        "button",
-        {
-          type: "button",
-          className: "sr-button sr-primary",
-          disabled: itemDraft.trim() === "",
-          onClick: () => void saveEdit(item),
-        },
-        t("save"),
-      );
-      const discardButton = createElement(
-        "button",
-        {
-          type: "button",
-          className: "sr-button",
-          onClick: () => {
-            setEditingItemId(null);
-          },
-        },
-        t("cancel"),
-      );
-      rows.push(
-        createElement(
-          "div",
-          { key: `edit-${item.id}`, className: "sr-editor" },
-          textarea,
-          createElement("div", { className: "sr-row" }, saveButton, discardButton),
-        ),
-      );
-    } else {
-      // inbox UserMessage 无 placement（转向/上下文分类随旧 queue 模型移除）；
-      // 纯文本项可编辑，含附件等非文本块项只展示预览。
-      // editableText 是本行的不可变快照：编辑按钮只在它非空时出现，回填因此
-      // 不需要第二次降级（原 `item.text ?? ""` 的右支在按钮已渲染的装配下不可达）。
-      const editableText = item.text;
-      const editButton =
-        editableText === null
-          ? null
-          : createElement(
-              "button",
-              {
-                type: "button",
-                className: "sr-button",
-                onClick: () => {
-                  setEditingItemId(item.id);
-                  setItemDraft(editableText);
-                },
-              },
-              t("edit"),
-            );
-      const viewRow = createElement(
-        "div",
-        { key: `row-${item.id}`, className: "sr-queue-row" },
-        createElement("span", { className: "sr-queue-preview" }, item.text ?? item.preview),
-        editButton,
-        createElement(
-          "button",
-          {
-            type: "button",
-            className: "sr-button",
-            onClick: () => void withdraw(item),
-          },
-          t("withdraw"),
-        ),
-      );
-      rows.push(viewRow);
-    }
-  }
-  if (queueError !== null) {
-    rows.push(createElement("div", { key: "queue-error", className: "sr-error" }, queueError));
-  }
-  return rows;
-}
-
 /** 倒计时横幅（pending 为 null 则不渲染）。 */
 function bannerElement(
   pending: RescuePending | null,
@@ -1210,7 +917,7 @@ function toggleLabel(t: Translate, toggle: ToggleState, action: boolean): string
   return (action ? toggleActionTexts(t) : toggleStatusTexts(t))[toggle];
 }
 
-/** 每会话开关行（三态 v8：on=开启 / off=已关闭 / unknown=快照未就绪）。
+/** 每会话开关行（三态：on=开启 / off=已关闭 / unknown=快照未就绪）。
  *  unknown 时按钮禁用、文案取中性 "—"，避免把「还没同步到」显示成「已关闭」。 */
 function toggleRowElement(toggle: ToggleState, onToggle: () => void, t: Translate): ReactNode {
   // 三处取文案先落成变量：嵌进 createElement 参数位会超 max-nested-calls 上限。
@@ -1267,15 +974,13 @@ async function runAction(
   }
 }
 
-/** dock：倒计时横幅 / 停止重问 / 排队行 / 每会话开关 */
+/** dock：倒计时横幅 / 停止重问 / 编辑重试续写 / 每会话开关。
+ *  排队行不在这里：官方 `dsh-client-ui-conversation` 自己就往同一道
+ *  `conversation.input.dock` 注册了 QueueDock（id="queue"，逐行编辑/删除/插话都有），
+ *  本包再列一遍就是同一批消息显示两次。 */
 function RescueDockView(props: DockProps): ReactNode {
   const { sessionId, actions, t } = props;
   const view = useTranscriptView(props);
-  // 队列数据源 = inbox 投影（官方没有 `useSession.queue` 那一位，直读会 undefined）。
-  // useProjection 缺失（框架版本不含该 seat）时同样回空，不抛错。
-  const inbox =
-    typeof props.useProjection === "function" ? props.useProjection("inbox") : undefined;
-  const queue = queueItemsOfInbox(inbox);
   const rescue = useRescueState();
 
   const [busyStop, setBusyStop] = useState(false);
@@ -1284,7 +989,7 @@ function RescueDockView(props: DockProps): ReactNode {
   const [dockBusy, setDockBusy] = useState(false);
   const [dockError, setDockError] = useState<string | null>(null);
   // 取消/开关两条 host 写通道的失败面：postCancel/postToggle 返回
-  // {ok:false}（403 csrf 过期、host 重启、网络中断）时**什么都没发生**——倒计时
+  // {ok:false}（宿主拒绝、网关不可达、传输中断）时**什么都没发生**——倒计时
   // 照跑、待办照发。把它当成功（`void postCancel(...)`）会让用户按了取消却仍被
   // 自动注入。这里必须把结果消费掉并显式报错。
   const [hostActionError, setHostActionError] = useState<string | null>(null);
@@ -1311,10 +1016,14 @@ function RescueDockView(props: DockProps): ReactNode {
   const lastText = lastNode === null ? null : userText(lastNode.content);
   const canStopReask = view.running && lastText !== null;
 
-  // v8 竞态修复：渲染决策全部走纯函数 decideDockState（lib/dock-state.ts）——
+  // 竞态修复的支点：渲染决策全部走纯函数 decideDockState（lib/dock-state.ts）——
   // 轮询快照未就绪/会话切换缺状态时 toggle=unknown（中性态），
-  // hasContent 只控容器显隐，组件常驻挂载不卸载（本地状态不丢）。
-  const decision = decideDockState(view, queue.length, rescue, sessionId, canStopReask);
+  // hasContent 只控容器显隐，同一会话内常驻挂载（本地状态不丢）。
+  const decision = decideDockState(
+    { canStopReask, canEdit: canEditDock, canRetry: canRetryDock, canContinue: canContinueDock },
+    rescue,
+    sessionId,
+  );
   const { pending, toggle, showToggleRow, hasContent } = decision;
 
   const doStopReask = async (reaskText: string): Promise<void> => {
@@ -1340,7 +1049,7 @@ function RescueDockView(props: DockProps): ReactNode {
 
   if (canStopReask) {
     // canStopReask 是 `view.running && lastText !== null` 的 const 别名，
-    // TS 据此把 lastText 收窄为 string（旧实现里 doStopReask 内的 null 早退
+    // TS 据此把 lastText 收窄为 string（`doStopReask` 内那处 null 早退
     // 因此永远走不到：唯一的调用点就在本分支内）。
     children.push(stopReaskElement(busyStop, stopError, () => void doStopReask(lastText), t));
   }
@@ -1383,11 +1092,7 @@ function RescueDockView(props: DockProps): ReactNode {
     );
   }
 
-  if (queue.length > 0) {
-    children.push(createElement(QueueSection, { key: "queue", sessionId, actions, queue, t }));
-  }
-
-  // 开关行三态（v8）：on=开启 / off=已关闭 / unknown=快照未就绪（中性"—"，按钮禁用）
+  // 开关行三态：on=开启 / off=已关闭 / unknown=快照未就绪（中性"—"，按钮禁用）
   if (showToggleRow) {
     children.push(
       toggleRowElement(
@@ -1407,8 +1112,8 @@ function RescueDockView(props: DockProps): ReactNode {
     );
   }
 
-  // v8：dock 容器常驻挂载（本地状态不随轮询 tick 丢失）；hasContent=false 时
-  // 用 hidden 属性隐藏而非卸载组件——会话切换/快照空窗不再销毁草稿与 busy 标志。
+  // dock 容器常驻挂载（本地状态不随轮询 tick 丢失）；hasContent=false 时
+  // 用 hidden 属性隐藏而非卸载组件——会话切换/快照空窗草稿不随轮次刷新而丢与 busy 标志。
   return createElement("div", { className: "sr-dock", hidden: !hasContent }, children);
 }
 
@@ -1599,8 +1304,15 @@ function NumberRow(props: NumberRowProps): ReactNode {
     setDraft(String(value));
   }, [value]);
   // 保存条模式：有效输入只上报草稿（onCommit → touched），不直写。
-  const stage = (): void => {
-    const parsed = Number(draft);
+  // 入参是**这一击的新草稿**：setDraft 到下一次渲染才生效，`onChange` 里回头读闭包
+  // `draft` 只会拿到改动前的值（Enter 那条读的才是当前值）。
+  const stage = (candidate: string): void => {
+    // 清空输入框交回的是空串，而 `Number("")` 是 **0**：不挡就把「抹掉这一栏」当成
+    // 「设成 0」上报，保存后那一类自动救援整段停用。空草稿按「没填」处理。
+    if (candidate.trim() === "") {
+      return;
+    }
+    const parsed = Number(candidate);
     if (Number.isFinite(parsed) && parsed >= min && parsed <= max) {
       onCommit(Math.round(parsed));
     }
@@ -1629,12 +1341,12 @@ function NumberRow(props: NumberRowProps): ReactNode {
       disabled,
       onChange: (ev: React.ChangeEvent<HTMLInputElement>) => {
         setDraft(ev.target.value);
-        stage();
+        stage(ev.target.value);
       },
       onKeyDown: (ev: React.KeyboardEvent<HTMLInputElement>) => {
         if (ev.key === "Enter") {
           ev.preventDefault();
-          stage();
+          stage(draft);
         }
       },
       style: {
@@ -1666,9 +1378,9 @@ interface SettingsCardProps {
 }
 
 // ── 429 重试策略区块（官方 llm-retry provider 级 retryPolicy 配置）────────────
-// 数据流：GET /_dsh/session-rescue/retry-providers（host 读 llm-pi-ai namespace）
-// → 每 provider 一行下拉；选择 → POST /_dsh/session-rescue/retry-policy（带
-// csrf）→ host 经官方 settings.mutate 落盘（validator 在写处把关）→ 重拉列表。
+// 数据流：remote.sessionRescue.retryProviders()（host 读 llm-pi-ai namespace）
+// → 每 provider 一行下拉；选择 → remote.sessionRescue.retryPolicy() → host 经
+// 官方 settings.mutate 落盘（validator 在写处把关）→ 重拉列表。
 // 档位：default（官方默认 5 次码表）/ enhanced（12 次 + QUOTA + 8s→60s，
 // settings.yaml 四家现行同款）/ always（官方无限重试 + backoff）/ off（0 次）。
 
@@ -1690,9 +1402,6 @@ function parseProviderRow(rowRaw: Record<string, unknown>): RetryProviderRow {
     hasQuota: hasQuota === true,
   };
 }
-
-const RETRY_PROVIDERS_URL = "/_dsh/session-rescue/retry-providers";
-const RETRY_POLICY_URL = "/_dsh/session-rescue/retry-policy";
 
 /** preset → 下拉档位文案键（顺序即下拉顺序；文案本体在 UI_MESSAGES 双语字典里）。 */
 const RETRY_PRESET_KEYS: Record<string, keyof UiMessages> = {
@@ -1797,48 +1506,25 @@ function settingsSectionTitle(text: string, bordered: boolean): ReactNode {
   );
 }
 
-/** 单个 provider 的落盘 POST。返回 null=已落盘，返回文案=host 拒绝。
- *  fetch 只因网络/中止 reject，**不会因 4xx/5xx reject**——把 403/400/500 落到
- *  "成功"分支就会清空 pending，用户以为档位已保存。 */
+/** 单个 provider 的落盘（经官方 Remote 的 `sessionRescue.retryPolicy`）。返回 null=已落盘，
+ *  返回文案=host 拒绝。失败可能是 `{ok:false, error}` 业务结果，也可能是远程面拒绝；
+ *  两者都不得落到"成功"分支，否则 pending 被清空、用户以为档位已保存。 */
+
 const applyPreset = async (provider: string, preset: string): Promise<string | null> => {
-  if (rescueCsrfStore.token === "") {
-    // csrf 缺失：先拉 state 回填；仍失败则 POST 裸发 403（不阻断，交由 host 判定）。
-    try {
-      const resp = await fetch(STATE_URL, { headers: { accept: "application/json" } });
-      if (resp.ok) {
-        const parsed: unknown = await resp.json();
-        if (isRecord(parsed)) {
-          rescueCsrfStore.remember(parsed);
-        }
-      }
-    } catch {
-      // 回填失败降级：继续走 POST（host 会以 403 拒绝，本函数把它归为落盘失败）。
-    }
+  const { reader } = rescueState;
+  if (reader === undefined) {
+    return `${provider}→${preset}: remote unavailable`;
   }
-  const res = await fetch(RETRY_POLICY_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-rescue-csrf": rescueCsrfStore.token,
-    },
-    body: JSON.stringify({ provider, preset }),
-  });
-  let body: unknown = null;
   try {
-    body = await res.json();
-  } catch {
-    // 响应体非 JSON：只按状态码判定成败。
+    const body = await reader.retryPolicy(provider, preset);
+    if (isRecord(body) && body["ok"] === true) {
+      return null;
+    }
+    const error = fieldOf(body, "error");
+    return `${provider}→${preset}: ${typeof error === "string" ? error : "rejected"}`;
+  } catch (error) {
+    return `${provider}→${preset}: ${String(error)}`;
   }
-  // 响应体读取一律经 fieldOf 投影：`body.ok` 这种点访问被 tsconfig 的
-  // noPropertyAccessFromIndexSignature 拒，`body["ok"]` 又被 dot-notation 拒
-  // ——两条规则只有第三条路（本文件统一的 fieldOf 读法）同时满足。
-  const recorded = fieldOf(body, "ok") === true;
-  if (res.ok && recorded) {
-    return null;
-  }
-  const errorField = fieldOf(body, "error");
-  const reason = typeof errorField === "string" ? errorField : `HTTP ${String(res.status)}`;
-  return `${provider}→${preset}: ${reason}`;
 };
 
 /** 重试面板的加载状态（判别联合：`ok:true` 必带 providers 数组，load() 的两个 setState
@@ -1945,10 +1631,9 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
 
   const load = async (): Promise<void> => {
     try {
-      const res = await fetch(RETRY_PROVIDERS_URL, { headers: { accept: "application/json" } });
-      const parsed: unknown = await res.json();
-      if (!res.ok || !isRecord(parsed)) {
-        setState({ ok: false, error: `HTTP ${res.status}` });
+      const parsed: unknown = await rescueState.reader?.retryProviders();
+      if (!isRecord(parsed)) {
+        setState({ ok: false, error: "retry providers unavailable" });
         return;
       }
       // 逐字段守卫投影 providers（坏行直接丢弃，防御纵深；不经 any 断言）
@@ -1978,25 +1663,20 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     }
     setSaving(true);
     setSaveError(null);
-    try {
-      const entries = Object.entries(pending);
-      const outcomes = await Promise.all(
-        entries.map(([provider, preset]) => applyPreset(provider, preset)),
-      );
-      setSaving(false);
-      const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
-      if (failures.length > 0) {
-        // 保留 pending：失败的档位仍是用户选的意图，重试点一次即可（已成功的
-        // 档位重复 POST 是幂等的——host 侧同一 preset 写同一 retryPolicy）。
-        setSaveError(`${t("saveFailed")}${failures.join(t("failureJoiner"))}`);
-        return;
-      }
-      setPending({});
-      void load();
-    } catch (error) {
-      setSaving(false);
-      setSaveError(`${t("saveFailed")}${String(error instanceof Error ? error.message : error)}`);
+    const entries = Object.entries(pending);
+    const outcomes = await Promise.all(
+      entries.map(([provider, preset]) => applyPreset(provider, preset)),
+    );
+    setSaving(false);
+    const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
+    if (failures.length > 0) {
+      // 保留 pending：失败的档位仍是用户选的意图，重试点一次即可（已成功的
+      // 档位重复写是幂等的——host 侧同一 preset 写同一 retryPolicy）。
+      setSaveError(`${t("saveFailed")}${failures.join(t("failureJoiner"))}`);
+      return;
     }
+    setPending({});
+    void load();
   };
   const discardAll = (): void => {
     setPending({});
@@ -2041,20 +1721,6 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
       onDiscard: discardAll,
     }),
   );
-}
-
-/** touched 层与快照的差异字段（值语义比较；undefined 与缺失等价）。 */
-export function diffTouched(
-  touched: Record<string, unknown>,
-  value: Record<string, unknown>,
-): string[] {
-  const out: string[] = [];
-  for (const key of Object.keys(touched)) {
-    if (JSON.stringify(touched[key] ?? null) !== JSON.stringify(value[key] ?? null)) {
-      out.push(key);
-    }
-  }
-  return out;
 }
 
 /** providerExcludes 快照值 → 显示串（非数组按空串降级；数组直接 join）。 */
@@ -2358,12 +2024,17 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   // 保存条状态：touched = 用户动过的字段；providerExcludes 单独存草稿串
   // （显示形态 'a, b' 与存储形态 string[] 不同构，diff 单独判定）。
   const [touched, setTouched] = useState<Record<string, unknown>>({});
-  const [excludesDraft, setExcludesDraft] = useState(excludesText(value));
+  // 排除名单草稿：`null` = 「这边没动过」。存成「用户输入的文本」而不是「当前显示值」，
+  // 未动过的字段就恒等于快照——另一页签/另一次 apply 写同名空间时，快照换了而这边
+  // 还揣着挂载那帧的旧文本，会把别人的值覆盖回去（last-write-wins），而且保存条显示
+  // 「有改动」，用户看不出改动其实来自外部。
+  const [excludesEdit, setExcludesEdit] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const eff = (field: string): unknown => (field in touched ? touched[field] : value[field]);
   const excludesBaseline = excludesText(value);
-  const excludesDirty = excludesDraft !== excludesBaseline;
+  const excludesDraft = excludesEdit ?? excludesBaseline;
+  const excludesDirty = excludesEdit !== null && excludesEdit !== excludesBaseline;
   const dirty = diffTouched(touched, value).length > 0 || excludesDirty;
   const setField = (field: string, val: unknown): void => {
     setTouched((prev) => ({ ...prev, [field]: val }));
@@ -2386,12 +2057,13 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
       setSaveError(failure);
       return;
     }
-    // 快照已含新值（setAndVerify 复读确认过）→ 清空草稿即回到无改动态。
+    // 快照已含新值（setAndVerify 复读确认过）→ 交回「没动过」态，草稿跟着快照走。
     setTouched({});
+    setExcludesEdit(null);
   };
   const discard = (): void => {
     setTouched({});
-    setExcludesDraft(excludesBaseline);
+    setExcludesEdit(null);
     setSaveError(null);
   };
 
@@ -2412,7 +2084,7 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   const excludesSection = rescueExcludesSection({
     disabled,
     draft: excludesDraft,
-    onDraft: setExcludesDraft,
+    onDraft: setExcludesEdit,
     t,
   });
   const retrySection = createElement(RetryPolicySection, { key: "retry-policy", t });
@@ -2454,12 +2126,14 @@ export interface ClientCtx {
   /**
    * 官方 `SlotRegistry`（renderer 把它增强进 cordis `Context`）的**方法面投影**。取
    * `Pick` 而不是 `Context["slots"]` 整类型：`SlotRegistry` 是带 private 字段的 cordis
-   * `Service` 类（installed `dsh-client-ui-renderer/lib/types/client/registry.d.ts:46`），
+   * `Service` 类（installed `dsh-client-ui-renderer` 的 `lib/types/client/registry.d.ts` 里那份
+   * `declare class SlotRegistry`），
    * TS 对它做名义比较，测试桩件永远满足不了整类型；`register` 逐字复用
    * `SlotCore['register']` 的两个重载，`inject` 是「按槽位声明生命周期装 effect」那一位
-   *（collapse 跑 disposer、再次声明重跑工厂，契约写在 `registry.d.ts:100`）。
+   *（collapse 跑 disposer、再次声明重跑工厂，契约写在同一份 `registry.d.ts` 里 `register` 的
+   * 文档注释上）。
    * 于是本包的两位槽名都是**编译期受检**的：`conversation.input.dock` 由属主包
-   * `dsh-client-ui-conversation` merge（其 contract/slots.d.ts:214-218，list / scope
+   * `dsh-client-ui-conversation` merge（其 `contract/slots.d.ts` 的 `SlotMap` 里那条，list / scope
    * session / owner `InputZone`），`plugins.bundle.config` 由 `dsh-client-ui-plugin-manager`
    * merge（经 `ConfigPageForm` 那一条 import 载入）。list 槽必须给 `id`、keyed 槽必须给
    * `key`——官方 `KindOptions` 按 `SlotMap[K]['kind']` 分发（旧本地镜像把两者都写成可选）。
@@ -2521,8 +2195,6 @@ const inject = ["slots", "sessions", "configForms", "locale"];
 // 注：`uiWorkspace` 刻意**不进** inject（可选服务，缺了不该让整张卡挂不上），
 // 由 apply 里 `ctx.get("uiWorkspace")` 读出。
 
-const RESUME_NOTIFY_URL = "/_dsh/session-rescue/resume";
-
 /**
  * dsh 0.1.2-alpha.2 连接感知（connection/reset）：网关每次重建连接时 emit
  * （client 侧全局事件，session-controller / ui-settings 等同类订阅）。自动续跑
@@ -2530,45 +2202,29 @@ const RESUME_NOTIFY_URL = "/_dsh/session-rescue/resume";
  * "传输已就绪"——host 若在挂起态（suspendSession 未恢复）就重新武装定时器。
  * 断开本身不做臆测挂起：断连瞬间 host fire 失败已 settle 'skipped'，后续
  * 仍会由下一次 agent/error 重新调度，因此这里只做恢复方向。
- * 导出仅供单测（断言 resume 恢复通知回填 csrf）。
+ * 导出仅供单测（断言连接重置会调用读面的 resume）。
  */
 export function notifyHostConnected(ctx: ClientCtx): void {
   if (typeof ctx.on !== "function") {
     return;
   }
   ctx.on("connection/reset", () => {
-    // 无 token 时跳过：state 尚未拉取（首屏）或 host 已重启换 token，
-    // 裸发必 403 且无意义——host 定时器照旧，仅丢暂停恢复优化。
-    if (rescueCsrfStore.token === "") {
-      return;
-    }
-    try {
-      void fetch(RESUME_NOTIFY_URL, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-rescue-csrf": rescueCsrfStore.token,
-        },
-        body: JSON.stringify({ connected: true }),
-      });
-    } catch {
-      // 端点不可达时降级：host 定时器照旧（旧行为），仅丢失暂停恢复优化。
-    }
+    void (async (): Promise<void> => {
+      try {
+        await rescueState.reader?.resume();
+      } catch {
+        // 读面不可达时降级：host 定时器照旧，仅丢失暂停恢复优化。
+      }
+    })();
   });
 }
 
 function apply(ctx: ClientCtx): void {
-  // apply 幂等守卫（HMR/重复加载防护，chat-recovery 同款）
-  if (globalThis.__sessionRescueApplied === true) {
+  if (!claimApply(ctx, "__sessionRescueApplied", "session-rescue: apply claim")) {
     return;
   }
-  globalThis.__sessionRescueApplied = true;
-  ctx.effect(
-    () => () => {
-      globalThis.__sessionRescueApplied = undefined;
-    },
-    "session-rescue: apply claim",
-  );
+
+  rescueState.reader = createRescueReader(ctx);
 
   // 连接感知：重连就绪时通知 host 恢复挂起的自动续跑定时器。
   notifyHostConnected(ctx);
@@ -2595,7 +2251,7 @@ function apply(ctx: ClientCtx): void {
 
   // 官方 `Context['get']` 对已声明的服务名直接交出 `UiWorkspace | undefined`
   //（installed cordis/lib/types/reflect.d.ts:14），无需断言也无需本地投影。
-  const actions = createActions(ctx.sessions, ctx.get("uiWorkspace"), t);
+  const actions = createActions(ctx.sessions, () => ctx.get("uiWorkspace"), t);
 
   // 注册不加静默 try/catch：失败必须可见（chat-recovery 静默吞错是反模式）
   // 编辑/重试/续写统一只在 dock（conversation.input.dock，list 槽无链冲突）

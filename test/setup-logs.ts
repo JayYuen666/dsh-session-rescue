@@ -14,7 +14,7 @@ import { LOG_TEMPLATES } from "./log-templates.ts";
 /** 本包标签前缀，如 `[session-rescue]`。 */
 const PKG_PREFIX = "[session-rescue]";
 
-/** 插件会用到的四个 console 级别（联合类型取属性，避免以字符串索引 Console）。 */
+/** 插件会用到的 console 级别（联合类型取属性，避免以字符串索引 Console）。 */
 export type LogLevel = "info" | "warn" | "error" | "log";
 const LEVELS: readonly LogLevel[] = ["info", "warn", "error", "log"];
 

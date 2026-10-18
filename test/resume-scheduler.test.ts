@@ -591,12 +591,16 @@ describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
 
   it("跨版本脏快照（kind 为空串）：settle 与 stateSnapshot 双双回落 resume", () => {
     const scheduler = new ResumeScheduler();
+    // 恢复的前提是这条记录还在（`restorePending` 不再凭空造记录）：先用一次正常的
+    // 调度+挂起把它留成「有记录、无待办」的形状——那正是重连台账里残留快照的来路。
+    scheduler.onFailure({ ...base });
+    assert.ok(scheduler.suspendSession("s1") !== null);
     const dirty = { turn: 9, kind: "" as RescueKind, fireAt: 5, announcedAt: 1 };
-    assert.equal(scheduler.restorePending("s9", dirty), true);
-    assert.equal(scheduler.stateSnapshot()["s9"]?.pending?.kind, "resume", "快照回落 resume");
-    assert.equal(scheduler.settle("s9", "fired"), true);
-    assert.equal(scheduler.stateSnapshot()["s9"]?.counts.resume, 1, "配额记在 resume 名下");
-    assert.equal(scheduler.stateSnapshot()["s9"]?.pending, null);
+    assert.equal(scheduler.restorePending("s1", dirty), true);
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.kind, "resume", "快照回落 resume");
+    assert.equal(scheduler.settle("s1", "fired"), true);
+    assert.equal(scheduler.stateSnapshot()["s1"]?.counts.resume, 1, "配额记在 resume 名下");
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending, null);
   });
 
   it("restorePending：会话已有待办 → 拒绝覆盖（不丢已武装的续跑）", () => {
@@ -645,5 +649,61 @@ describe("已了结会话上的重复动作（host 竞态：定时器先跑完�
     const scheduler = settled();
     assert.equal(remainingMs(scheduler, "s1"), null);
     assert.equal(remainingMs(scheduler, "ghost"), null);
+  });
+});
+
+describe("挂起中的记录不得被台账淘汰（防失控闸门不能被静默清零）", () => {
+  it("填满台账后恢复挂起待办：counts 必须还是原来的", () => {
+    const scheduler = new ResumeScheduler({ now: makeClock().now });
+    // 真正 fire 一次，用掉 1 枚 resume 配额。
+    scheduler.onFailure(base);
+    assert.equal(scheduler.settle("s1", "fired"), true);
+    // 再排一次，随后被宿主挂起（follower 抛错那条路）。
+    scheduler.onFailure({ ...base, cooldownMs: 0 });
+    const suspended = scheduler.suspendSession("s1");
+    assert.notEqual(suspended, null, "挂起应交出待办快照");
+    // 220 枚别家会话把台账推过 MAX_SESSIONS：此刻 s1 的记录形状是
+    // 「无 pending、无定时器」，正是淘汰条件命中的那一类。
+    for (let i = 0; i < 220; i += 1) {
+      scheduler.onFailure({ ...base, sessionId: `other-${String(i)}`, cooldownMs: 0 });
+    }
+    assert.equal(scheduler.restorePending("s1", suspended!), true);
+    // 断言的是**行为**：恢复后配额仍在，长跑 daemon 上「失败→续跑→同失败」的上限
+    // 不会因为一次淘汰而回到满额。
+    const snap = scheduler.stateSnapshot()["s1"];
+    assert.equal(snap?.counts.resume, 1, "挂起中的会话被淘汰后，max-resumes 闸门会静默归零");
+  });
+
+  it("releaseSuspended：宿主丢快照后该记录重新可淘汰（不留永久占位）", () => {
+    const scheduler = new ResumeScheduler({ now: makeClock().now });
+    scheduler.onFailure(base);
+    assert.equal(scheduler.settle("s1", "fired"), true);
+    scheduler.onFailure({ ...base, cooldownMs: 0 });
+    const held = scheduler.suspendSession("s1");
+    assert.notEqual(held, null, "挂起应交出待办快照");
+    // 先证明挂起中不可淘汰。
+    for (let i = 0; i < 220; i += 1) {
+      scheduler.onFailure({ ...base, sessionId: `pin-${String(i)}`, cooldownMs: 0 });
+    }
+    assert.ok(scheduler.stateSnapshot()["s1"] !== undefined, "挂起中不得被淘汰");
+    // 宿主丢弃这份快照（取消/关开关/dispose/裁剪都走这里）。
+    scheduler.releaseSuspended("s1");
+    for (let i = 0; i < 220; i += 1) {
+      scheduler.onFailure({ ...base, sessionId: `after-${String(i)}`, cooldownMs: 0 });
+    }
+    assert.equal(
+      scheduler.stateSnapshot()["s1"],
+      undefined,
+      "释放后重新成为可淘汰的空闲记录，否则就换成一处永久占位",
+    );
+    // 记录已经不在了：拿着宿主丢弃的那份快照回来恢复必须被拒——`restorePending` 绝不凭空
+    // 造记录，否则 counts 全 0 的新记录等于把 max-resumes 闸门静默复位。
+    assert.equal(
+      scheduler.restorePending("s1", held!),
+      false,
+      "被淘汰的会话仍可用旧快照恢复，等于凭空造出一条带满额配比的记录",
+    );
+    // 幂等：对没有记录的会话调用是 no-op。
+    scheduler.releaseSuspended("never-seen");
   });
 });

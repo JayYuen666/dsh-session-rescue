@@ -1,6 +1,10 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { classifyFailure, looksRateLimitish } from "../lib/failure-classify.ts";
+import {
+  classifyFailure,
+  isRequestRetryWorthy,
+  looksRateLimitish,
+} from "../lib/failure-classify.ts";
 import type { FailureLike } from "../lib/failure-classify.ts";
 
 /** 宿主事件载荷在类型面上是 `unknown`（`agent/error` 的 `error.failure`）：真实
@@ -81,6 +85,50 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     assert.equal(classifyFailure({ message: "balance exhausted" }).transient, false);
   });
 
+  it("显式瞬时码先于账单措辞：provider 说是限速，随附文案提余额也不得判永久", () => {
+    // 文件头的第一原则是「先按 code 路由，文本模式仅作已知误分类的兜底」。
+    // 反例由属性层给出（test/property/failure-classify.property.test.ts）：文本兜底一旦排在
+    // code 路由之前，`{code:"RATE_LIMIT", message:"Insufficient quota…"}` 就永久不续跑——
+    // 一个明确自称限速的失败被一句账单文案钉死，正是本包最不该漏的那一形。
+    for (const code of ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"]) {
+      const verdict = classifyFailure({ code, message: "Insufficient quota, please top up" });
+      assert.equal(verdict.transient, true, `${code} 应按 code 路由判瞬时：${verdict.reason}`);
+      assert.match(verdict.reason, /code /u);
+    }
+    // 与之对照：没有码可路由时，账单措辞仍然是永久证据（上一条用例的判据不被这次调序抹掉）。
+    assert.equal(
+      classifyFailure({ message: "Insufficient quota, please top up" }).transient,
+      false,
+      "无 code 可路由 ⇒ 文本兜底仍判永久",
+    );
+  });
+
+  it("永久：QUOTA 码抢在 status 429 之前判（真宿主就这么交回）", () => {
+    // 形状出处：test/integration/agent-loop.test.ts 里官方 deepseek 适配器对
+    // mock server `quota_exceeded` 行为交回的 agent/error.failure
+    // ——`{ code:"QUOTA", status:429 }`。让 429 那条捷径先命中，等于给
+    // 「额度到了、重试不会变好」的失败反复补发回合。
+    const verdict = classifyFailure({
+      code: "QUOTA",
+      message: "mock insufficient quota",
+      status: 429,
+    });
+    assert.equal(verdict.transient, false);
+    // 余额型耗尽的证据在 reason 里可见（不是靠 status 抢判）
+    assert.match(verdict.reason, /QUOTA with balance-exhausted evidence/u);
+  });
+
+  it("瞬时：QUOTA 带 provider Retry-After 即按 provider 的话再来一次", () => {
+    const verdict = classifyFailure({
+      code: "QUOTA",
+      message: "quota reached",
+      status: 429,
+      providerRetryAfterMs: 15_000,
+    });
+    assert.equal(verdict.transient, true);
+    assert.match(verdict.reason, /QUOTA with provider Retry-After/u);
+  });
+
   it("瞬时：status 429 + insufficient_quota 必须重试（HTTP 429 定义即限速；百度 token plan 限流型配额拒绝，冷却后有配额回来）", () => {
     const verdict = classifyFailure(
       payloadLike({
@@ -149,6 +197,84 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
   it("非对象输入", () => {
     assert.equal(classifyFailure(null).transient, false);
     assert.equal(classifyFailure(payloadLike("str")).transient, false);
+  });
+});
+
+describe("请求级判据 isRequestRetryWorthy（与回合级同源）", () => {
+  it("QUOTA + 429 无限流证据 ⇒ 不重发（真宿主对余额/配额到期的交回形）", () => {
+    // 这条即 test/integration/agent-loop.test.ts 抓到的原始载荷。host 的内联判据
+    // 曾用 `status===429 ||` 直接放行，于是无策略 provider 上最多连发 requestRetryMax 次。
+    assert.equal(
+      isRequestRetryWorthy({ code: "QUOTA", message: "mock insufficient quota", status: 429 }),
+      false,
+    );
+  });
+
+  it("QUOTA + 限流措辞或 Retry-After ⇒ 值得再发一次", () => {
+    assert.equal(
+      isRequestRetryWorthy({ code: "QUOTA", message: "HTTP 429: rate limit", status: 429 }),
+      true,
+    );
+    assert.equal(
+      isRequestRetryWorthy({
+        code: "QUOTA",
+        message: "quota reached",
+        status: 429,
+        providerRetryAfterMs: 15_000,
+      }),
+      true,
+    );
+  });
+
+  it("限速族之外的一律交回：5xx/超时不是限速，余额耗尽也不是", () => {
+    assert.equal(
+      isRequestRetryWorthy({ code: "SERVER", message: "bad gateway", status: 502 }),
+      false,
+    );
+    assert.equal(isRequestRetryWorthy({ code: "TIMEOUT", message: "timed out" }), false);
+    // 非 QUOTA 码 + 429：沿用本包既有立场「429 状态码优先，余额文本不得抢判永久」
+    // （classifyFailure 那条同名用例钉着），请求级与它保持同向。
+    // 余额耗尽要拒重发的那一支是 code===QUOTA，由上面一条用例钉。
+    assert.equal(
+      isRequestRetryWorthy({ code: "ANY", message: "insufficient balance", status: 429 }),
+      true,
+    );
+    assert.equal(
+      isRequestRetryWorthy({ code: "AUTH", message: "429 rate limit" }),
+      false,
+      "永久码优先，文本证据不得翻案",
+    );
+    assert.equal(isRequestRetryWorthy({ code: "RATE_LIMIT", message: "" }), true);
+    assert.equal(isRequestRetryWorthy(null), false);
+    assert.equal(isRequestRetryWorthy(payloadLike("not a record")), false);
+  });
+});
+
+describe("QUOTA@429 的两种形（回合级也必须分得开）", () => {
+  it("窗口型配额（无余额措辞的 429）⇒ 瞬时：冷却后有配额回来", () => {
+    // 百度 token plan 的实测措辞。回合级与请求级在这里必须同向，
+    // 否则同一枚失败会「重发请求可以、重开回合不行」，行为难以解释。
+    const verdict = classifyFailure({
+      code: "QUOTA",
+      message: "Allocated quota exceeded, please increase your quota limit.",
+      status: 429,
+    });
+    assert.equal(verdict.transient, true);
+    assert.match(verdict.reason, /QUOTA at 429 without balance-exhaustion evidence/u);
+  });
+
+  it("字段类型不符时按缺失降级，不抛", () => {
+    assert.equal(
+      classifyFailure(payloadLike({ code: 429, message: null, status: "429" })).transient,
+      false,
+    );
+    // 请求级：code/message 不是串、status 不是数时，只剩 Retry-After 这一条证据可用。
+    assert.equal(isRequestRetryWorthy(payloadLike({ code: 429, message: null })), false);
+    assert.equal(
+      isRequestRetryWorthy(payloadLike({ code: 429, providerRetryAfterMs: 30_000 })),
+      true,
+      "provider 明确给了再来时刻 ⇒ 值得等",
+    );
   });
 });
 

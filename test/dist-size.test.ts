@@ -8,7 +8,7 @@
 // 不该立刻要求改预算；翻倍一定会顶穿。确需突破时改这些常量并写明理由。
 //
 // 明确不做的事：**不开 minify**。压缩后的产物里跨包说明符字符串（`from "@deepseek-ai/dsh-brand"`
-// 与 `from "@jayyuen66/dsh-plugin-shared/lib/http"`）会双双消失，于是 test/build-host.test.ts 那
+// 与 `from "@jayyuen66/dsh-plugin-shared/lib/record"`）会双双消失，于是 test/build-host.test.ts 那
 // 两条「跨包依赖必须外部化」的断言从「被内联了也不报」变成恒绿——它们防的正是 isRecord /
 // brandString 这类单点被就地复制成多份。省下的体积不值得废掉两道真门禁，所以产物保持可读，
 // 体积改用预算盯着。
@@ -19,11 +19,12 @@ import path from "node:path";
 
 const pkgDir = path.resolve(import.meta.dirname, "..");
 
-/** host 半产物体积预算（实测 86,759 B）：宿主按包名载入它，这些字节是真实装载成本。 */
-const HOST_BUDGET_BYTES = 109_000;
-/** client 半产物体积预算（实测 73,354 B）：浏览器侧加载，按平台计账。 */
+/** host 半产物体积预算：宿主按包名载入它，这些字节是真实装载成本。 */
+// 官方 Typert Remote 服务（六条端点的方法版）让 host.js 增加约 2 KB。
+const HOST_BUDGET_BYTES = 112_000;
+/** client 半产物体积预算：浏览器侧加载，按平台计账。 */
 const CLIENT_BUDGET_BYTES = 92_000;
-/** `types/` 入口声明体积预算（实测 27,852 B）：整目录进 `files`，体积会计进 tarball。 */
+/** `types/` 入口声明体积预算：整目录进 `files`，体积会计进 tarball。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 35_000;
 
 /** 产物文件名与预算的对照。 */

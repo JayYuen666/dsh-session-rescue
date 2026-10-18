@@ -1,17 +1,17 @@
 /**
  * transcript — 会话转录纯函数（host/client 双端共用的浏览器安全模块）。
  *
- * 输入：一个普通 "view" 对象，由 client 组件从两个已验证的 0.1.2-alpha.1
- * 数据源合并而来（见计划 Global Constraint 10）：
+ * 输入：一个普通 "view" 对象，由 client 组件从两个已验证的数据源合并而来：
  *   nodes / turnEnds / runningCalls   ← useChat((c) => c.legacy)
  *   running / removed / lastAgentError ← useSession((s) => ...)
- * 本版本 SessionSnapshot 没有 nodes 字段；chat-recovery 0.3.5 因从 useSession
+ * installed 的 `SessionSnapshot`（dsh-api-session-controller 的
+ * client/contract/snapshot.d.ts:58）没有 nodes 字段；chat-recovery 因从 useSession
  * 读 nodes 而损坏 —— 禁止复制它的数据源假设。
  *
  * 双模式消费：
  *   Node/测试: 直接 ESM import 本文件。
  *   Web:       build-client.mjs 经 rolldown 把 src/client-entry.ts 与本文件
- *              一起打包进 client.js（无 EXPORT-GUARD 拼接，旧 hack 已废除）。
+ *              一起打包进 client.js（无 EXPORT-GUARD 拼接）。
  * 因此本文件必须是 Node 与浏览器都能安全求值的纯函数模块（无 I/O、无 DOM）。
  *
  * 「某一轮范围内有什么」那层读法（连同视图形状）在 lib/turn-scope.ts：本文件的
@@ -124,8 +124,7 @@ export function hostRetryPending(view: TranscriptView, turn: number): boolean {
 
 /** 最后完成轮的终态失败；running 会话永不产生失败。
  *  轮次择优就地完成：判据要的除了轮号还有它自己的 end seq，单列一份「取最大轮号」
- *  的导出只会多出一条只被单测取用的出口（原有 `lastTurnOf` 已按此删除，同一条判据
- *  由本函数的用例钉住）。 */
+ *  的导出只会多出一条只被单测取用的出口（同一条判据由本函数的用例钉住）。 */
 export function failureOfLastTurn(view: TranscriptView): TurnFailure | null {
   if (view.running) {
     return null;

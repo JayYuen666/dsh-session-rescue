@@ -89,6 +89,23 @@ describe("restorePending / remainingMs（重连恢复面）", () => {
     assert.equal(remainingMs(scheduler, "s1"), 7000, "剩余 = fireAt - now");
   });
 
+  it("restorePending：会话已不被记录（dispose/淘汰过）⇒ 拒绝，且不凭空造出一枚满额记录", () => {
+    // 反例来自属性层（test/property/resume-scheduler.property.test.ts）：旧实现走
+    // `rec()`，未知会话会被就地新建一枚 counts 全 0 的记录并返回 true——于是
+    // 「恢复一条早就被 dispose 的挂起待办」拿到的是**满额** maxResumes 配额，
+    // 防失控闸门在这条会话上被静默复位，日志里一个字都不会提。
+    const clock = makeClock();
+    const scheduler = new ResumeScheduler({ now: clock.now });
+    const pending = { turn: 7, kind: "resume" as const, fireAt: 5_010_000, announcedAt: 1 };
+    assert.equal(scheduler.restorePending("never-seen", pending), false, "无记录 ⇒ 快照作废");
+    assert.deepEqual(scheduler.stateSnapshot(), {}, "拒绝不得留下任何记录");
+    // 记录被 disposeAll 清空后同样拒绝（重连台账里残留的旧快照不能复活配额）。
+    scheduler.onFailure(base);
+    scheduler.disposeAll();
+    assert.equal(scheduler.restorePending("s1", pending), false);
+    assert.deepEqual(scheduler.stateSnapshot(), {});
+  });
+
   it("remainingMs：无待办返回 null；已到点钳制为 0", () => {
     const clock = makeClock();
     const scheduler = new ResumeScheduler({ now: clock.now });

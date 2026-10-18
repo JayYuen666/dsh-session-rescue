@@ -2,7 +2,7 @@
 //
 // 为什么值得一条测试（两个坏方向都不报错、只在线上发作）：发布形态下 host.js 躺在
 // node_modules 里被 dsh 载入——
-//   1) 内联：`@jayyuen66/dsh-plugin-shared/lib/http` 这类**子路径**说明符一旦被打进产物，shared 的
+//   1) 内联：`@jayyuen66/dsh-plugin-shared/lib/record` 这类**子路径**说明符一旦被打进产物，shared 的
 //      模块级状态就在每个插件里各复制一份；rolldown 的 external 字符串项是精确匹配，
 //      只列包名会漏掉子路径，故 build-host.mjs 按「包名段」判定（该坑已在脚本注释登记）。
 //   2) 残留：产物里只要还剩 `./lib/xxx.ts`，Node 载入即抛 ERR_UNSUPPORTED_NODE_MODULES_
@@ -32,9 +32,9 @@ describe("buildHost()", () => {
       "产物须带生成标记（勿手改 host.js）",
     );
     // 值导入的包必须列在 dependencies 或 peerDependencies（宿主包落后者，见 publish-manifest
-    // 的门禁），否则被内联。0.1.7 起这个值导入是**宿主 fork**
-    // 的 schemastery：只有它的 resolve 会把 .volatile() 字段包成 Volatile 引用（本包十三项
-    // 设置全走这条通道），公共 schemastery 既没有 .volatile()、解析出的也仍是普通值
+    // 的门禁），否则被内联。这个值导入必须是**宿主 fork**
+    // 的 schemastery：只有它的 resolve 会把 .volatile() 字段包成 Volatile 引用（本包全部
+    // volatile 设置项都走这条通道），公共 schemastery 既没有 .volatile()、解析出的也仍是普通值
     // （设置卡写进去的值永远读不到 = 续跑开关静默失效）。
     assert.ok(
       out.includes('from "@deepseek-ai/schemastery"'),
@@ -55,16 +55,16 @@ describe("buildHost()", () => {
     // 本包 client 半是**结构性例外**：build-client.mjs 只 external react（浏览器侧解析不了
     // 裸说明符），故 client.js 里仍是内联的 brandString——那条不由外部化裁定消灭。
     assert.ok(
-      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/http"'),
-      "shared/http 必须外部化",
+      out.includes('from "@deepseek-ai/dsh-typert-protocol"'),
+      "dsh-typert-protocol 必须外部化（读面的服务基类与注册口都来自宿主）",
     );
     assert.ok(
       out.includes('from "@jayyuen66/dsh-plugin-shared/lib/record"'),
       "shared/record 必须外部化（SP-D 起 isRecord/fieldOf 单点在 shared，内联即复制判据）",
     );
-    // 自有薄包装（x-rescue-csrf 头名）确已并入单文件：证明"内联了自己的代码"这一步
-    // 真的发生了，外部化的只有 shared（两条断言方向相反，缺一条就盖不住回归）。
-    assert.ok(out.includes("x-rescue-csrf"), "本包代码须已并入单文件产物");
+    // 本包自己的读面代码确已并入单文件：证明"内联了自己的代码"这一步真的发生了，
+    // 外部化的只有跨包依赖（两条断言方向相反，缺一条就盖不住回归）。
+    assert.ok(out.includes("sessionRescue"), "本包代码须已并入单文件产物");
   });
 
   it("产物 host.js：不残留 ./x.ts 形态的相对说明符", async () => {
@@ -74,15 +74,13 @@ describe("buildHost()", () => {
   });
 });
 
-describe("闸门的外部化面（shared/lib/trust）", () => {
-  it("lib/trust 子路径保持裸说明符，且 guardTrust 的实现未被内联", async () => {
-    // 这些包原先只钉了 http/project-key/record/jsonl 几枚子路径，`lib/trust` 是新增的第四个坑位：
-    // external 的字符串项是精确匹配，子路径一旦漏掉就把整份判据复制进本包产物（判据分叉的起点）。
+describe("读面基座的外部化面（dsh-typert-protocol）", () => {
+  it("remote 标记与服务基类保持裸说明符，不被复制进本包产物", async () => {
     const out = await buildHost();
     assert.ok(
-      out.includes('from "@jayyuen66/dsh-plugin-shared/lib/trust"'),
-      "shared/trust 必须外部化",
+      out.includes('from "@deepseek-ai/dsh-typert-protocol"'),
+      "dsh-typert-protocol 必须外部化",
     );
-    assert.ok(!/^function guardTrust\(/mu.test(out), "产物不得内联 guardTrust 的函数体");
+    assert.ok(!/^class TypertRemoteService\b/mu.test(out), "产物不得内联 TypertRemoteService");
   });
 });

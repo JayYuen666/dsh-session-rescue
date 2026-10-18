@@ -1,9 +1,8 @@
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { applyRescue } from "./config-refs.ts";
 
-// E5：用户主动中止/打断的回合绝不能烧掉 maxResumes/maxContinues 配额。
+// 用户主动中止/打断的回合绝不能烧掉 maxResumes/maxContinues 配额。
 //
 // 判定位置（按宿主事件流核实过）：中止信号在事件流里是 turn/end
 // reason.kind='aborted'（'interrupted' 同视），而 harness 的 agent-loop 在
@@ -11,8 +10,6 @@ import { applyRescue } from "./config-refs.ts";
 // abort 的回合直接 rethrow、**根本不发 agent/error**（core/agent-loop/src/agent.ts
 // :322-341）。所以 abort 保护只能落在 agent/status 侧（此刻 turn/end 已就位）：
 // 原先在 agent/error 侧扫 turn/end 的那段判定永远空扫，是死代码，已删。
-
-const STATE = "/_dsh/session-rescue/state";
 
 interface TimerEntry {
   fn: () => void;
@@ -45,13 +42,14 @@ interface MockInjectCtx {
    *  .configure({ auto: false }, svc.fiber)))`）。缺这个成员，替身在激活时就少了
    *  宿主真正会调的那一手。 */
   settings: MockSettings;
+  reflect: { provide: (name: string, service: unknown) => () => void };
 }
 
 interface MockCtx {
   handlers: Record<string, (payload: unknown) => void>;
   timers: TimerEntry[];
-  routes: Map<string, { handler: (req: IncomingMessage, res: ServerResponse) => void }>;
   scopeValue: Record<string, unknown>;
+  service: (name: string) => unknown;
   agentsService: {
     rootsList: MockAgent[];
     byId: Map<string, MockAgent>;
@@ -61,10 +59,11 @@ interface MockCtx {
 }
 
 function createCtx(): MockCtx {
+  const provided: Record<string, unknown> = {};
   const ctx: MockCtx = {
     handlers: {},
     timers: [],
-    routes: new Map(),
+    service: (name: string) => provided[name],
     scopeValue: {
       enabled: true,
       providerExcludes: [],
@@ -110,23 +109,11 @@ function createCtx(): MockCtx {
       };
     },
   };
-  const webServer = {
-    register(route: {
-      path: string;
-      handler: (req: IncomingMessage, res: ServerResponse) => void;
-    }) {
-      ctx.routes.set(route.path, route);
-      return () => {
-        ctx.routes.delete(route.path);
-      };
-    },
-  };
-  const provided: Record<string, unknown> = {
+  Object.assign(provided, {
     agents: ctx.agentsService,
     settings,
     timer,
-    webServer,
-  };
+  });
   // 0.1.7：apply 第二参是 volatile 引用（按 scopeValue 现读，引用不变、值可变）。
   applyRescue(
     {
@@ -148,6 +135,14 @@ function createCtx(): MockCtx {
             effect: (factory) => void factory(),
             get: (name: string) => provided[name],
             settings,
+            reflect: {
+              provide(name: string, service: unknown) {
+                provided[name] = service;
+                return () => {
+                  Reflect.deleteProperty(provided, name);
+                };
+              },
+            },
           });
         }
       },
@@ -180,22 +175,10 @@ function turnEnd(turn: number, kind: string): unknown {
 }
 
 function countsOf(ctx: MockCtx): Record<string, number> {
-  let body = "";
-  ctx.routes.get(STATE)?.handler(
-    { method: "GET", url: STATE, headers: {} } as unknown as IncomingMessage,
-    {
-      writeHead() {
-        void 0;
-      },
-      setHeader() {
-        void 0;
-      },
-      end: (chunk?: string) => {
-        body = chunk ?? "";
-      },
-    } as unknown as ServerResponse,
-  );
-  const st = JSON.parse(body) as { sessions: Record<string, { count: number }> };
+  const service = ctx.service("sessionRescue") as {
+    state: () => { sessions: Record<string, { count: number }> };
+  };
+  const st = service.state();
   return Object.fromEntries(Object.entries(st.sessions).map(([key, value]) => [key, value.count]));
 }
 

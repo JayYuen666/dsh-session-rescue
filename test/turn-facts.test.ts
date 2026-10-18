@@ -107,22 +107,27 @@ describe("投影 ≡ 旧扫描（干净日志）", () => {
     assert.deepEqual(reviewFromFacts(state), reviewLastTurn([]));
   });
 
-  it("普通用户回合：completed / 无清单 / 不等用户 / 非 goal", () => {
+  it("普通用户回合：completed / 无清单 / 不等用户 / opener 身份读出", () => {
     // 标题点名的四项判据当场断言（投影侧），再由 assertEquivalent 与旧扫描对撞。
     const evs = round(1, USER);
     const review = reviewFromFacts(foldEvents(evs));
     assert.equal(review?.lastReasonKind, "completed", "completed 收口");
     assert.equal(review.openTodos, null, "无清单：从未 todo/write");
     assert.equal(review.awaitsUser, false, "不等用户");
-    assert.equal(review.goalDrivenTurn, false, "非 goal 轮");
+    assert.equal(review.scheduleDrivenTurn, false, "不是 schedule 轮");
+    assert.equal(turnOpenerKind(foldEvents(evs), 1), "user", "opener 身份读得出");
     assertEquivalent(evs);
   });
 
-  it("goal 回合：goalDrivenTurn 两侧同为 true", () => {
+  it("goal 回合：opener 身份两侧同为 goal（让路/接管判据读的就是这一位）", () => {
+    // 回合事实不再自带「goal 驱动」结论：goal 轮次的让路/接管要到触发侧读 round driver
+    // 自己的停机位（host.ts 的 goalTakeoverVerdict）。这里只钉它仍然**读得出身份**——
+    // 触发侧的闸门全靠这一位认出「这一轮归不归 driver」。
     const goalTurn = round(1, GOAL);
     const state = foldEvents(goalTurn);
-    assert.equal(reviewFromFacts(state)?.goalDrivenTurn, true);
-    assert.equal(reviewLastTurn(goalTurn).goalDrivenTurn, true);
+    assert.equal(turnOpenerKind(state, 1), "goal");
+    assert.equal(scanOpenerKind(goalTurn, 1), "goal", "两条读法同一个身份");
+    assert.equal(reviewFromFacts(state)?.scheduleDrivenTurn, false, "goal 身份不是 schedule 身份");
     assertEquivalent(goalTurn);
   });
 
@@ -326,8 +331,7 @@ describe("投影 ≡ 旧扫描（异常日志：不可采信则交回扫描）",
     const state = foldEvents(evs);
     const review = reviewFromFacts(state);
     assert.deepEqual(review, reviewLastTurn(evs));
-    // 首条 user/message 的 source 不可用 ⇒ kind null ⇒ 既非 goal 也非 rescue（两侧同判）
-    assert.equal(review.goalDrivenTurn, false);
+    // 首条 user/message 的 source 不可用 ⇒ kind null ⇒ 认不出任何 producer 身份（两侧同判）
     assert.equal(turnOpenerKind(state, 1), null);
     assert.equal(turnOpenerKind(state, 1), scanOpenerKind(evs, 1));
     assert.equal(review.awaitsUser, false, "缺号/异号 tool/call 都不算本回合的等待用户");
@@ -395,6 +399,38 @@ describe("opener 窗口", () => {
   });
 });
 
+describe("非整数轮次号：折叠不得产出自家 schema 拒收的态", () => {
+  /** `NaN` 与 `1.5` 都是 `typeof === "number"`，但 `stateSchema` 用的是 `z.number().int()`。
+   *  折叠一旦收下，`asFacts` 对这条会话从此恒回 undefined ⇒ 三类判定整批掉回全量扫描，
+   *  而且没有任何日志说明为什么（读侧只看 undefined）。判据因此收在安全整数。 */
+  const BAD_TURNS = [Number.NaN, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1];
+
+  it("坏轮次号按「这条事件不带号」折叠，且折出的态过 schema", () => {
+    for (const bad of BAD_TURNS) {
+      const evs = [turnStart(bad), userMsg(USER), turnEnd(bad)];
+      const state = foldEvents(evs);
+      assert.equal(
+        state.latestTurnStart,
+        null,
+        `NaN/小数不能推进 latestTurnStart（${String(bad)}）`,
+      );
+      assert.equal(state.end?.turn, null, "那条 end 同样按缺号折叠");
+      assert.notEqual(asFacts(state), undefined, "折叠态必须能被自己的 schema 接住");
+      // 与旧扫描同解：两侧都把这一形读成「没有轮次号」。
+      assertEquivalent(evs);
+    }
+  });
+
+  it("缺号事件不污染同串里的正常号", () => {
+    const evs = [turnStart(1), userMsg(USER), turnEnd(1), turnStart(Number.NaN), turnEnd(2)];
+    const state = foldEvents(evs);
+    assert.equal(state.latestTurnStart, 1, "NaN 那条 start 不算号");
+    assert.equal(hasNewerTurn(state, 1), false);
+    assert.equal(scanNewerTurn(evs, 1), false, "两条读法都不把 NaN 当更大的号");
+    assert.notEqual(asFacts(state), undefined);
+  });
+});
+
 describe("投影单元与状态形状", () => {
   it("init 交回空态（忽略 header 与继承前缀）", () => {
     // 直接摊开这一份空态：它是投影的首值，断言的对象就是「首值长什么样」这条判据本身，
@@ -422,7 +458,6 @@ describe("投影单元与状态形状", () => {
       openTodos: null,
       todoUpdatedInTurn: false,
       awaitsUser: false,
-      goalDrivenTurn: false,
       scheduleDrivenTurn: false,
       aligned: true,
     });
@@ -431,7 +466,7 @@ describe("投影单元与状态形状", () => {
 
   it("注册键与 host-only 形状", () => {
     assert.equal(rescueFactsProjection.key, "session-rescue.turnFacts");
-    assert.equal(rescueFactsProjection.stateVersion, 1);
+    assert.equal(rescueFactsProjection.stateVersion, 2, "折叠态形状变更必须进版本");
     assert.equal("wire" in rescueFactsProjection, false, "host-only：不进客户端快照");
   });
 

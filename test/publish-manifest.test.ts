@@ -479,17 +479,17 @@ describe("registry 与宿主发现面", () => {
     }
   });
 
-  it("engines 的 node 与 dsh 都在，且 dsh 下界与 peer 同版本", async () => {
+  it("engines 的 node 与 dsh 都在，且 dsh 与 peer 同一份范围", async () => {
     // 宿主装插件时校验的是 peer（`@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*`），`engines.dsh`
     // 目前无人读——正因此它更容易被留在旧值上：读它的人（编辑器、文档、以及将来任何工具）
-    // 会拿到一个与真判据不一致的下界。钉成同值是让两份说法不能各自成立。
+    // 会拿到一份与真判据不一致的兼容性声明。钉成**同一个范围**而不是同一个下界：
+    // 0.x 线上的 `^` 带上界（<0.3.0），而 `>=` 没有——写 `>=` 等于对外宣称兼容 0.3/1.x，
+    // 宿主却会当场拒装。
     const { manifest } = await readSurface();
     const peer = manifest.peerDependencies?.["@deepseek-ai/dsh"];
     expect(peer, "peer 缺失：宿主版本失去基准").toBeDefined();
     expect(manifest.engines?.["node"], "缺 engines.node").toBeDefined();
-    expect(manifest.engines?.["dsh"], "engines.dsh 要与 peer 的 dsh 同值（去掉范围算子）").toBe(
-      `>=${(peer ?? "").replace(/^[\^~]/u, "")}`,
-    );
+    expect(manifest.engines?.["dsh"], "engines.dsh 必须与 peer 同范围，不能各说各话").toBe(peer);
   });
 
   it("dsh 段齐备：bundle.patch 指向的文件真存在且随包发出", async () => {
