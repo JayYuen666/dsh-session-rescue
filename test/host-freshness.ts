@@ -1,4 +1,4 @@
-// test/host-freshness.ts —— host 侧产物新鲜度指纹门禁（13 包共用，复制式分发，同 client-freshness.ts）。
+// test/host-freshness.ts —— host 侧产物新鲜度指纹门禁（多包共用，复制式分发，同 client-freshness.ts）。
 // 本包副本形态：只提供**证据**（磁盘 host 产物 vs 当期内存构建产物 + 包名与包根），用例注册留在
 // test/build-host.test.ts 的 describe 里。共享夹具一旦自行 it()，它就变成用例文件，
 // vitest 的结构类规则（require-hook / consistent-test-it / valid-title）全部落到夹具上。
@@ -21,7 +21,7 @@
 // 「相对路径 + 正文摘要」清单再比。摘要只当字节身份（同摘要即同字节），换来红时是十来行、
 // 每行点名一个产物的 diff，而不是几十 KB 正文并排。
 //
-// 注意：构建函数必须是确定性构建（同输入同输出）。13 包的 build-host.mjs 实测同一进程内双跑
+// 注意：构建函数必须是确定性构建（同输入同输出）。各包的 build-host.mjs 实测同一进程内双跑
 // 逐字节一致（rolldown 的 [hash] 是内容哈希，不含时间戳/随机数），逐字节相等成立；若未来构建
 // 引入非确定性，改为规范哈希比较并在 build-host.mjs 里输出 canonical 形态。
 

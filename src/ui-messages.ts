@@ -48,11 +48,8 @@ export interface UiMessages {
   readonly forkResend: string;
   readonly cancel: string;
   readonly editorHint: string;
-  // ── 排队区 ──
-  readonly queueLabel: string;
   readonly save: string;
   readonly edit: string;
-  readonly withdraw: string;
   // ── 停止重问 / 重试 / 续写操作行 ──
   readonly stopping: string;
   readonly stopAndReask: string;
@@ -198,10 +195,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     cancel: "取消",
     editorHint:
       "重发在本会话继续（失败回合保留在历史中）；Fork 从该消息之前切出干净分支。⌘/Ctrl+Enter 快速重发。",
-    queueLabel: "排队中的消息：",
     save: "保存",
     edit: "编辑",
-    withdraw: "撤回",
     stopping: "停止中…",
     stopAndReask: "停止并重问",
     hostRetryPendingTitle: "内置重试仍在进行，请稍候",
@@ -225,7 +220,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     discard: "撤销",
     formLead: "失败分类为内置安全逻辑，不可配置；以下仅调自动续跑参数（改动点「保存」生效）。",
     enabledLabel: "启用自动续跑",
-    enabledHint: "关闭后仅保留手动编辑/重试/撤回等 UI 能力",
+    enabledHint: "关闭后仅保留手动编辑/重试/续写等 UI 能力",
     resumeDelayLabel: "续跑延迟 (ms)",
     resumeDelayHint: "内置重试耗尽后等待多久发送续跑消息（1000–300000）",
     resumeCooldownLabel: "冷却时间 (ms)",
@@ -255,7 +250,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     excludesLabel: "排除路由（provider）",
     excludesHint: "逗号分隔；列出的路由永不自动续跑（如已配置专属 retryPolicy 的路由）",
     excludesPlaceholder: "例如：baidu-token-plan, other-route",
-    cardSummary: "瞬时失败自动续跑 + 编辑重发/重试/撤回/停止重问；429 重试策略可视化配置",
+    cardSummary: "瞬时失败自动续跑 + 编辑重发/重试/续写/停止重问；429 重试策略可视化配置",
     presetDefault: "官方默认（normal 5 次，码表不含 QUOTA）",
     presetEnhanced: "增强（12 次 + QUOTA + 8s→60s 退避）",
     presetAlways: "always（无限重试 + 5s→60s 退避）",
@@ -291,10 +286,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     cancel: "Cancel",
     editorHint:
       "Resend continues in this session (the failed turn stays in history); Fork cuts a clean branch before that message. ⌘/Ctrl+Enter resends quickly.",
-    queueLabel: "Queued messages:",
     save: "Save",
     edit: "Edit",
-    withdraw: "Withdraw",
     stopping: "Stopping…",
     stopAndReask: "Stop & re-ask",
     hostRetryPendingTitle: "Built-in retries are still running — hold on",
@@ -319,7 +312,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     formLead:
       "Failure classification is built-in safety logic and is not configurable; the fields below only tune auto-resume (press Save to apply).",
     enabledLabel: "Enable auto-resume",
-    enabledHint: "When off, only the manual edit / retry / withdraw UI stays available",
+    enabledHint: "When off, only the manual edit / retry / continue UI stays available",
     resumeDelayLabel: "Resume delay (ms)",
     resumeDelayHint:
       "How long to wait before sending the resume message once built-in retries are exhausted (1000–300000)",
@@ -355,7 +348,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "Comma separated; listed routes are never auto-resumed (e.g. routes with their own retryPolicy)",
     excludesPlaceholder: "e.g. baidu-token-plan, other-route",
     cardSummary:
-      "Auto-resume on transient failures + edit-resend / retry / withdraw / stop-and-re-ask; visual 429 retry-policy configuration",
+      "Auto-resume on transient failures + edit-resend / retry / continue / stop-and-re-ask; visual 429 retry-policy configuration",
     presetDefault: "Official default (normal 5 tries, code table without QUOTA)",
     presetEnhanced: "Enhanced (12 tries + QUOTA + 8s→60s backoff)",
     presetAlways: "always (unlimited retries + 5s→60s backoff)",

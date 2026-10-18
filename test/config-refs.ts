@@ -15,6 +15,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import plugin from "../host.ts";
 
+/** 宿主判 volatile 用的是**真值**（settings/src/schema.ts:38 `if (schema.meta?.volatile)`），
+ *  不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本桩件里被判成
+ *  非 volatile，而宿主照样把它投影进表单 ⇒ 测试绿、卡片少一项。 */
+function isVolatileField(node: SchemaNode): boolean {
+  const flag = node.meta?.["volatile"];
+  return flag !== undefined && flag !== false;
+}
+
 /** Config schema 的字段节点（读 meta/type/dict 用，不复制 schema 结构）。 */
 export interface SchemaNode {
   type?: string;
@@ -44,7 +52,10 @@ function refsOf(read: () => Record<string, unknown>): Record<string, unknown> {
   // 快照 —— 真宿主从不给它们 .get()，给错了插件就读到一个函数。
   return Object.fromEntries(
     Object.entries(configDict()).map(([key, field]) =>
-      field.meta?.["volatile"] === true
+      // 宿主判的是**真值**（settings/src/schema.ts:38 `if (schema.meta?.volatile)`），
+      // 不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本桩件里
+      // 被判成非 volatile，而宿主照样把它投影进表单 ⇒ 测试绿、卡片少一项。
+      isVolatileField(field)
         ? [key, { get: () => read()[key] }]
         : [key, read()[key] ?? field.meta?.["default"]],
     ),
@@ -54,6 +65,16 @@ function refsOf(read: () => Record<string, unknown>): Record<string, unknown> {
 /** apply + 它的 Config 引用：0.1.7 的 config 是引用而不是快照，两处必须同源。 */
 export function applyRescue(ctx: unknown, read: () => Record<string, unknown>): void {
   plugin.apply(ctx as never, refsOf(read) as never);
+}
+
+/** 本桩件的读法与宿主 `plainSchema` 的分歧点，用一条断言钉住：宿主对
+ *  `meta.role === "secret"` 的字段会**抹掉 default/required**（settings/src/schema.ts:22-24），
+ *  而 `schemaDefaults()` 读的是 raw `meta.default`。本包 Config 里没有任何 secret 字段，
+ *  所以两份默认值今日同解；将来谁加了 secret 字段，这条就会红着提醒改读法。 */
+export function secretBearingFields(): string[] {
+  return Object.entries(configDict())
+    .filter(([, field]) => field.meta?.["role"] === "secret")
+    .map(([key]) => key);
 }
 
 /** 逐字段 schema 默认 —— 等价于 0.1.6 交给 `settings.register(ns, schema, { base })`
@@ -74,7 +95,8 @@ export function schemaDefaults(): Record<string, unknown> {
  *  `return undefined` 记作无值返回，与同函数里的 `return []` 冲突。）
  */
 export function volatileFormOf(node: SchemaNode): string[] | null {
-  if (node.meta?.["volatile"] === true) {
+  // 与宿主同步：按真值判（schema.ts:38），不按 === true。
+  if (isVolatileField(node)) {
     return [];
   }
   if (node.type !== "object") {

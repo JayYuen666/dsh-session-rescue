@@ -32,10 +32,12 @@ function typeOf(ev: unknown): string {
   return typeof type === "string" ? type : "";
 }
 
-/** 事件 `data` 里的 number 字段（缺字段/坏形状 → undefined）。 */
+/** 事件 `data` 里的 number 字段（缺字段/坏形状 → undefined）。
+ *  只收**安全整数**，与 `lib/turn-facts.ts` 的 `numIn` 逐字同判据：两条读法必须对同一串
+ *  事件给同一个答案，一侧收 `NaN`/小数而另一侧不收，等价性就在此处断掉（属性层钉着它）。 */
 function numIn(ev: unknown, key: string): number | undefined {
   const raw = fieldOf(fieldOf(ev, "data"), key);
-  return typeof raw === "number" ? raw : undefined;
+  return typeof raw === "number" && Number.isSafeInteger(raw) ? raw : undefined;
 }
 
 /** 事件 `data.<group>.<key>` 的 string 字段（reason.kind / source.kind 等）。 */
@@ -67,14 +69,11 @@ export interface TurnReview {
   todoUpdatedInTurn: boolean;
   /** 最后回合内调用过 ask_user_question → 模型在等用户，禁止自动注入。 */
   awaitsUser: boolean;
-  /** 最后回合由 goal 轮次开启 → 交 goal 机制驱动，本插件不得注入。 */
-  goalDrivenTurn: boolean;
   /** 最后回合由官方 Schedule 提醒开启 → 交定时任务驱动，本插件不得注入。 */
   scheduleDrivenTurn: boolean;
 }
 
 const USER_QUESTION_TOOL = "ask_user_question";
-const GOAL_SOURCE_KIND = "goal";
 const SCHEDULE_SOURCE_KIND = "schedule";
 
 /** 从 todo/write 载荷算未闭合条数；载荷非法返回 undefined（表示"这份快照不可用"）。 */
@@ -175,27 +174,18 @@ function scanAwaitsUser(
   return false;
 }
 
-/** 该回合的首条 user/message 注入身份是否为 goal（只看首条）。 */
-function scanGoalDriven(
-  events: readonly unknown[],
-  scanFrom: number,
-  lastEndIndex: number,
-): boolean {
-  for (let i = scanFrom; i < lastEndIndex; i += 1) {
-    const ev = events[i];
-    if (typeOf(ev) === "user/message") {
-      return nestedStr(ev, "source", "kind") === GOAL_SOURCE_KIND;
-    }
-  }
-  return false;
-}
-
-/** 该回合的首条 user/message 注入身份是否为官方 Schedule（只看首条，判据与 goal 同）。 */
+/** 该回合的首条 user/message 注入身份是否为官方 Schedule（只看首条，判据与 goal 同）。
+ *  `scanFrom < 0` = 找不到该回合的 turn/start（老日志/崩溃恢复只给半截日志）：此刻
+ *  会话首条消息属于哪个回合未知，拿它判「本回合由 Schedule 开启」会把上一回合的身份
+ *  串进来，故与 `turn-start` 缺失时其余两项判定同向，交回 false。 */
 function scanScheduleDriven(
   events: readonly unknown[],
   scanFrom: number,
   lastEndIndex: number,
 ): boolean {
+  if (scanFrom < 0) {
+    return false;
+  }
   for (let i = scanFrom; i < lastEndIndex; i += 1) {
     const ev = events[i];
     if (typeOf(ev) === "user/message") {
@@ -216,7 +206,6 @@ export function reviewLastTurn(events: readonly unknown[] | undefined | null): T
     openTodos: null,
     todoUpdatedInTurn: false,
     awaitsUser: false,
-    goalDrivenTurn: false,
     scheduleDrivenTurn: false,
   };
   if (!Array.isArray(events) || events.length === 0) {
@@ -237,11 +226,10 @@ export function reviewLastTurn(events: readonly unknown[] | undefined | null): T
   // 3) 会话当前 todo 清单：正扫到终态为止（陈旧清单不能当"本回合没做完"的证据）。
   const { openTodos, todoUpdatedInTurn } = todosSnapshot(events, lastEndIndex, inTurn);
 
-  // 4) 等待用户 + 5) goal 驱动 + 6) Schedule 驱动。
+  // 4) 等待用户 + 5) Schedule 驱动。（goal 驱动不在这里判：goal 轮次的让路/接管要到
+  //    触发侧读 round driver 自己的停机位，见 host.ts 的 goalTakeoverVerdict。）
   const awaitsUser = scanAwaitsUser(events, lastTurn, lastEndIndex, inTurn);
-  const scanFrom = Math.max(turnStartIndex, 0);
-  const goalDrivenTurn = scanGoalDriven(events, scanFrom, lastEndIndex);
-  const scheduleDrivenTurn = scanScheduleDriven(events, scanFrom, lastEndIndex);
+  const scheduleDrivenTurn = scanScheduleDriven(events, turnStartIndex, lastEndIndex);
 
   return {
     lastTurn,
@@ -249,7 +237,6 @@ export function reviewLastTurn(events: readonly unknown[] | undefined | null): T
     openTodos,
     todoUpdatedInTurn,
     awaitsUser,
-    goalDrivenTurn,
     scheduleDrivenTurn,
   };
 }

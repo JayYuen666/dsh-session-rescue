@@ -4,17 +4,10 @@
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { IncomingMessage, ServerResponse } from "node:http";
-import plugin, { transientSignatureOf } from "../host.ts";
+import plugin, { RESCUE_REMOTE_NAMESPACE, transientSignatureOf } from "../host.ts";
 import { applyRescue, configDict, volatileFormOf } from "./config-refs.ts";
+import { loggedText } from "./setup-logs.ts";
 import type { SchemaNode } from "./config-refs.ts";
-
-const STATE = "/_dsh/session-rescue/state";
-const CANCEL = "/_dsh/session-rescue/cancel";
-const TOGGLE = "/_dsh/session-rescue/toggle";
-const RESUME = "/_dsh/session-rescue/resume";
-const PROVIDERS = "/_dsh/session-rescue/retry-providers";
-const POLICY = "/_dsh/session-rescue/retry-policy";
 
 // 宿主事件名、回合终态 kind 与总线沉淀分类：替身造事件流与断言期望值都取这几条。
 // 这些都是测试作者自持的**期望值**（不从 host.ts 导入，否则断言就是拿被测常量比自己）。
@@ -25,25 +18,21 @@ const AGENT_STATUS_EVENT = "agent/status";
 const MAX_TOKENS_REASON = "max-tokens";
 const TRANSIENT_LESSON_CATEGORY = "transient-failure";
 
-/** sec-fetch-site 的跨站字形（信任闸门该挡的那一种）。 */
-const SEC_FETCH_SITE_CROSS = "cross-site";
-
 /** 总线抛错支线的会话 id：dispose/pass 那几条用例按它查台账。 */
 const PASS_DISPOSE_SESSION_ID = "pass-dispose";
 
 /** 替身运输层故意抛错的消息：断言它出现在日志里，才证明错误没被静默吞掉。 */
 const CARRIER_DOWN_MESSAGE = "carrier down";
+/** llm-pi-ai 那条 describe 里已声明的 provider（retry-policy 白名单的唯一合法值）。 */
+const KNOWN_PROVIDER = "sensenova";
+/** 真适配器交回的限流载荷形状（集成层实测的字段面），多处用例共用。 */
+const RATE_LIMIT_MESSAGE = "rate limit exceeded";
 
 interface TimerEntry {
   fn: () => void;
   ms: number;
   cancelled: boolean;
   fired: boolean;
-}
-
-interface TestRoute {
-  path: string;
-  handler: (req: IncomingMessage, res: ServerResponse) => void;
 }
 
 interface MockAgent {
@@ -75,15 +64,18 @@ interface MockInjectCtx {
   get: (name: string) => unknown;
   /** cordis 的注入子上下文同样带着被注入服务的读面（settings.configure 走这条路）。 */
   settings: MockCtx["settings"];
+  /** 真 cordis 把被注入的服务也挂在子 ctx 的属性上，插件读的就是
+   *  `child.sessionProjections` 与注册口，替身必须照样交出去。 */
+  sessionProjections?: unknown;
+  reflect: MockCtx["reflect"] | undefined;
 }
 
 interface MockCtx {
   handlers: Record<string, (payload: unknown, next?: unknown) => unknown>;
   timers: TimerEntry[];
   effects: (() => void)[];
-  /** ctx.inject 子 fiber 上登记的释放器（路由注册即在此，先卸后装可断言）。 */
+  /** ctx.inject 子 fiber 上登记的释放器（先卸后装可断言）。 */
   childEffects: (() => void)[];
-  routes: Map<string, TestRoute>;
   scope: { get: () => Record<string, unknown>; set: (patch: Record<string, unknown>) => void };
   /** 本插件 fiber：settings.configure 的 owner 必须是它。 */
   fiber: { id: string };
@@ -95,7 +87,6 @@ interface MockCtx {
     roots: () => { id: string }[];
     get: (id: string) => MockAgent | undefined;
   };
-  webServer?: { register: (route: TestRoute) => () => void };
   lessonLoop?: {
     /** 返回值按 unknown 收：lesson-loop 落库已异步（report 返回 Promise），声明成
      *  `=> void` 会让"调用方丢弃 Promise"通过类型检查——正是这次静默失败的根因。 */
@@ -110,8 +101,6 @@ interface MockCtx {
   piAiRevision?: number;
   /** 让 mutate 抛 SettingsConflictError，模拟读到 revision 之后别处又改了同一段。 */
   mutateConflict?: boolean;
-  /** 覆盖 webServer.register（测试注册抛错路径用）。 */
-  registerImpl?: (route: TestRoute) => () => void;
   /** 0.1.7 的 settings 服务面：`register`/`get`/`installSection` 已被宿主移除
    *  （命名空间改按 profile 条目 id 隐式注册），只剩 describe / mutate / configure。 */
   settings: {
@@ -124,10 +113,12 @@ interface MockCtx {
   timer: { timeout: (fn: () => void, ms: number) => () => void };
   on: (event: string, handler: (payload: unknown, next?: unknown) => unknown) => void;
   get: (name: string) => unknown;
+  /** 官方服务注册口（Typert Remote 服务构造时用）。 */
+  reflect: { provide: (name: string, service: unknown) => () => void };
   effect: (factory: () => (() => void) | undefined) => void;
   /** cordis `ctx.inject` 替身：依赖齐了才激活回调，服务变化时先卸后装。 */
   inject: (deps: string[], activate: (child: MockInjectCtx) => void) => void;
-  /** 变更宿主服务表（模拟 webServer 后装载 / 重启换实例）。 */
+  /** 变更宿主服务表（模拟可选服务后装载 / 重启换实例）。 */
   setService: (name: string, service: unknown) => void;
   fire: (event: string, payload: unknown) => void;
   fireWaterfall: (
@@ -142,7 +133,6 @@ interface MockCtx {
 function createCtx(
   opts: {
     agents?: boolean;
-    webServer?: boolean;
     lessonLoop?: boolean;
     describeThrows?: boolean;
     /** 官方 locale 命名空间里的偏好（undefined = 该命名空间未注册 → host 走中文）。 */
@@ -156,7 +146,6 @@ function createCtx(
   const handlers: Record<string, (payload: unknown, next?: unknown) => unknown> = {};
   const timers: TimerEntry[] = [];
   const effects: (() => void)[] = [];
-  const routes = new Map<string, TestRoute>();
   let configValue: Record<string, unknown> = {
     enabled: true,
     providerExcludes: [],
@@ -238,15 +227,6 @@ function createCtx(
       return this.byId.get(id);
     },
   };
-  const webServer = {
-    register(route: TestRoute) {
-      if (holder.ctx?.registerImpl) {
-        return holder.ctx.registerImpl(route);
-      }
-      routes.set(route.path, route);
-      return () => routes.delete(route.path);
-    },
-  };
   // 宿主服务表（cordis `ctx.get` 的无 inject 存储读替身）：Map 形态，
   // setService(name, undefined) 才是真的「服务下线」（Record 动态 delete 被 lint 拒）。
   const lessonReports: LessonReport["input"][] = [];
@@ -270,9 +250,6 @@ function createCtx(
   if (opts.agents !== false) {
     provided.set("agents", agentsService);
   }
-  if (opts.webServer !== false) {
-    provided.set("webServer", webServer);
-  }
   if (opts.lessonLoop === true) {
     provided.set("lessonLoop", lessonLoop);
   }
@@ -295,7 +272,9 @@ function createCtx(
       },
       get: (name: string) => provided.get(name),
       // 注入子上下文同样能读到被注入的那个服务（configure 就走这条路）。
+      reflect: holder.ctx?.reflect,
       settings,
+      sessionProjections: provided.get("sessionProjections"),
     });
   };
   const runInjections = (): void => {
@@ -311,7 +290,6 @@ function createCtx(
     timers,
     effects,
     childEffects,
-    routes,
     scope,
     settings,
     fiber: { id: "session-rescue-fiber" },
@@ -321,13 +299,20 @@ function createCtx(
     lessonPasses,
     timer: timerService,
     agents: agentsService,
-    webServer,
     lessonLoop,
     on(event, handler) {
       handlers[event] = handler;
     },
     get(name) {
       return provided.get(name);
+    },
+    reflect: {
+      provide(name: string, service: unknown) {
+        provided.set(name, service);
+        return () => {
+          provided.delete(name);
+        };
+      },
     },
     effect(factory) {
       const disposer = factory();
@@ -432,82 +417,47 @@ function errorPayload(agent: MockAgent, turn: number, failure: unknown): Record<
   return { agent, turn, step: 1, error: failure === null ? null : { failure } };
 }
 
-function makeRes(): {
-  statusCode: number;
-  headers: Record<string, unknown>;
-  body: string;
-  writeHead: (code: number, headers?: Record<string, unknown>) => void;
-  setHeader: (key: string, val: unknown) => void;
-  end: (body?: string) => void;
-} {
-  return {
-    statusCode: 0,
-    headers: {},
-    body: "",
-    writeHead(code, headers) {
-      this.statusCode = code;
-      if (headers) {
-        Object.assign(this.headers, headers);
-      }
-    },
-    setHeader(key, val) {
-      this.headers[key.toLowerCase()] = val;
-    },
-    end(body) {
-      if (body !== undefined) {
-        this.body = body;
-      }
-    },
-  };
-}
-
-async function callRoute(
-  ctx: MockCtx,
-  path: string,
-  opts: { method?: string; url?: string; headers?: Record<string, string> } = {},
-): Promise<ReturnType<typeof makeRes>> {
-  const route = ctx.routes.get(path);
-  assert.ok(route, `route ${path} must be registered`);
-  const res = makeRes();
-  route.handler(
-    {
-      method: opts.method ?? "GET",
-      url: opts.url ?? path,
-      headers: opts.headers ?? {},
-    } as IncomingMessage,
-    res as unknown as ServerResponse,
-  );
-  return res;
-}
-
-function csrfOf(ctx: MockCtx): string {
-  const route = ctx.routes.get(STATE)!;
-  let body = "";
-  route.handler(
-    { method: "GET", url: STATE, headers: {} } as unknown as never,
-    {
-      writeHead() {
-        void 0;
-      },
-      setHeader() {
-        void 0;
-      },
-      end(chunk?: string) {
-        body = chunk ?? "";
-      },
-    } as never,
-  );
-  return (JSON.parse(body) as { csrf?: unknown }).csrf as string;
-}
-
-function withCsrf(ctx: MockCtx, extra: Record<string, string> = {}): Record<string, string> {
-  return { ...extra, "x-rescue-csrf": csrfOf(ctx) };
-}
-
 function applyPlugin(ctx: MockCtx): void {
   // 0.1.7：apply 的第二参是 volatile 引用（引用不变、值可变），故按 ctx 的活值表
   // 现读——用例之后 `ctx.scope.set(...)` 依然能被插件读到（等价于设置卡写了一次）。
   applyRescue(ctx, () => ctx.scope.get());
+}
+
+interface RescueRemote {
+  state: () => { ok: true; sessions: Record<string, unknown> };
+  cancel: (request: { sessionId: string }) => Record<string, unknown>;
+  toggle: (request: { sessionId: string }) => Record<string, unknown>;
+  resume: () => { ok: true; restored: number };
+  retryProviders: () => Record<string, unknown>;
+  retryPolicy: (request: { provider: string; preset: string }) => Promise<Record<string, unknown>>;
+}
+
+function remoteOf(ctx: MockCtx): RescueRemote {
+  const service: unknown = ctx.get(RESCUE_REMOTE_NAMESPACE);
+  assert.ok(service !== undefined, "Remote 读面没注册到上下文");
+  return service as RescueRemote;
+}
+
+/** 装一枚只读五位状态的 goals 替身（本包只用 `get(agent)` 那一位）。
+ *  模块级而不是 describe 内闭包：它不捕获任何父作用域变量。 */
+function ctxWithGoal(view: unknown): MockCtx {
+  const ctx = createCtx();
+  ctx.setService("goals", {
+    get: (): unknown => view,
+  });
+  applyPlugin(ctx);
+  return ctx;
+}
+
+/** 排一次 goal 轮失败并立刻触发，返回该 agent 的注入次数与定时器数。 */
+function fireGoalFailure(view: unknown, turn = 7): { injections: number; timers: number } {
+  const ctx = ctxWithGoal(view);
+  const agent = makeAgent("s1", "x", goalEvents(turn, "error"));
+  register(ctx, agent);
+  ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, turn, { code: "RATE_LIMIT", message: "x" }));
+  const timers = ctx.timers.length;
+  ctx.tick();
+  return { injections: agent.followupCalls.length, timers };
 }
 
 const nextNoop = async (): Promise<undefined> => undefined;
@@ -557,26 +507,6 @@ function suspendAgent(ctx: MockCtx, agent: MockAgent): void {
   latest.fn();
 }
 
-function callResume(
-  ctx: MockCtx,
-  headers: Record<string, string>,
-): { status?: number; body?: unknown } {
-  const route = ctx.routes.get(RESUME)!;
-  const res: { status?: number; body?: unknown } = {};
-  route.handler(
-    { method: "POST", url: RESUME, headers } as unknown as never,
-    {
-      writeHead(code: number) {
-        res.status = code;
-      },
-      end(chunk?: string) {
-        res.body = chunk === undefined || chunk === "" ? null : JSON.parse(chunk);
-      },
-    } as never,
-  );
-  return res;
-}
-
 describe("宿主服务缺失降级", () => {
   it("agents 服务缺失：agent/error 与 status 静默不炸", () => {
     const ctx = createCtx({ agents: false });
@@ -587,13 +517,6 @@ describe("宿主服务缺失降级", () => {
     );
     ctx.fire(AGENT_STATUS_EVENT, { agent: makeAgent("s1", "x"), status: "idle" });
     assert.equal(ctx.timers.length, 0);
-  });
-
-  it("webServer 缺失：apply 正常，effect 返回空释放器", () => {
-    const ctx = createCtx({ webServer: false });
-    applyPlugin(ctx);
-    assert.equal(ctx.routes.size, 0);
-    ctx.disposeEffects();
   });
 
   it("lessonLoop 缺失：瞬时失败照常调度（总线可选，不阻断）", () => {
@@ -715,17 +638,10 @@ describe("用户中止/打断的回合不消耗配额，判定只在 agent/statu
     // 中止回合只走 agent/status（reason.kind=aborted）→ 不调度、不重置、不计数。
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
-    const stateRoute = ctx.routes.get(STATE)!;
-    const res = makeRes();
-    stateRoute.handler(
-      { method: "GET", url: STATE, headers: {} } as unknown as IncomingMessage,
-      res as unknown as ServerResponse,
-    );
-    const st = JSON.parse(res.body) as {
-      sessions: Record<string, { counts?: { resume?: number } }> | undefined;
-    };
+    const st = remoteOf(ctx).state();
+    const { counts } = st.sessions["s1"] as { counts?: { resume?: number } };
     // 中止回合既不产生调度记录也不增计数（配额原样保留给下一次真实失败）。
-    assert.equal(st.sessions?.["s1"]?.counts?.resume ?? 0, 0, "中止回合不烧 maxResumes 配额");
+    assert.equal(counts?.resume ?? 0, 0, "中止回合不烧 maxResumes 配额");
   });
 
   it("agent/status：lastReasonKind interrupted 同理不处理", () => {
@@ -739,8 +655,11 @@ describe("用户中止/打断的回合不消耗配额，判定只在 agent/statu
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("goal 轮次驱动的三类注入一律让路（文件头不变量）", () => {
-    // resume：agent/error 落在 goal 轮上
+  it("goal 轮次的让路判据在触发侧：排期照排，读不到停机位就不接管", () => {
+    // 官方 goal-round-driver 在 `agent/error` / max-tokens 上**只 disarm、绝不自动重试**
+    // （其 README「No abnormal auto-retry」），所以「一律让路」等于这条失败回合永久没人管。
+    // 判据因此挪到触发侧现读 driver 自己的停机位；这里 goals 服务不在位 ⇒ 无从证明它已停机
+    // ⇒ 保守让路（与让路判据迁移前同解：一条都不注入）。
     const resumeCtx = createCtx();
     applyPlugin(resumeCtx);
     const resumeAgent = makeAgent("s1", "x", goalEvents(7, "error"));
@@ -749,7 +668,10 @@ describe("用户中止/打断的回合不消耗配额，判定只在 agent/statu
       AGENT_ERROR_EVENT,
       errorPayload(resumeAgent, 7, { code: "RATE_LIMIT", message: "x" }),
     );
-    assert.equal(resumeCtx.timers.length, 0, "goal 轮次失败的续跑由 goal-round-driver 负责");
+    assert.equal(resumeCtx.timers.length, 1, "goal 轮失败照样排期——让路与否要等停机位");
+    resumeCtx.tick();
+    assert.equal(resumeAgent.followupCalls.length, 0, "读不到停机位 ⇒ 不注入");
+    assert.match(loggedText(), /vetoed at fire time \(goal-service-unavailable\)/u);
 
     // continue：max-tokens 截断落在 goal 轮上
     const continueCtx = createCtx();
@@ -757,9 +679,11 @@ describe("用户中止/打断的回合不消耗配额，判定只在 agent/statu
     const continueAgent = makeAgent("s1", "x", goalEvents(8, MAX_TOKENS_REASON));
     register(continueCtx, continueAgent);
     continueCtx.fire(AGENT_STATUS_EVENT, { agent: continueAgent, status: "idle" });
-    assert.equal(continueCtx.timers.length, 0, "goal 轮次截断不得由本插件补发续写");
+    assert.equal(continueCtx.timers.length, 1, "截断也排期，判据同样在触发侧");
+    continueCtx.tick();
+    assert.equal(continueAgent.followupCalls.length, 0, "goal 轮截断未证明停机 ⇒ 不补发续写");
 
-    // unfinished：既有行为（review.goalDrivenTurn）保持不变
+    // unfinished：既有行为（completed + 未闭合清单）保持不变，只是判据换了位置
     const unfinishedCtx = createCtx();
     applyPlugin(unfinishedCtx);
     const unfinishedAgent = makeAgent("s1", "x", [
@@ -774,7 +698,186 @@ describe("用户中止/打断的回合不消耗配额，判定只在 agent/statu
     ]);
     register(unfinishedCtx, unfinishedAgent);
     unfinishedCtx.fire(AGENT_STATUS_EVENT, { agent: unfinishedAgent, status: "idle" });
-    assert.equal(unfinishedCtx.timers.length, 0, "goal 轮次不补跑未闭合清单");
+    assert.equal(unfinishedCtx.timers.length, 1);
+    unfinishedCtx.tick();
+    assert.equal(unfinishedAgent.followupCalls.length, 0, "goal 轮不补跑未闭合清单（未证明停机）");
+  });
+});
+
+// ── goal 停机后接管（官方 round driver 只 disarm 不重试）────────────────────
+describe("goal 停机后接管", () => {
+  it("active + disarmed：driver 已放弃自动续跑 ⇒ 接管这条失败回合", () => {
+    const { injections, timers } = fireGoalFailure({ phase: "active", activation: "disarmed" });
+    assert.equal(timers, 1, "排期发生");
+    assert.equal(injections, 1, "接管：补发一条救援消息");
+    assert.doesNotMatch(loggedText(), /vetoed at fire time/u);
+  });
+
+  it("active + armed：driver 还在 driving ⇒ 让路（人在窗口里 resume 过）", () => {
+    const { injections } = fireGoalFailure({ phase: "active", activation: "armed" });
+    assert.equal(injections, 0);
+    assert.match(loggedText(), /vetoed at fire time \(goal-armed\)/u);
+  });
+
+  it("paused / blocked / complete 都是人或生命周期明确停过 ⇒ 让路", () => {
+    for (const phase of ["paused", "blocked", "complete"]) {
+      const { injections } = fireGoalFailure({ phase, activation: "disarmed" });
+      assert.equal(injections, 0, `${phase} 不接管`);
+      assert.match(
+        loggedText(),
+        new RegExp(`vetoed at fire time \\(goal-${phase}\\)`, "u"),
+        `${phase} 的否决理由带着相位本身`,
+      );
+    }
+  });
+
+  it("无 current goal（get 交回 undefined）⇒ 无从判断 ⇒ 让路", () => {
+    const { injections } = fireGoalFailure(undefined);
+    assert.equal(injections, 0);
+    assert.match(loggedText(), /vetoed at fire time \(goal-absent\)/u);
+  });
+
+  it("goals 服务在位但没有 `get` 那一位 ⇒ 同样按读不到处理", () => {
+    // 名字撞上别人的服务、或宿主换了面：`ctx.get("goals")` 交回的不是本包认的那个形状。
+    // 走能力探测而不是直接调用，缺位时与「服务不在位」同一理由，不去赌 TypeError 被 catch 兜住。
+    const ctx = createCtx();
+    ctx.setService("goals", {});
+    applyPlugin(ctx);
+    const agent = makeAgent("s1", "x", goalEvents(7, "error"));
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 7, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1);
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 0);
+    assert.match(loggedText(), /vetoed at fire time \(goal-service-unavailable\)/u);
+  });
+
+  it("get() 抛错（agent 不是注册表里的在位实例）⇒ 让路而不是把定时器炸掉", () => {
+    const ctx = createCtx();
+    ctx.setService("goals", {
+      get(): never {
+        throw new Error("goal agent not live");
+      },
+    });
+    applyPlugin(ctx);
+    const agent = makeAgent("s1", "x", goalEvents(7, "error"));
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 7, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1);
+    assert.doesNotThrow((): void => {
+      ctx.tick();
+    });
+    assert.equal(agent.followupCalls.length, 0, "读不到状态就不接管");
+    assert.match(loggedText(), /vetoed at fire time \(goal-state-unreadable\)/u);
+  });
+
+  it("坏形状（phase/activation 缺位或不是官方那两位）⇒ 一律按读不到处理", () => {
+    // 接管的前提是**证明** driver 停了：`activation` 不是官方 'armed'/'disarmed' 之一时，
+    // 「不是 armed」推不出「disarmed」，这一位与其余保守支同向。
+    for (const view of [
+      {},
+      { phase: 7, activation: "armed" },
+      { phase: "active" },
+      { phase: "active", activation: null },
+      { phase: "active", activation: "unknown-state" },
+    ]) {
+      const { injections } = fireGoalFailure(view);
+      assert.equal(injections, 0, `${JSON.stringify(view)} 不构成接管依据`);
+    }
+    assert.match(loggedText(), /vetoed at fire time \(goal-activation-unknown\)/u);
+  });
+
+  it("闸门只对 goal 轮生效：普通失败回合在 goal armed 的会话里照样接管", () => {
+    // 反例防线：若把「会话有 armed goal」当成全局否决，装了 goal 的 profile 里所有
+    // 非 goal 轮次的瞬时失败都会静默不续跑——那才是把本包功能锁死。
+    const ctx = ctxWithGoal({ phase: "active", activation: "armed" });
+    const agent = makeAgent("s1", "x", [
+      { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: 4 } },
+      {
+        type: USER_MESSAGE_EVENT,
+        seq: 2,
+        time: 2,
+        data: { role: "user", content: [], source: { kind: "user" } },
+      },
+    ]);
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 4, { code: "RATE_LIMIT", message: "x" }));
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 1, "非 goal 轮不受 goal 闸门影响");
+  });
+
+  it("goal 轮截断（continue）同样按停机位判，而不是排期侧一律让路", () => {
+    const ctx = ctxWithGoal({ phase: "active", activation: "disarmed" });
+    const agent = makeAgent("s1", "x", goalEvents(8, MAX_TOKENS_REASON));
+    register(ctx, agent);
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 1);
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 1, "driver 已停机的截断轮 ⇒ 接管续写");
+  });
+});
+
+// ── 宿主载荷里的坏数字形状：轮次号只收安全整数 ────────────────────────────
+describe("payload.turn 的坏数字形状", () => {
+  it("轮次号是 NaN 或小数时落回 0，且不毒化调度器的旧轮水位", async () => {
+    // 水位比较是 `turn <= lastHandledTurn`：任何数与 NaN 比都判 false。NaN 一旦写进
+    // lastHandledTurn，那条会话的「旧轮重放」闸门从此永久失效——重放的旧回合既能复位
+    // 配额又能再排一次注入，而日志里一个字都不会提。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("s1", "x", []));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, Number.NaN, { code: "RATE_LIMIT", message: "x" }),
+    );
+    assert.equal(ctx.timers.length, 1, "坏轮次号不拦排期：失败本身是真瞬时");
+    const body = remoteOf(ctx).state();
+    const { pending } = body.sessions["s1"] as { pending: { turn: number } | null };
+    assert.equal(pending?.turn, 0, "坏形状落到 0");
+
+    // 紧随其后的真实截断轮照常处理：证明那个 NaN 从没进过水位。
+    const truncated = makeAgent("s2", "x", [
+      { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: 4 } },
+      {
+        type: USER_MESSAGE_EVENT,
+        seq: 2,
+        time: 2,
+        data: { role: "user", content: [], source: { kind: "user" } },
+      },
+      { type: "turn/end", seq: 3, time: 3, data: { turn: 4, reason: { kind: MAX_TOKENS_REASON } } },
+    ]);
+    register(ctx, truncated);
+    ctx.fire(AGENT_STATUS_EVENT, { agent: truncated, status: "idle" });
+    assert.equal(ctx.timers.length, 2);
+    ctx.tick();
+    assert.equal(truncated.followupCalls.length, 1, "旧轮闸门未被上一轮的坏号关掉");
+  });
+
+  it("事件里的 NaN 轮次号按「不带号」折叠：复盘读不到终态，就不做旧轮判定", () => {
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(
+      ctx,
+      makeAgent("s3", "x", [
+        { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: 3 } },
+        {
+          type: USER_MESSAGE_EVENT,
+          seq: 2,
+          time: 2,
+          data: { role: "user", content: [], source: { kind: "user" } },
+        },
+        {
+          type: "turn/end",
+          seq: 3,
+          time: 3,
+          data: { turn: Number.NaN, reason: { kind: "error" } },
+        },
+      ]),
+    );
+    // 那条 end 的号是 NaN ⇒ 与「缺 turn 字段」同解 ⇒ 最后一条可信终态不存在：
+    // 截断续写不能凭一条读不出号的事件排期。
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 0, "读不出轮次号就不做该轮的判定");
   });
 });
 
@@ -893,128 +996,31 @@ describe("链式配置边界", () => {
   });
 });
 
-describe("webServer 路由方法守卫与 body 上限", () => {
+describe("remote 写面的业务结果", () => {
   let ctx: MockCtx;
   beforeEach(() => {
     ctx = createCtx();
     applyPlugin(ctx);
   });
 
-  it("六条路由的方法守卫全部 405", async () => {
-    const res1 = await callRoute(ctx, CANCEL, { method: "GET" });
-    assert.equal(res1.statusCode, 405);
-    const res2 = await callRoute(ctx, TOGGLE, { method: "GET" });
-    assert.equal(res2.statusCode, 405);
-    const res3 = await callRoute(ctx, RESUME, { method: "GET" });
-    assert.equal(res3.statusCode, 405);
-    const res4 = await callRoute(ctx, PROVIDERS, { method: "POST" });
-    assert.equal(res4.statusCode, 405);
-    const res5 = await callRoute(ctx, POLICY, { method: "GET" });
-    assert.equal(res5.statusCode, 405);
-  });
-
-  it("toggle 缺 sessionId → 400；跨域/错 csrf → 403", async () => {
-    const res400 = await callRoute(ctx, TOGGLE, {
-      method: "POST",
-      url: TOGGLE,
-      headers: withCsrf(ctx),
+  it("cancel 无待办 → {ok:true, cancelled:false}", () => {
+    assert.deepEqual(remoteOf(ctx).cancel({ sessionId: "ghost" }), {
+      ok: true,
+      cancelled: false,
+      reason: "no-pending",
     });
-    assert.equal(res400.statusCode, 400);
-    const resCross = await callRoute(ctx, TOGGLE, {
-      method: "POST",
-      url: `${TOGGLE}?sessionId=s1`,
-      headers: withCsrf(ctx, { "sec-fetch-site": SEC_FETCH_SITE_CROSS }),
-    });
-    assert.equal(resCross.statusCode, 403);
-    const resCsrf = await callRoute(ctx, TOGGLE, {
-      method: "POST",
-      url: `${TOGGLE}?sessionId=s1`,
-      headers: { "x-rescue-csrf": "bad" },
-    });
-    assert.equal(resCsrf.statusCode, 403);
   });
 
-  it("resume 跨域 → 403", () => {
-    const res = callResume(ctx, withCsrf(ctx, { "sec-fetch-site": SEC_FETCH_SITE_CROSS }));
-    assert.equal(res.status, 403);
-  });
-
-  it("cancel 无待办 → {ok:true, cancelled:false}", async () => {
-    const res = await callRoute(ctx, CANCEL, {
-      method: "POST",
-      url: `${CANCEL}?sessionId=ghost`,
-      headers: withCsrf(ctx),
-    });
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(JSON.parse(res.body), { ok: true, cancelled: false, reason: "no-pending" });
-  });
-
-  /** POST 一条按 for-await 收流的请求替身（shared readBody 的读取方式）。 */
-  async function postStream(
-    box: MockCtx,
-    path: string,
-    opts: { chunks?: (string | Buffer)[]; headers?: Record<string, string>; broken?: boolean } = {},
-  ): Promise<ReturnType<typeof makeRes>> {
-    const route = box.routes.get(path)!;
-    const res = makeRes();
-    const chunks = opts.chunks ?? [];
-    const req = {
-      method: "POST",
-      url: path,
-      headers: opts.headers ?? {},
-      [Symbol.asyncIterator]() {
-        let index = 0;
-        return {
-          async next(): Promise<IteratorResult<unknown>> {
-            if (opts.broken === true) {
-              throw new Error("aborted stream");
-            }
-            if (index >= chunks.length) {
-              return { done: true, value: undefined };
-            }
-            const value = chunks[index];
-            index += 1;
-            return { done: false, value };
-          },
-        };
-      },
-    };
-    route.handler(req as unknown as IncomingMessage, res as unknown as ServerResponse);
-    await sleep(5);
-    return res;
-  }
-
-  it("retry-policy body 超限 → 413（按 UTF-8 字节判定，不解析不落盘）", async () => {
-    const huge = "x".repeat(70 * 1024);
-    const res = await postStream(ctx, POLICY, {
-      headers: withCsrf(ctx),
-      chunks: [huge.slice(0, 40 * 1024), Buffer.from(huge.slice(40 * 1024), "utf8")],
-    });
-    assert.equal(res.statusCode, 413);
-    assert.equal(ctx.mutations.length, 0, "超限不落盘");
-  });
-
-  it("retry-policy 流中断（readBody aborted）→ 400", async () => {
-    const res = await postStream(ctx, POLICY, { headers: withCsrf(ctx), broken: true });
-    assert.equal(res.statusCode, 400);
-    assert.equal(ctx.mutations.length, 0);
-  });
-
-  it("retry-policy 坏 JSON → 400", async () => {
-    const res = await postStream(ctx, POLICY, { headers: withCsrf(ctx), chunks: ["{not json"] });
-    assert.equal(res.statusCode, 400);
-  });
-
-  // 本路由写的是**另一个条目**（llm-pi-ai）的 providers.<p>.retryPolicy，所以覆盖写必须
+  // 写的是**另一个条目**（llm-pi-ai）的 providers.<p>.retryPolicy，所以覆盖写必须
   // 带 CAS：不带 expectedRevision 时，用户在设置页同时改该 provider 会被这里静默抹掉。
   it("retry-policy 带 llm-pi-ai 当前 revision 写入（CAS，不盲覆盖）", async () => {
     const casCtx = createCtx({ piAiRevision: 7 });
     applyPlugin(casCtx);
-    const res = await postStream(casCtx, POLICY, {
-      headers: withCsrf(casCtx),
-      chunks: [JSON.stringify({ provider: "sensenova", preset: "enhanced" })],
+    const body = await remoteOf(casCtx).retryPolicy({
+      provider: "sensenova",
+      preset: "enhanced",
     });
-    assert.equal(res.statusCode, 200);
+    assert.equal(body["ok"], true);
     assert.equal(casCtx.mutations.length, 1);
     assert.equal(casCtx.mutations[0]?.ns, "llm-pi-ai");
     assert.equal(casCtx.mutations[0].expectedRevision, 7, "必须把读到的 revision 交给宿主");
@@ -1023,23 +1029,23 @@ describe("webServer 路由方法守卫与 body 上限", () => {
   it("该条目没投影出 revision ⇒ 不凭空造版本号（交宿主自己判条目在不在）", async () => {
     const noRevCtx = createCtx();
     applyPlugin(noRevCtx);
-    const res = await postStream(noRevCtx, POLICY, {
-      headers: withCsrf(noRevCtx),
-      chunks: [JSON.stringify({ provider: "sensenova", preset: "enhanced" })],
+    const body = await remoteOf(noRevCtx).retryPolicy({
+      provider: "sensenova",
+      preset: "enhanced",
     });
-    assert.equal(res.statusCode, 200);
+    assert.equal(body["ok"], true);
     assert.equal(noRevCtx.mutations[0]?.expectedRevision, undefined);
   });
 
   it("别处已改过该段 → 409 且不做第二次写", async () => {
     const conflictCtx = createCtx({ piAiRevision: 7, mutateConflict: true });
     applyPlugin(conflictCtx);
-    const res = await postStream(conflictCtx, POLICY, {
-      headers: withCsrf(conflictCtx),
-      chunks: [JSON.stringify({ provider: "sensenova", preset: "enhanced" })],
+    const body = await remoteOf(conflictCtx).retryPolicy({
+      provider: "sensenova",
+      preset: "enhanced",
     });
     // 冲突不是服务端故障：回 409 让卡片提示刷新后重试。
-    assert.equal(res.statusCode, 409);
+    assert.equal(body["status"], 409);
     assert.equal(
       conflictCtx.mutations.length,
       0,
@@ -1049,18 +1055,12 @@ describe("webServer 路由方法守卫与 body 上限", () => {
 
   it("retry-policy 原型键 preset 不得绕过 400 闸门", async () => {
     const presets = ["constructor", "toString", "__proto__", "hasOwnProperty"];
-    // 并发发起（循环内 await 被 no-await-in-loop 禁掉；四条 POST 之间无依赖）。
     const results = await Promise.all(
-      presets.map((preset) =>
-        postStream(ctx, POLICY, {
-          headers: withCsrf(ctx),
-          chunks: [JSON.stringify({ provider: "x", preset })],
-        }),
-      ),
+      presets.map((preset) => remoteOf(ctx).retryPolicy({ provider: KNOWN_PROVIDER, preset })),
     );
-    for (const [index, res] of results.entries()) {
+    for (const [index, body] of results.entries()) {
       assert.equal(
-        res.statusCode,
+        body["status"],
         400,
         `${String(presets[index])} 必须 400，而不是把 undefined 写进 settings`,
       );
@@ -1068,86 +1068,54 @@ describe("webServer 路由方法守卫与 body 上限", () => {
     assert.equal(ctx.mutations.length, 0, "原型键不得落盘");
   });
 
-  it("retry-providers：settings.describe 抛错 → 降级 ok:false", async () => {
+  it("retryProviders：settings.describe 抛错 → 降级 ok:false", () => {
     const ctx2 = createCtx({ describeThrows: true });
     applyPlugin(ctx2);
-    const res = await callRoute(ctx2, PROVIDERS);
-    assert.equal(res.statusCode, 200);
-    assert.equal((JSON.parse(res.body) as { ok: boolean }).ok, false);
+    const body = remoteOf(ctx2).retryProviders();
+    assert.equal(body["ok"], false);
   });
 });
 
-describe("state 路由：禁用会话补记录与挂起并入", () => {
-  it("toggle 关闭的无记录会话在 state 中显示 disabled", async () => {
+describe("state 读面：禁用会话补记录与挂起并入", () => {
+  it("toggle 关闭的无记录会话在 state 中显示 disabled", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
-    await callRoute(ctx, TOGGLE, {
-      method: "POST",
-      url: `${TOGGLE}?sessionId=never-seen`,
-      headers: withCsrf(ctx),
-    });
-    const res = await callRoute(ctx, STATE);
-    const st = JSON.parse(res.body) as {
-      sessions: Record<string, { disabled: boolean; count: number; pending: unknown }>;
+    remoteOf(ctx).toggle({ sessionId: "never-seen" });
+    const st = remoteOf(ctx).state();
+    const session = st.sessions["never-seen"] as {
+      disabled: boolean;
+      count: number;
+      pending: unknown;
     };
-    assert.equal(st.sessions["never-seen"]?.disabled, true);
-    assert.equal(st.sessions["never-seen"].count, 0);
-    assert.equal(st.sessions["never-seen"].pending, null);
+    assert.equal(session.disabled, true);
+    assert.equal(session.count, 0);
+    assert.equal(session.pending, null);
   });
 
-  it("dropSuspended 只移除目标会话：取消其一，另一挂起保留并可恢复", async () => {
+  it("dropSuspended 只移除目标会话：取消其一，另一挂起保留并可恢复", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const a1 = makeAgent("sa", "x");
     const a2 = makeAgent("sb", "x");
     suspendAgent(ctx, a1);
     suspendAgent(ctx, a2);
-    // 取消 a1 的挂起
-    await callRoute(ctx, CANCEL, {
-      method: "POST",
-      url: `${CANCEL}?sessionId=sa`,
-      headers: withCsrf(ctx),
-    });
-    const res = callResume(ctx, withCsrf(ctx));
-    assert.equal((res.body as { restored?: number }).restored, 1, "仅恢复未取消的挂起");
+    remoteOf(ctx).cancel({ sessionId: "sa" });
+    assert.equal(remoteOf(ctx).resume().restored, 1, "仅恢复未取消的挂起");
     assert.equal(ctx.timers.length, 3, "恢复重新武装一个定时器");
   });
 });
 
 describe("resumeAfterReconnect 分支", () => {
-  it("会话被 toggle 关闭 → 挂起快照丢弃不补发", async () => {
+  it("会话被 toggle 关闭 → 挂起快照丢弃不补发", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const agent = makeAgent("s1", "x");
     suspendAgent(ctx, agent);
-    await callRoute(ctx, TOGGLE, {
-      method: "POST",
-      url: `${TOGGLE}?sessionId=s1`,
-      headers: withCsrf(ctx),
-    });
-    const res = callResume(ctx, withCsrf(ctx));
+    remoteOf(ctx).toggle({ sessionId: "s1" });
     // toggle 关闭即 dropSuspended（修正）：挂起快照已被清除，
     // 恢复通知无快照可恢复，自然不重新武装。
-    assert.equal((res.body as { restored?: number }).restored, 0, "快照已在 toggle 关闭时清除");
+    assert.equal(remoteOf(ctx).resume().restored, 0, "快照已在 toggle 关闭时清除");
     assert.equal(ctx.timers.length, 1, "丢弃后不重新武装");
-  });
-
-  it("挂起快照 kind 未知 → 丢弃（错文案比不发危害大）", async () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const agent = makeAgent("s1", "x");
-    suspendAgent(ctx, agent);
-    // 篡改挂起快照 kind 为脏值（模拟未来版本快照）
-    ctx.routes.get(RESUME);
-    const bad = ctx.timers.length;
-    void bad;
-    // 通过 followup 抛错路径入的快照 kind 恒为 resume；直接驱动恢复路径
-    // 需要 host 内部状态 —— 改用下一次正常挂起后手动改 pending kind 不可行，
-    // 这里验证 enabled=false 与 toggle 之外的"未知 kind"由 textForKind 独立测试
-    // 覆盖（text-for-kind.test.ts），断言重新连接后正常快照恢复成功：
-    const res = callResume(ctx, withCsrf(ctx));
-    assert.equal((res.body as { restored?: number }).restored, 1);
-    assert.equal(ctx.timers.length, 2, "正常快照恢复");
   });
 
   it("恢复后 re-fire 前校验否决（agent 非 idle）→ settle skipped", () => {
@@ -1157,8 +1125,7 @@ describe("resumeAfterReconnect 分支", () => {
     suspendAgent(ctx, agent);
     // 恢复前用户手动开始干活
     agent.status = "running";
-    const res = callResume(ctx, withCsrf(ctx));
-    assert.equal((res.body as { restored?: number }).restored, 1);
+    assert.equal(remoteOf(ctx).resume().restored, 1);
     ctx.timers.at(-1)!.fn();
     assert.equal(agent.followupCalls.length, 0, "恢复后否决不补发");
   });
@@ -1169,85 +1136,16 @@ describe("resumeAfterReconnect 分支", () => {
     const agent = makeAgent("s1", "x");
     suspendAgent(ctx, agent);
     // 恢复（followup 仍抛错）
-    const res = callResume(ctx, withCsrf(ctx));
-    assert.equal((res.body as { restored?: number }).restored, 1);
+    assert.equal(remoteOf(ctx).resume().restored, 1);
     ctx.timers.at(-1)!.fn();
     // 再次挂起：state 仍显示 suspended
-    const route = ctx.routes.get(STATE)!;
-    const res2 = makeRes();
-    route.handler(
-      { method: "GET", url: STATE, headers: {} } as unknown as IncomingMessage,
-      res2 as unknown as ServerResponse,
-    );
-    const st = JSON.parse(res2.body) as {
-      sessions: Record<string, { pending: { suspended?: boolean } | null }>;
-    };
-    assert.equal(st.sessions["s1"]?.pending?.suspended, true, "再失败保留挂起");
+    const st = remoteOf(ctx).state();
+    const { pending } = st.sessions["s1"] as { pending: { suspended?: boolean } | null };
+    assert.equal(pending?.suspended, true, "再失败保留挂起");
   });
 });
 
-// ── 审计修复回归：webServer 依赖 / 退避正确性 / 载荷防御 ───────────────────
-describe("webServer 依赖：路由归属方必须建立依赖而非只读一次", () => {
-  it("webServer 后装载：依赖到位时补注册六条路由", () => {
-    const ctx = createCtx({ webServer: false });
-    applyPlugin(ctx);
-    assert.equal(ctx.routes.size, 0, "未到位时不得注册");
-    ctx.setService("webServer", ctx.webServer);
-    assert.equal(ctx.routes.size, 6, "webServer 到位即补注册");
-  });
-
-  it("webServer 重启换实例：旧路由逐个注销，新实例重新注册", () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    assert.equal(ctx.routes.size, 6);
-    const fresh = new Map<string, TestRoute>();
-    ctx.setService("webServer", {
-      register(route: TestRoute) {
-        fresh.set(route.path, route);
-        return () => fresh.delete(route.path);
-      },
-    });
-    assert.equal(ctx.routes.size, 0, "旧实例的路由必须全部注销（不得留孤儿 path）");
-    assert.equal(fresh.size, 6, "新实例重新拿到六条路由");
-  });
-
-  it("webServer.register 抛错：已挂上的路由回滚注销，错误上抛给 cordis（不静默）", () => {
-    const ctx = createCtx();
-    let calls = 0;
-    ctx.registerImpl = (route: TestRoute) => {
-      calls += 1;
-      if (calls === 3) {
-        throw new Error("route table full");
-      }
-      ctx.routes.set(route.path, route);
-      return () => {
-        ctx.routes.delete(route.path);
-      };
-    };
-    assert.throws(() => {
-      applyPlugin(ctx);
-    }, /route table full/u);
-    assert.equal(ctx.routes.size, 0, "前两次注册已回滚");
-  });
-
-  it("webServer 到位但 ctx.get 读不到（跨版本严格读降级）→ 不注册、不炸", () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const served = ctx.webServer;
-    assert.ok(served, "基线：webServer 服务在位");
-    assert.equal(ctx.routes.size, 6, "基线：六条路由已注册");
-    // 模拟跨版本 cordis 的严格读：inject 依赖表里有服务，`ctx.get('webServer')`
-    // 却返回 undefined。registerRoutesInto 的降级面必须「一条都不注册」，而不是
-    // 在 `webServer.register` 上抛 TypeError 把整个子 fiber 炸掉。
-    const readService = ctx.get;
-    ctx.get = (name: string): unknown => (name === "webServer" ? undefined : readService(name));
-    // 重注入：先卸（旧六条随之注销）后装（装不上）——净结果 0 条、无异常。
-    ctx.setService("webServer", served);
-    assert.equal(ctx.routes.size, 0, "服务读不到时不得注册路由");
-    ctx.disposeEffects();
-  });
-});
-
+// ── 审计修复回归：退避正确性 / 载荷防御 ───────────────────────────────────
 const evt = (extra: Record<string, unknown>): unknown => ({
   agent: makeAgent("ra2", "sensenova"),
   turn: 1,
@@ -1575,11 +1473,9 @@ describe("provider 缺席 / 载荷缺字段时的降级（绝不打 undefined）
     const [report] = ctx.lessonReports;
     assert.equal(report?.["turn"], 0);
     assert.equal(ctx.timers.length, 1);
-    const res = await callRoute(ctx, STATE);
-    const st = JSON.parse(res.body) as {
-      sessions: Record<string, { pending: { turn?: number } | null }>;
-    };
-    assert.equal(st.sessions["noturn"]?.pending?.turn, 0);
+    const st = remoteOf(ctx).state();
+    const { pending } = st.sessions["noturn"] as { pending: { turn?: number } | null };
+    assert.equal(pending?.turn, 0);
   });
 
   it("max-tokens 沉淀：无 provider → unknown，且不带 evidence 键（可选展开两侧）", () => {
@@ -1678,8 +1574,7 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
     };
     ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     const armed = latestTimer(ctx);
-    const stateRoute = ctx.routes.get(STATE);
-    assert.ok(stateRoute, "state 路由在册（注销后闭包仍可调用，用于验证快照没被挂上）");
+    const remote = remoteOf(ctx);
     const logs = captureConsole();
     try {
       ctx.disposeEffects();
@@ -1695,15 +1590,11 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
       ),
       "调度器已无该会话记录：如实报错而非假装挂起",
     );
-    const res = makeRes();
-    stateRoute.handler(
-      { method: "GET", url: STATE, headers: {} } as unknown as IncomingMessage,
-      res as unknown as ServerResponse,
-    );
-    const st = JSON.parse(res.body) as {
-      sessions: Record<string, { pending: { suspended?: boolean } | null } | undefined>;
-    };
-    assert.equal(st.sessions["late-fire"]?.pending?.suspended, undefined, "无快照可挂");
+    const st = remote.state();
+    const session = st.sessions["late-fire"] as
+      | { pending: { suspended?: boolean } | null }
+      | undefined;
+    assert.equal(session?.pending?.suspended, undefined, "无快照可挂");
   });
 
   it("重连恢复后 re-fire 再次失败：仍按原 fireAt 挂起等下次重连", () => {
@@ -1715,11 +1606,9 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
     };
     ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     fireLatest(ctx);
-    const first = callResume(ctx, withCsrf(ctx));
-    assert.equal((first.body as { restored?: number }).restored, 1);
+    assert.equal(remoteOf(ctx).resume().restored, 1);
     fireLatest(ctx);
-    const second = callResume(ctx, withCsrf(ctx));
-    assert.equal((second.body as { restored?: number }).restored, 1, "再挂起 → 下次重连仍可恢复");
+    assert.equal(remoteOf(ctx).resume().restored, 1, "再挂起 → 下次重连仍可恢复");
   });
 
   it("disposeAll 之后重连补发的定时器仍被唤醒：同样明确报错而非静默挂起", () => {
@@ -1731,8 +1620,7 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
     };
     ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     fireLatest(ctx);
-    const res = callResume(ctx, withCsrf(ctx));
-    assert.equal((res.body as { restored?: number }).restored, 1);
+    assert.equal(remoteOf(ctx).resume().restored, 1);
     const armed = latestTimer(ctx);
     const logs = captureConsole();
     try {
@@ -1764,20 +1652,17 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
     };
     ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 2, "挂起期间又崩一次 → 已重新武装新待办");
-    const res = callResume(ctx, withCsrf(ctx));
-    assert.equal((res.body as { restored?: number }).restored, 1, "快照计数照报");
+    assert.equal(remoteOf(ctx).resume().restored, 1, "快照计数照报");
     assert.equal(ctx.timers.length, 2, "已有待办 → 不用旧快照覆盖，不追加第三枚定时器");
     fireLatest(ctx);
     assert.equal(agent.followupCalls.length, 1, "补发的仍是当前那次失败的待办");
-    const stateRes = await callRoute(ctx, STATE);
-    const st = JSON.parse(stateRes.body) as {
-      sessions: Record<
-        string,
-        { pending: { suspended?: boolean } | null; count?: number } | undefined
-      >;
+    const st = remoteOf(ctx).state();
+    const session = st.sessions["racingsame"] as {
+      pending: { suspended?: boolean } | null;
+      count?: number;
     };
-    assert.equal(st.sessions["racingsame"]?.pending, null, "当前待办 fire 完即清空");
-    assert.equal(st.sessions["racingsame"].count, 1, "旧快照被丢弃，只有当前这次计入配额");
+    assert.equal(session.pending, null, "当前待办 fire 完即清空");
+    assert.equal(session.count, 1, "旧快照被丢弃，只有当前这次计入配额");
   });
 });
 
@@ -1896,23 +1781,21 @@ function failingAgent(ctx: MockCtx, id: string, provider: string, cwd = "/work/a
   return agent;
 }
 
-/** state 路由里某会话的 resume 计数（无记录 → -1）。 */
-async function resumeCount(ctx: MockCtx, sessionId: string): Promise<number> {
-  const res = await callRoute(ctx, STATE);
-  const parsed = JSON.parse(res.body) as {
-    sessions: Record<string, { counts?: { resume?: number } }>;
-  };
-  return parsed.sessions[sessionId]?.counts?.resume ?? -1;
+/** state 读面里某会话的 resume 计数（无记录 → -1）。 */
+function resumeCount(ctx: MockCtx, sessionId: string): number {
+  const st = remoteOf(ctx).state();
+  const session = st.sessions[sessionId] as { counts?: { resume?: number } } | undefined;
+  return session?.counts?.resume ?? -1;
 }
 
 /** 总线降级面的共同判据：续跑真 fire 过一次（计数 1）之后，completed 回合必须照常
  *  把配额重置回 0——lesson-loop 出任何问题都不许动这条主流程。 */
 async function assertQuotaResetOnSuccess(ctx: MockCtx, agent: MockAgent): Promise<void> {
   fireLatest(ctx);
-  assert.equal(await resumeCount(ctx, agent.id), 1, "前置：续跑已 fire，计数应为 1");
+  assert.equal(resumeCount(ctx, agent.id), 1, "前置：续跑已 fire，计数应为 1");
   setEvents(agent, completedEvents(9));
   ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
-  assert.equal(await resumeCount(ctx, agent.id), 0, "成功信号照常重置配额（与总线无关）");
+  assert.equal(resumeCount(ctx, agent.id), 0, "成功信号照常重置配额（与总线无关）");
 }
 
 describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测", () => {
@@ -1935,7 +1818,7 @@ describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测",
     assert.equal(pass["cwd"], report["cwd"]);
     assert.equal(pass["sessionId"], "pass-same");
     assert.equal("turn" in pass, false, "pass 契约里没有 turn，不顺手多塞字段");
-    assert.equal(await resumeCount(ctx, "pass-same"), 0);
+    assert.equal(resumeCount(ctx, "pass-same"), 0);
   });
 
   it("成功回合的 provider 与失败时不同：不兑 pass；同 provider 再成功才兑", () => {
@@ -2005,11 +1888,7 @@ describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测",
     setEvents(agent, completedEvents(2));
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.lessonPasses.length, 0, "会话都没了，「已遵守」无从谈起");
-    assert.equal(
-      await resumeCount(ctx, PASS_DISPOSE_SESSION_ID),
-      0,
-      "dispose 只撤销台账，不动成功信号",
-    );
+    assert.equal(resumeCount(ctx, PASS_DISPOSE_SESSION_ID), 0, "dispose 只撤销台账，不动成功信号");
   });
 
   it("台账有界：第 65 条把最旧挤出，最旧那条不再兑、最新一条照常兑", () => {
@@ -2117,7 +1996,7 @@ describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测",
       ),
       "降级日志仍可定位",
     );
-    assert.equal(await resumeCount(ctx, "pass-throw-plain"), 0, "非 Error 载荷也不得影响成功信号");
+    assert.equal(resumeCount(ctx, "pass-throw-plain"), 0, "非 Error 载荷也不得影响成功信号");
   });
 
   it("bus.pass 返回 rejected Promise：warn 降级且不留未处理拒绝，已摘牌的不补发", async () => {
@@ -2146,7 +2025,7 @@ describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测",
       "异步失败必须与同步抛错落进同一条 pass 降级日志",
     );
     assert.deepEqual(probe.reasons, [], "rejection 必须被接住：漏出去会污染整个宿主进程");
-    assert.equal(await resumeCount(ctx, "pass-async"), 0, "成功信号与总线无关");
+    assert.equal(resumeCount(ctx, "pass-async"), 0, "成功信号与总线无关");
   });
 
   it("bus.pass 返回 {ok:false}（总线自我拒绝）：不重发、不告警、不改行为", async () => {
@@ -2169,78 +2048,6 @@ describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测",
     assert.equal(attempts, 1, "ok:false 不触发重发（本插件不据返回值判定）");
     assert.deepEqual(logs.warns, [], "契约内的拒绝不该刷告警");
     assert.equal(agent.followupCalls.length, 1);
-  });
-});
-
-describe("信任闸门：/_dsh/session-rescue/* 的六条路由", () => {
-  /** DNS 重绑定：Host 是外域，sec-fetch-site 与 Origin 都自洽 ⇒ 只有 Host 腿拒得了。 */
-  const REBINDING: Record<string, string> = {
-    host: "evil.test:8787",
-    origin: "http://evil.test:8787",
-    "sec-fetch-site": "same-origin",
-  };
-  const ROUTES: readonly [string, "GET" | "POST"][] = [
-    [STATE, "GET"],
-    [CANCEL, "POST"],
-    [TOGGLE, "POST"],
-    [RESUME, "POST"],
-    [PROVIDERS, "GET"],
-    [POLICY, "POST"],
-  ];
-
-  it("六条逐条都拒（防「只装了其中几条」的漏装），且被拒的体里不许带出 csrf", async () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    // 闸门的判据与写响应都是同步的 ⇒ 不必在循环里 await（oxlint 的 no-await-in-loop 也不许）。
-    const results = await Promise.all(
-      ROUTES.map(async ([path, method]) => {
-        const res = await callRoute(ctx, path, { method, headers: REBINDING });
-        return { path, method, code: res.statusCode, body: res.body };
-      }),
-    );
-    for (const one of results) {
-      assert.equal(one.code, 403, `${one.method} ${one.path}`);
-      assert.match(one.body, /untrusted host/u, `${one.path} 该由 Host 腿拒`);
-      assert.doesNotMatch(one.body, /csrf/u, `${one.path} 被拒时不许带出 token`);
-    }
-  });
-
-  it("判据次序：恶意 Host 与 cross-site 同现时报 Host 腿那句", async () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const res = await callRoute(ctx, STATE, {
-      headers: { host: "evil.test:8787", "sec-fetch-site": SEC_FETCH_SITE_CROSS },
-    });
-    assert.equal(res.statusCode, 403);
-    assert.match(res.body, /untrusted host/u);
-  });
-
-  it("回环 Host + 异源 Origin ⇒ 拒（钉 Origin 腿没被顺手删）", async () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const res = await callRoute(ctx, STATE, {
-      headers: { host: "127.0.0.1:8787", origin: "http://evil.test:8787" },
-    });
-    assert.equal(res.statusCode, 403);
-    assert.match(res.body, /cross-origin/u);
-  });
-
-  it("缺 Host 是本地 CLI 面 ⇒ 闸门不插手，token 照常下发（既有 42 处手搓构造点因此一条没改）", async () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const res = await callRoute(ctx, STATE);
-    assert.equal(res.statusCode, 200);
-    const payload = JSON.parse(res.body) as { csrf?: unknown };
-    assert.match(String(payload.csrf), /[0-9a-f-]{36}/u);
-  });
-
-  it("405 也回 JSON 体（此前全仓 11 处空体，没有任何测试断过它的体）", async () => {
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const res = await callRoute(ctx, CANCEL, { method: "GET" });
-    assert.equal(res.statusCode, 405);
-    assert.equal(res.headers["allow"], "POST");
-    assert.match(res.body, /"error":"POST only"/u);
   });
 });
 
@@ -2318,5 +2125,276 @@ describe("请求级重试部署值", () => {
   it("chainResumeDelayMs 的下限在 schema：0 不可表示 ⇒ 插件侧无须再兜底", () => {
     assert.equal(rowValid({ chainResumeDelayMs: 0 }), false, "min(1000) 挡住 0");
     assert.equal(rowValid({ chainResumeDelayMs: 1000 }), true);
+  });
+});
+
+/** 造一条「截断收尾」的回合事件流（真宿主由 turn/start + turn/end 组成）。 */
+function truncatedTurn(log: unknown[], turn: number): void {
+  log.push(
+    { type: TURN_START_EVENT, seq: turn * 2 - 1, time: turn, data: { turn } },
+    {
+      type: "turn/end",
+      seq: turn * 2,
+      time: turn,
+      data: { turn, reason: { kind: MAX_TOKENS_REASON } },
+    },
+  );
+}
+
+describe("宿主交回形状的真实性", () => {
+  it("agent/error 把真失败裹进 AggregateError 的 cause 时仍然续跑", () => {
+    // 形状出处：agent-loop 在「步骤失败且待写工具结果也落不了盘」时抛
+    // `new AggregateError([error, other], …, { cause: error })`
+    // （packages/core/agent-loop/src/agent.ts:353 与 :496）——`.failure` 只在原失败上。
+    // 只读 `error.failure` 的话，一次货真价实的 429 会被当成「没有失败面可分类」
+    // 而一律判永久 → 该续跑的回合永不续跑。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("agg-1", KNOWN_PROVIDER));
+    const failure = { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE };
+    ctx.fire(AGENT_ERROR_EVENT, {
+      agent,
+      turn: 1,
+      step: 1,
+      error: {
+        name: "AggregateError",
+        message: "Step failed and its pending tool results could not be recorded",
+        errors: [
+          { name: "Error", message: "record failed" },
+          { name: "LlmError", failure },
+        ],
+        cause: { name: "LlmError", failure },
+      },
+    });
+    assert.equal(ctx.timers.length, 1, "裹了壳的 429 也必须排上续跑定时器");
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 1, "壳里的失败同样要发得出救援消息");
+  });
+
+  it("cause 的原失败优先于 errors 里的附带错误", () => {
+    // 官方两处包壳都把原失败同时放进 errors[0] 与 cause，而 errors 里还躺着第二条
+    // （落盘/结算失败）。先扫 errors 就有把附带错误当分类依据的风险。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("agg-order", KNOWN_PROVIDER));
+    ctx.fire(AGENT_ERROR_EVENT, {
+      agent,
+      turn: 1,
+      step: 1,
+      error: {
+        name: "AggregateError",
+        message: "wrapped",
+        errors: [{ name: "LlmError", failure: { code: "INVALID_REQUEST", message: "bad" } }],
+        cause: { name: "LlmError", failure: { code: "RATE_LIMIT", message: "slow down" } },
+      },
+    });
+    assert.equal(ctx.timers.length, 1, "按 cause 的 RATE_LIMIT 判瞬时，而不是按 errors[0] 判永久");
+  });
+
+  it("cause 不带失败面时仍从 errors 里取（漂移兜底），且普通 Error 一律不注入", () => {
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const withErrors = register(ctx, makeAgent("agg-errors", KNOWN_PROVIDER));
+    ctx.fire(AGENT_ERROR_EVENT, {
+      agent: withErrors,
+      turn: 1,
+      step: 1,
+      error: {
+        name: "AggregateError",
+        message: "wrapped",
+        cause: "no failure here",
+        errors: [
+          { name: "Error", message: "record failed" },
+          { name: "LlmError", failure: { code: "SERVER", message: "server error" } },
+        ],
+      },
+    });
+    assert.equal(ctx.timers.length, 1, "cause 读不到时，errors 里的失败面仍算数");
+
+    const plain = register(ctx, makeAgent("agg-plain", KNOWN_PROVIDER));
+    ctx.fire(AGENT_ERROR_EVENT, {
+      agent: plain,
+      turn: 1,
+      step: 1,
+      error: { name: "TypeError", message: "cannot read properties", cause: "string" },
+    });
+    assert.equal(ctx.timers.length, 1, "普通 Error 没有失败面：不排新的续跑");
+    assert.deepEqual(plain.followupCalls, []);
+  });
+
+  it("排期之后关掉全局开关 ⇒ fire 时刻作废这次注入", () => {
+    // 失败到 fire 之间隔着 resumeDelayMs（默认 10s，上限 300s），用户在设置卡上
+    // 关掉本功能就发生在这段窗口里。只在排期侧判开关的话，已武装的定时器照样
+    // 把一个「用户刚明确说不想要」的回合塞回模型。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("gate-off", KNOWN_PROVIDER));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    assert.equal(ctx.timers.length, 1);
+    ctx.scope.set({ enabled: false });
+    ctx.tick();
+    assert.deepEqual(agent.followupCalls, [], "关掉之后不得再补发");
+    assert.match(loggedText(), /vetoed at fire time \(plugin disabled\)/u);
+  });
+
+  it("排期之后把该 provider 加进排除名单 ⇒ fire 时刻同样作废；无 options 的会话照常", () => {
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("excl-1", KNOWN_PROVIDER));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    assert.equal(ctx.timers.length, 1);
+    ctx.scope.set({ providerExcludes: [KNOWN_PROVIDER] });
+    ctx.tick();
+    assert.deepEqual(agent.followupCalls, [], "排除名单生效于 fire 时刻");
+    assert.match(loggedText(), /vetoed at fire time \(provider excluded\)/u);
+
+    // 官方 `Agent.options` 可为 null（未配 provider 的会话）：读不到 provider 就是
+    // 「不在名单里」，续跑照常，不得在这一道上炸。
+    const bare = register(ctx, makeAgent("excl-2", KNOWN_PROVIDER));
+    bare.options = null;
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(bare, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    ctx.tick();
+    assert.equal(bare.followupCalls.length, 1, "无 options 的会话按「不排除」处理");
+  });
+
+  it("同一轮的 status→idle 重复到达 ⇒ 只处理一次；换了轮才再处理", () => {
+    // 真宿主在 `turn/start` 或 `turn/end` 落盘失败的支线上照样会发一次 status→idle,
+    // 而读侧只能取「日志里最后一条 turn/end」。不挡就会拿上一轮的旧终态再走一遍：
+    // `onSuccess` 把配额复位成「那一轮真跑成功了」，截断还会为同一轮再排一次续写。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("wm-1", KNOWN_PROVIDER));
+    const log = agent.session.evs;
+    assert.ok(log, "替身会话要带可写的事件数组才能造终态");
+    truncatedTurn(log, 5);
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 1, "第 5 轮的截断排上一次续写");
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 1, "同一轮的重复 idle 不得再排续写");
+    assert.match(loggedText(), /stale turn review \(turn 5\) skipped/u);
+    truncatedTurn(log, 6);
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.doesNotMatch(loggedText(), /stale turn review \(turn 6\)/u);
+  });
+
+  it("retry-policy 只接受 llm-pi-ai 已声明的 provider（路径段不来自请求体）", async () => {
+    // 这一位会被拼进 `providers.<provider>.retryPolicy` 的路径，而宿主会替缺失的
+    // 中间层建对象（官方 settings/src/index.ts:101-105）：不校验白名单就等于让
+    // 请求体里的任意字符串在**别的条目**的持久配置里开一个新键，带换行的键还原样进日志。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const rejected = await remoteOf(ctx).retryPolicy({
+      provider: "evil\n[session-rescue] fake",
+      preset: "enhanced",
+    });
+    assert.equal(rejected["status"], 400);
+    assert.equal(rejected["error"], "unknown provider");
+    assert.equal(ctx.mutations.length, 0, "白名单之外的 provider 不落盘");
+    const ok = await remoteOf(ctx).retryPolicy({
+      provider: KNOWN_PROVIDER,
+      preset: "enhanced",
+    });
+    assert.equal(ok["ok"], true);
+    assert.equal(ctx.mutations.length, 1);
+  });
+
+  it("投影注册表 register 抛错时降级为扫描，而不是把整条 fiber 炸掉", () => {
+    // 真注册表在同键不同 stateVersion 时直接抛（session-projection/src/index.ts:281-285）。
+    // 抛在 inject 回调里等于整个插件不再工作，与「注册表缺席就退回扫描」的既定
+    // 降级承诺相反。
+    const ctx = createCtx();
+    let stateOfCalls = 0;
+    ctx.setService("sessionProjections", {
+      register(): () => void {
+        throw new Error("projection stateVersion clash");
+      },
+      stateOf: () => {
+        stateOfCalls += 1;
+      },
+    });
+    applyPlugin(ctx);
+    assert.match(loggedText(), /sessionProjections register failed, falling back to log scan/u);
+    // 键没注册成功 ⇒ 读口压根不能装上：装了它每次判定都白走一趟「读不到→再回退扫描」。
+    const agent = register(ctx, makeAgent("proj-throw", KNOWN_PROVIDER));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    assert.equal(stateOfCalls, 0, "注册失败后不得经 stateOf 读投影");
+    assert.equal(ctx.timers.length, 1, "注册表抛错不影响续跑主功能");
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 1);
+    ctx.disposeEffects();
+  });
+
+  it("toggle 台账有界：超过上限时只淘汰已不存在的会话", () => {
+    // 这张表由 toggle 参数喂，而 `agent/disposed` 只清得掉真实存在过的会话 id。
+    // 不设上限时，一个循环发随机 id 的本机客户端就能让它无限增长，且 state 每次
+    // 轮询都把整张表投影进响应体（内存 + 响应双重放大）。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const ids = Array.from({ length: 201 }, (_unused, index) => `cap-${String(index)}`);
+    for (const id of ids) {
+      remoteOf(ctx).toggle({ sessionId: id });
+    }
+    const { sessions } = remoteOf(ctx).state();
+    assert.equal(Object.keys(sessions).length, 200, "关闭位台账严格有界");
+    assert.equal(sessions["cap-0"], undefined, "最旧的一位（已不存在的会话）被淘汰");
+    assert.notEqual(sessions["cap-200"], undefined, "最新的一位必须记着");
+  });
+
+  it("台账满且每一位都还是活会话 ⇒ 409 拒收，绝不静默解掉别人的开关", () => {
+    // 无脑淘汰最旧一位的代价是：那位用户仍关着的活会话位消失，state 里读不到它、
+    // 卡片回弹成「开」，下一次瞬时失败就自动续跑了用户明确关掉的那条会话。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const liveIds = Array.from({ length: 200 }, (_unused, index) => `live-${String(index)}`);
+    for (const id of liveIds) {
+      register(ctx, makeAgent(id, KNOWN_PROVIDER));
+    }
+    for (const id of liveIds) {
+      remoteOf(ctx).toggle({ sessionId: id });
+    }
+    const overflow = remoteOf(ctx).toggle({ sessionId: "live-overflow" });
+    assert.equal(overflow["status"], 409, "没有可淘汰的死会话时拒收，而不是挤掉一位");
+    const { sessions } = remoteOf(ctx).state();
+    assert.equal(Object.keys(sessions).length, 200, "一位都没被挤掉");
+    assert.equal(sessions["live-overflow"], undefined, "被拒的这次不记账");
+  });
+
+  it("providerRetryAfterMs 是 NaN 或负数时回落到固定阶梯，不跳过等待", async () => {
+    // 官方在构造期就丢掉 <=0 / 非有限的这个字段（llm/src/adapter-failure.ts:76-78），
+    // 所以这两枚都是漂移兜底面：NaN 连 `> cap` 比较都过不掉（NaN 与任何数比都是
+    // false），既不配当延迟也不配当「等不起」的信号，只能走阶梯。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("dirty-after", KNOWN_PROVIDER));
+    const listener = listenerOf(ctx);
+    const probe = async (value: number): Promise<void> => {
+      const pending = listener(
+        {
+          agent,
+          turn: 1,
+          failure: { code: "RATE_LIMIT", message: "slow down", providerRetryAfterMs: value },
+          signal: undefined,
+        },
+        nextNoop,
+      );
+      ctx.tick();
+      assert.deepEqual(await pending, { kind: "retry" });
+      const armed = ctx.timers.at(-1);
+      assert.ok(armed !== undefined, "脏 Retry-After 也要排上退避");
+      assert.equal(armed.ms, 2000, `阶梯第一档，而不是把 ${String(value)} 当延迟`);
+    };
+    await Promise.all([probe(Number.NaN), probe(-5000)]);
   });
 });

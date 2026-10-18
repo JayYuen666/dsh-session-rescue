@@ -1,8 +1,8 @@
 // test/scheduler-snapshot.ts —— 用调度器的**公开快照形状**读「有没有待办 / 还剩多久」。
 //
-// 为什么不是直接调 `hasPending()` / `remainingMs(sessionId)`：那两条按会话的出口在生产里
-// 没有任何调用点——host 读待办走 `stateSnapshot()`，读剩余时间走 `remainingMsFor(fireAt)`
-// （断连恢复与 state 路由两处，见 lib/resume-scheduler.ts），留下它们只会被用例养着。
+// 为什么按快照读、而不是给调度器开 `hasPending()` / `remainingMs(sessionId)` 两条按会话的出口：
+// host 读待办走 `stateSnapshot()`，读剩余时间走 `remainingMsFor(fireAt)`（定义见
+// lib/resume-scheduler.ts），按会话的出口开出来只会被用例养着。
 // 快照本来就有 `pending` 与 `pending.remainingMs` 这两位，判据一字不改，只是换个读法。
 
 import type { ResumeScheduler } from "../lib/resume-scheduler.ts";

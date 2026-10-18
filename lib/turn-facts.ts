@@ -1,7 +1,7 @@
 /**
  * 回合事实投影：把本包原先「每次判定都重扫一遍会话日志」的三处同步读
  * （`reviewLastTurn`、`preFireCheck` 的 newer-turn veto、`turnOpenerSource` 的
- * 链式/goal 判定）折成一枚官方 `sessionProjections` 单元。
+ * 链式/Schedule 判定）折成一枚官方 `sessionProjections` 单元。
  *
  * 走投影而不是 `ctx.sessionQuery.observeSession()`（quality-gate 用的那条面）：后者是
  * **异步**的，而本包的「触发前校验」与紧随其后的注入同处一个同步块——那正是本包不变量
@@ -33,9 +33,6 @@ import type { TurnReview } from "./turn-review.ts";
 
 /** 本包投影单元的注册键（host-only：不声明 wire ⇒ 不进客户端快照）。 */
 export const RESCUE_FACTS_KEY = "session-rescue.turnFacts";
-
-/** 与 goal-round-driver 的注入身份对齐（turn-review.ts 同一位常量）。 */
-const GOAL_SOURCE_KIND = "goal";
 
 /** 与官方 Schedule 的注入身份对齐（turn-review.ts 同一位常量）。 */
 const SCHEDULE_SOURCE_KIND = "schedule";
@@ -82,7 +79,6 @@ export interface EndRow {
   openTodos: number | null;
   todoUpdatedInTurn: boolean;
   awaitsUser: boolean;
-  goalDrivenTurn: boolean;
   scheduleDrivenTurn: boolean;
   /** 本行是否可信：定稿那一刻是否对得上最近一条 turn/start（false ⇒ 读侧回退扫描）。 */
   aligned: boolean;
@@ -124,7 +120,6 @@ const endRowSchema = z.object({
   openTodos: nullableCount,
   todoUpdatedInTurn: z.boolean(),
   awaitsUser: z.boolean(),
-  goalDrivenTurn: z.boolean(),
   scheduleDrivenTurn: z.boolean(),
   aligned: z.boolean(),
 });
@@ -152,10 +147,14 @@ function typeOf(ev: unknown): string {
   return typeof type === "string" ? type : "";
 }
 
-/** 事件 `data` 里的 number 字段（缺字段/坏形状 → undefined）。 */
+/** 事件 `data` 里的 number 字段（缺字段/坏形状 → undefined）。
+ *  只收**安全整数**：`NaN` 与 `1.5` 都是 `typeof === "number"`，但折叠一旦把它们存进
+ *  状态，本单元的 `stateSchema`（`z.number().int()`）就拒收这份回填——`asFacts` 从此
+ *  对这条会话恒回 undefined，三类判定整批掉回全量扫描而毫无征兆（属性层给的反例）。
+ *  与官方 `SessionSeq`/`SessionLogOffset` 的校验口径同一（都是 isSafeInteger）。 */
 function numIn(ev: unknown, key: string): number | undefined {
   const raw = fieldOf(fieldOf(ev, "data"), key);
-  return typeof raw === "number" ? raw : undefined;
+  return typeof raw === "number" && Number.isSafeInteger(raw) ? raw : undefined;
 }
 
 /** 事件 `data.<group>.<key>` 的 string 字段（`reason.kind`）。 */
@@ -259,7 +258,7 @@ function foldToolCall(state: RescueFacts, event: unknown): RescueFacts {
 function foldTodoWrite(state: RescueFacts, event: unknown): RescueFacts {
   const count = openCountOf(fieldOf(fieldOf(event, "data"), "todos"));
   if (count === undefined) {
-    // 快照不可用：既不采信，也不清掉上一份可用值（与旧实现 last-wins 同判据）。
+    // 快照不可用：既不采信，也不清掉上一份可用值（last-wins，与读侧回退扫描同判据）。
     return state;
   }
   const { start } = state;
@@ -281,13 +280,11 @@ function foldTurnEnd(state: RescueFacts, event: unknown): RescueFacts {
     ? {
         todoUpdatedInTurn: start.todoWritten,
         awaitsUser: start.ask,
-        goalDrivenTurn: start.seenFirst && start.kind === GOAL_SOURCE_KIND,
         scheduleDrivenTurn: start.seenFirst && start.kind === SCHEDULE_SOURCE_KIND,
       }
     : {
         todoUpdatedInTurn: false,
         awaitsUser: false,
-        goalDrivenTurn: false,
         scheduleDrivenTurn: false,
       };
   return {
@@ -295,7 +292,7 @@ function foldTurnEnd(state: RescueFacts, event: unknown): RescueFacts {
     end: {
       turn: turn ?? null,
       reasonKind: nestedStr(event, "reason", "kind") ?? null,
-      // 旧实现在 [0, endIdx] 正扫 todo/write，取最后一份可用快照：本行按定稿那一刻的
+      // 按 [0, endIdx] 正扫 todo/write，取最后一份可用快照：本行按定稿那一刻的
       // todoOpen，落在 end 之后的写本来也不在那段区间里。
       openTodos: state.todoOpen,
       ...inTurn,
@@ -335,11 +332,14 @@ function applyEvent(state: RescueFacts, event: unknown): RescueFacts {
 
 export const rescueFactsProjection = {
   key: RESCUE_FACTS_KEY,
-  stateVersion: 1,
+  // 折叠态换了形状（EndRow 去掉 goalDrivenTurn：goal 轮次的让路/接管不再由回合事实判，
+  // 改到触发侧读 round driver 自己的停机位）⇒ 版本必须进。旧版缓存里那一行的值与新 schema
+  // 不再同形，注册表按版本失配重新折叠，而不是拿旧行去读一个新字段。
+  stateVersion: 2,
   stateSchema: rescueFactsSchema,
-  // 空日志的初态就地给出（此前是一份 `rescueFactsInit` 导出，生产侧只有这一个调用方，
-  // 其余消费者全是测试——那正是要消掉的「只被测试养着的出口」）。官方 `init` 交回 header
-  // 与 fork 继承前缀长度，本包两位都不需要：判定全由事件流自身推出，与迁移前的扫描口径一致。
+  // 空日志的初态就地给出：生产侧只有这一个调用方，单独导出一份 init 只会养出一个
+  // 「只被测试引用」的出口。官方 `init` 交回 header 与 fork 继承前缀长度，本包两位都
+  // 不需要：判定全由事件流自身推出。
   init: (_header: SessionHeader, _inherited: SessionLogOffset): RescueFacts => ({
     end: null,
     latestTurnStart: null,
@@ -370,14 +370,13 @@ export function asFacts(value: unknown): RescueFacts | undefined {
 export function reviewFromFacts(state: RescueFacts): TurnReview | undefined {
   const { end } = state;
   if (end === null) {
-    // 从未 turn/end：与旧实现的空结论逐项同解。
+    // 从未 turn/end：与「无 turn/end」的空结论逐项同解。
     return {
       lastTurn: null,
       lastReasonKind: null,
       openTodos: null,
       todoUpdatedInTurn: false,
       awaitsUser: false,
-      goalDrivenTurn: false,
       scheduleDrivenTurn: false,
     };
   }
@@ -389,7 +388,6 @@ export function reviewFromFacts(state: RescueFacts): TurnReview | undefined {
         openTodos: end.openTodos,
         todoUpdatedInTurn: end.todoUpdatedInTurn,
         awaitsUser: end.awaitsUser,
-        goalDrivenTurn: end.goalDrivenTurn,
         scheduleDrivenTurn: end.scheduleDrivenTurn,
       }
     : undefined;
@@ -429,7 +427,7 @@ export function scanNewerTurn(events: readonly unknown[], failedTurn: number): b
 /**
  * 该回合 opener 的 `source.kind`（旧 `turnOpenerSource` + 两位读取器的合并形态）。
  * 倒扫定位**最后一条** turn/start(turn)，再正扫到日志末尾找首条 user/message；
- * 找不到、或 source 不是对象/kind 不是字符串 ⇒ null（旧实现同样判成「既非 goal 也非 rescue」）。
+ * 找不到、或 source 不是对象/kind 不是字符串 ⇒ null（同一判据也判成「既非 goal 也非 rescue」）。
  */
 export function scanOpenerKind(events: readonly unknown[], turn: number): string | null {
   let startIndex = -1;

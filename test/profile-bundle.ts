@@ -2,15 +2,15 @@
 //
 // 背景（这一条就是排查时查出来的真缺陷）：`plugins.bundle.config` 是**按 bundle 包名**
 // keyed 的槽位，宿主派发时拿注册项的 key 与该 bundle 的包名做精确相等匹配：
-//   installed dsh-client-ui-plugin-manager/lib/client.js:2762
+//   installed dsh-client-ui-plugin-manager/lib/client.js:2907
 //     renderSlot("plugins.bundle.config", { view: "page" }, { entryKey: pkg.name })
-//   installed dsh-client-ui-renderer/lib/client.js:1154
+//   installed dsh-client-ui-renderer/lib/client.js:1179
 //     host.entriesOfSlot(slotKey).find((e) => e.options.key === opts?.entryKey)
-//   同插件页 :3791 的「这个 bundle 有没有配置卡」位 = ledger.bundles.has(openPkg.name)，
+//   同插件页 :3979 的「这个 bundle 有没有配置卡」位 = ledger.bundles.has(openPkg.name)，
 //   而 ledger.bundles 就是上面那批注册 key 的集合（:62 `keysOf("plugins.bundle.config")`）
 //   installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:111-113
 //     —— "keyed by the bundle's package name"，key 必填
-//   首方先例 installed dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661
+//   首方先例 installed dsh-experimental-client-ui-voice-input/lib/client.js:2924-2926
 //     —— key 写的就是 bundle 包名
 // key 写成 loader 的裸条目 id（cordis.patch.yml 的 `- id:`）时，宿主拿包名找不到这个
 // 键，`configured` 也是 false → 插件页上永不出卡（本文件存在的理由）。
@@ -19,8 +19,8 @@
 //   - 槽位 key = bundle 包名，真源是本包自己的 package.json（宿主派发 entryKey 用的就是
 //     被装 bundle 的包名，与装法无关）；profile 只在这台开发机上存在，装了才顺手钉一道
 //     「清单里确有这一条」的机器侧漂移针；
-//   - configForms.get(entryId) 的入参（= 0.1.7 隐式 settings 命名空间）= 裸条目 id，
-//     真源本包 cordis.patch.yml（installed dsh-client-ui-settings/lib/client.js:1309-1315
+//   - configForms.get(entryId) 的入参（= 隐式 settings 命名空间）= 裸条目 id，
+//     真源本包 cordis.patch.yml（installed dsh-client-ui-settings/lib/client.js:1294-1298
 //     把 entryId 原样当命名空间用）。
 // 所以这里**不写任何包名/条目 id 字面量**：测试里抄一份常量，正是本缺陷当初漏网的原因。
 
@@ -33,7 +33,7 @@ import path from "node:path";
 const PKG_DIR = path.resolve(import.meta.dirname, "..");
 
 /** unknown → Record 的窄化判据。刻意手抄：test/ 不引运行时依赖，真源见
- *  shared/lib/record.ts（本包 client 半那份已回删，别再往这里加判据）。 */
+ *  shared/lib/record.ts（本包 client 半不抄第二份，别再往这里加判据）。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -90,7 +90,7 @@ export function profileBundleName(): string {
 }
 
 /**
- * cordis.patch.yml 里的裸条目 id —— 0.1.7 的隐式 settings 命名空间与
+ * cordis.patch.yml 里的裸条目 id —— 隐式 settings 命名空间与
  * `configForms.get(entryId)` 的入参都取它，与 bundle 包名是两回事。
  */
 function patchEntryId(): string {

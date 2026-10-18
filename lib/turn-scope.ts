@@ -23,7 +23,7 @@ import type { ContentBlock } from "@deepseek-ai/dsh-llm";
  * 会话转录节点：本包读取的**字段子集投影**，但 `kind` 直接取官方判别键
  *（installed `@deepseek-ai/dsh-client-ui-conversation/lib/types/client/contract/records.d.ts`
  * 里 `ConversationNode` 各变体的 `kind` 字面量联合）。于是 `node.kind === "turn-error"`
- * 这类判定是编译期受检的——旧写法 `kind: string` 让任何拼错的事件名都静默走到「不匹配」，
+ * 这类判定是编译期受检的——把 `kind` 写成 `string` 让任何拼错的事件名都静默走到「不匹配」，
  * 而本包的重试/续写判定全押在这些串上。
  * 官方节点上多出来的成员本包不读，投影掉是有意的；缺成员（如 `turn?`）由官方交出的
  * 变体保证可得，写错的必选性会在 `useChat` 的赋值方向红。
@@ -41,7 +41,7 @@ export interface TranscriptNode {
 
 /**
  * 运行中工具调用：直接用官方类型（`RunningToolCall`，同文件 :248-260，`turn`/`step`/
- * `argsRaw`/`time`/`subCalls` 全是必选）。旧镜像写成 `{ turn?: number; [key: string]:
+ * `argsRaw`/`time`/`subCalls` 全是必选）。本地重述写成 `{ turn?: number; [key: string]:
  * unknown }`——那是自造了一份宿主交不出来的形状（官方 interface 没有隐式索引签名，
  * 赋不进带索引签名的目标），实测 TS2322 就是这条：本包只读 `.turn`，官方版它还更准。
  */

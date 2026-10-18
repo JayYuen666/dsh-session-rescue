@@ -5,6 +5,9 @@ import { reviewLastTurn } from "../lib/turn-review.ts";
 /** 任务清单写入的日志事件名（fixture 造事件与混合事件流两处同判据）。 */
 const TODO_WRITE_EVENT = "todo/write";
 
+/** 截断终态名（终态读取、理由断言与崩溃恢复用例共用）。 */
+const MAX_TOKENS = "max-tokens";
+
 // 事件构造器：只带本模块读取的字段，其余省略。
 function ev(
   type: string,
@@ -48,9 +51,9 @@ describe("reviewLastTurn — 回合终态", () => {
   });
 
   it("取最后一条 turn/end 的 turn 与 reason.kind", () => {
-    const result = reviewLastTurn([turnEnd(3, "completed"), turnEnd(4, "max-tokens")]);
+    const result = reviewLastTurn([turnEnd(3, "completed"), turnEnd(4, MAX_TOKENS)]);
     assert.equal(result.lastTurn, 4);
-    assert.equal(result.lastReasonKind, "max-tokens");
+    assert.equal(result.lastReasonKind, MAX_TOKENS);
   });
 
   it("turn/end 缺 reason 时 reasonKind 为 null（不抛）", () => {
@@ -186,39 +189,6 @@ describe("reviewLastTurn — 等待用户（必须抑制续跑）", () => {
   });
 });
 
-describe("reviewLastTurn — goal 驱动回合（避免与 goal 轮次双重注入）", () => {
-  it("最后回合的首条 user 消息 source.kind=goal → goalDrivenTurn=true", () => {
-    const result = reviewLastTurn([
-      turnStart(9),
-      userMsg({ kind: "goal", goalId: "g1", revision: 1, round: 2 }),
-      turnEnd(9, "completed"),
-    ]);
-    assert.equal(result.goalDrivenTurn, true);
-  });
-
-  it("普通用户消息 → goalDrivenTurn=false", () => {
-    const result = reviewLastTurn([
-      turnStart(9),
-      userMsg({ kind: "user", rpcId: "r1" }),
-      turnEnd(9, "completed"),
-    ]);
-    assert.equal(result.goalDrivenTurn, false);
-  });
-
-  it("插件注入（producer-owned source.kind）的回合不算 goal 驱动", () => {
-    const result = reviewLastTurn([
-      turnStart(9),
-      userMsg({ kind: "plugin:session-rescue" }),
-      turnEnd(9, "completed"),
-    ]);
-    assert.equal(result.goalDrivenTurn, false);
-  });
-
-  it("回合内没有 user/message → goalDrivenTurn=false", () => {
-    assert.equal(reviewLastTurn([turnStart(9), turnEnd(9, "completed")]).goalDrivenTurn, false);
-  });
-});
-
 describe("reviewLastTurn — Schedule 驱动回合（避免与官方定时提醒双重注入）", () => {
   it("最后回合的首条 user 消息 source.kind=schedule → scheduleDrivenTurn=true", () => {
     const result = reviewLastTurn([
@@ -244,12 +214,23 @@ describe("reviewLastTurn — Schedule 驱动回合（避免与官方定时提醒
       userMsg({ kind: "goal", goalId: "g1", revision: 1, round: 2 }),
       turnEnd(9, "completed"),
     ]);
-    assert.equal(result.scheduleDrivenTurn, false);
-    assert.equal(result.goalDrivenTurn, true);
+    assert.equal(result.scheduleDrivenTurn, false, "goal 身份不是 schedule 身份");
   });
 
   it("回合内没有 user/message → scheduleDrivenTurn=false", () => {
     assert.equal(reviewLastTurn([turnStart(9), turnEnd(9, "completed")]).scheduleDrivenTurn, false);
+  });
+
+  it("缺该回合 turn/start 时，上一回合的 schedule 身份不得串过来（保守 false）", () => {
+    const result = reviewLastTurn([
+      turnStart(1),
+      userMsg({ kind: "schedule" }),
+      turnEnd(1, "completed"),
+      // turn 2 是崩溃恢复留下的半截日志：只有终态、没有 turn/start。
+      turnEnd(2, MAX_TOKENS),
+    ]);
+    assert.equal(result.lastTurn, 2);
+    assert.equal(result.scheduleDrivenTurn, false);
   });
 });
 
@@ -259,7 +240,6 @@ describe("reviewLastTurn — 鲁棒性", () => {
     assert.equal(result.lastReasonKind, null);
     assert.equal(result.openTodos, null);
     assert.equal(result.awaitsUser, false);
-    assert.equal(result.goalDrivenTurn, false);
   });
 
   it("事件缺 data / 数组含空洞不抛", () => {
@@ -271,6 +251,19 @@ describe("reviewLastTurn — 鲁棒性", () => {
     ]);
     assert.equal(result.lastTurn, 1);
     assert.equal(result.lastReasonKind, "completed");
+  });
+
+  it("轮次号是 NaN/小数/无穷：按「不带号」读，与投影侧同一判据", () => {
+    // 两条读法必须对同一串事件给同一个答案（test/property/turn-facts.property.test.ts
+    // 逐条撞这一判），所以这里的降级方向必须与 lib/turn-facts.ts 的 numIn 逐字一致。
+    assert.equal(reviewLastTurn([turnStart(1), turnEnd(Number.NaN, "completed")]).lastTurn, null);
+    assert.equal(reviewLastTurn([turnStart(1.5), turnEnd(1.5, "completed")]).lastTurn, null);
+    assert.equal(
+      reviewLastTurn([turnStart(1), turnEnd(1, "completed"), turnStart(Number.POSITIVE_INFINITY)])
+        .lastTurn,
+      1,
+      "无穷那条不算号：更早那条 end 仍是最后一条终态",
+    );
   });
 });
 
@@ -299,7 +292,6 @@ describe("坏形状事件与无终态（防御降级，审计补漏）", () => {
     assert.equal(result.lastTurn, null);
     assert.equal(result.lastReasonKind, null);
     assert.equal(result.openTodos, null);
-    assert.equal(result.goalDrivenTurn, false);
   });
 
   it("找不到 turn/start 边界时：陈旧 todo 不算本回合所写", () => {

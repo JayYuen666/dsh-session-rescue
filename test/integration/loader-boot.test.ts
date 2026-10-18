@@ -3,16 +3,15 @@ import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { buildHost } from "../../build-host.mjs";
 
 // 真实组合测试：用真实的 cordis + cordis-plugin-loader（本包 devDependencies 里的那对，
-// 版本与 dsh 自带的同一份：cordis 4.0.2 / loader 1.0.3，且 loader 把 cordis 声明为 peer，
+// 版本与 dsh 自带的同一份，且 loader 把 cordis 声明为 peer，
 // 两边解析到同一实例）组装会话：
 // - session-rescue 的 host 半边由 Loader 走 Node 原生 import 载入（源码态 .ts 副本
 //   + 发布态 .js 产物各测一次，见下方 fixture 注释）
-// - 其余宿主服务（settings/timer/agents/webServer）用最基本的 provide 替身，
+// - 其余宿主服务（settings/timer/agents）用最基本的 provide 替身，
 //   保持"非产品服务全 mock、插件本体全真实"的 dsh 测试纪律。
 // 这验证的是"产品可见插件走真实 Loader 组合"，而不只是手搓 ctx.plugin。
 // 走依赖解析而不是写死某个安装位置：单包仓的 CI 装的是 node_modules 里这一对，
@@ -54,11 +53,6 @@ const FIXTURE_HOST_JS = path.join(FIXTURE_PKG, "host.js");
 const CordisMod = (await import(CORDIS_ENTRY)) as { Context: unknown };
 const LoaderMod = (await import(LOADER_ENTRY)) as { default: unknown };
 
-interface TestRoute {
-  path: string;
-  handler: (req: IncomingMessage, res: ServerResponse) => void;
-}
-
 interface TimerEntry {
   fn: () => void;
   ms: number;
@@ -70,6 +64,7 @@ interface TimerEntry {
 interface TestCtx {
   plugin: (plugin: unknown) => Promise<unknown>;
   emit: (name: string, payload: unknown) => void;
+  get: (name: string) => unknown;
   loader: {
     /** `config` 即 profile 条目行的 `config:`（0.1.7 唯一的插件调参入口，
      *  宿主按条目导出的 `Config` 校验并以 `.default()` 填齐）。 */
@@ -105,7 +100,6 @@ interface Mount {
     calls: unknown[];
   };
   timers: TimerEntry[];
-  routes: Map<string, TestRoute>;
   /** `settings.configure` 的调用记录（页面策略：0.1.7 本包在 settings 上唯一还调的
    *  写侧方法，且只经 cordis 的注入子上下文被调）。替身少给这个成员时那次调用会抛错，
    *  而**抛错被 cordis 整个吞掉**（实测：删掉假件里的 configure 后本文件六条用例仍全绿），
@@ -134,7 +128,6 @@ async function mount(
   hostEntry: string = FIXTURE_HOST,
 ): Promise<Mount> {
   const timers: TimerEntry[] = [];
-  const routes = new Map<string, TestRoute>();
   const calls: unknown[] = [];
   const evs: unknown[] = [];
   const configureCalls: { presentation: { auto?: boolean }; ownerUid: unknown }[] = [];
@@ -200,12 +193,6 @@ async function mount(
         },
       });
       ctx.provide("agents", agentsStore);
-      ctx.provide("webServer", {
-        register(route: TestRoute) {
-          routes.set(route.path, route);
-          return () => routes.delete(route.path);
-        },
-      });
       // lesson-loop 总线：仅在用例显式要「已遵守」观测时装上（默认缺席，
       // 与没装 lesson-loop 的宿主一致）。
       if (bus !== undefined) {
@@ -225,7 +212,6 @@ async function mount(
     ctx,
     agent,
     timers,
-    routes,
     configureCalls,
     tick() {
       for (const timerEntry of timers) {
@@ -249,8 +235,8 @@ function turnEnd(turn: number, kind: string): unknown {
 }
 
 describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发布产物）", () => {
-  // 夹具的建/删在本套件的全部用例之外各跑一次（原先挂在文件顶层，vitest 的结构类规则
-  // 判它"用例与 hook 不在 describe 里"；本文件只有这一个顶层套件，移进来作用面不变）。
+  // 夹具的建/删在本套件的全部用例之外各跑一次（vitest 的结构类规则
+  // 判「用例与 hook 不在 describe 里」；本文件只有这一个顶层套件，移进来作用面不变）。
   beforeAll(async () => {
     await mkdir(path.join(FIXTURE_PKG, "lib"), { recursive: true });
     await cp(HOST_TS, FIXTURE_HOST);
@@ -270,7 +256,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     await rm(FIXTURE_DIR, { recursive: true, force: true });
   });
 
-  it("loader 原生载入 host.ts：注入等待、事件驱动续跑、路由注册", { timeout: 30_000 }, async () => {
+  it("loader 原生载入 host.ts：注入等待、事件驱动续跑、读面注册", { timeout: 30_000 }, async () => {
     const inst = await mount();
     live = inst.ctx;
     assertLoaded(inst);
@@ -304,18 +290,16 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     expect(inst.timers).toHaveLength(1);
     // 10_000 既不是本用例写的、也不是替身写的：0.1.7 交进 apply 的是 cordis 按条目
     // `Config` 解析出的 volatile 引用，本用例 config 传空 → 这一读到的就是 schema 的
-    // `.default(10_000)`（旧替身那份手写 baseSettings 表随 `settings.register` 一起删了）。
-    // 因此这条断言现在真正在测「内置默认有没有被静默丢弃」，而不是自己喂给自己。
+    // `.default(10_000)`。
+    // 因此这条断言真正在测「内置默认有没有被静默丢弃」，而不是自己喂给自己。
     expect(inst.timers[0]?.ms).toBe(10_000);
 
     inst.tick();
     expect(inst.agent.calls).toHaveLength(1);
     expect((inst.agent.calls[0] as { role?: string }).role).toBe("user");
 
-    // host apply 的 ctx.effect 内注册的 webServer 路由
-    expect(inst.routes.has("/_dsh/session-rescue/state")).toBe(true);
-    expect(inst.routes.has("/_dsh/session-rescue/cancel")).toBe(true);
-    expect(inst.routes.has("/_dsh/session-rescue/toggle")).toBe(true);
+    // 读面由 apply 的注入子上下文注册到根 ctx（官方 Typert Remote 服务键）
+    expect(inst.ctx.get("sessionRescue")).toBeDefined();
 
     // 非瞬时失败 → 不武装
     const before = inst.timers.length;
@@ -329,7 +313,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
   });
 
   it(
-    "发布态产物 host.js：真实 Loader 同样载得动，路由与续跑行为一致",
+    "发布态产物 host.js：真实 Loader 同样载得动，读面与续跑行为一致",
     { timeout: 30_000 },
     async () => {
       // 装载对象换成 build-host.mjs 现建的产物：装机后 dsh 按包名解析到的就是这份
@@ -339,10 +323,8 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       live = inst.ctx;
       assertLoaded(inst);
 
-      // host apply 的 ctx.effect 内注册的 webServer 路由（产物里同样在）
-      expect(inst.routes.has("/_dsh/session-rescue/state")).toBe(true);
-      expect(inst.routes.has("/_dsh/session-rescue/cancel")).toBe(true);
-      expect(inst.routes.has("/_dsh/session-rescue/toggle")).toBe(true);
+      // 读面服务由 apply 的子上下文注册（产物里同样在）
+      expect(inst.ctx.get("sessionRescue")).toBeDefined();
 
       // 事件驱动链在产物形态下等价：瞬时失败 → 定时器武装 → 触发 → followup 发出
       inst.ctx.emit(AGENT_ERROR_EVENT, {

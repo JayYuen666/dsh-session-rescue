@@ -2,7 +2,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { ResumeScheduler } from "../lib/resume-scheduler.ts";
 
-// E3：state 路由 suspended 快照的 remainingMs 在 host.ts 里用 Date.now()
+// state 路由 suspended 快照的 remainingMs 在 host.ts 里用 Date.now()
 // 直算，而调度器时钟是可注入的 now()——两者漂移时 UI 倒计时与真实 fire
 // 时刻不一致。修复：调度器暴露 remainingMsFor(fireAt)（走注入时钟），
 // host 一律经它计算。本文件先红后绿：方法缺失时即失败。

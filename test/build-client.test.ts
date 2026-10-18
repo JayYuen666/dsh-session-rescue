@@ -181,10 +181,10 @@ describe("client.js 冒烟（stub ModuleLoader + stub react）", () => {
     // “same structure but not reference-equal”；Array.from 归一化到宿主 realm。
     // locale 在列：卡片/dock 的文案全部经官方 ctx.locale.register + bind 取
     //（见 src/client-entry.ts 的 apply），缺席则 apply 里读不到 locale 面。
-    // configForms 取代 0.1.6 的 settingsScope（该服务在 installed 0.1.7 全树零命中，
+    // configForms 取代 settingsScope（该服务在 installed 全树零命中，
     // 继续注入它 = 整条 client 入口挂不上）：契约源 installed
-    // dsh-client-ui-settings/lib/types/client/config-form.d.ts:95-96（Context 增强）
-    // 与 :142（get(entryId)）。仍是**精确全等**清单，不放宽为包含判定。
+    // dsh-client-ui-settings/lib/types/client/config-form.d.ts:92-94（Context 增强）
+    // 与 :137（get(entryId)）。仍是**精确全等**清单，不放宽为包含判定。
     assert.deepEqual(
       [...(exports.inject as unknown[])],
       ["slots", "sessions", "configForms", "locale"],

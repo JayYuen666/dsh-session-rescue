@@ -22,6 +22,7 @@
 import { execFileSync } from "node:child_process";
 import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
 
 const root = import.meta.dirname;
 const outDir = path.join(root, "types");
@@ -46,6 +47,22 @@ export function canonicalizeDeclarationSpecifiers(text) {
     RELATIVE_SOURCE_SPECIFIER,
     (_match, quote, prefix) => `${quote}${prefix}.js${quote}`,
   );
+}
+
+/**
+ * 本地 `tsc` 的入口脚本路径。
+ *
+ * 不写 `npx tsc`：npx 要在 PATH 上找 `npx`/`npx.cmd`，Windows 上 `execFileSync` 不带
+ * `shell: true` 就直接 ENOENT；而 pnpm 装的仓里 `npx` 本身也不保证存在（pnpm 的对位是
+ * `pnpm exec`）。按 `import.meta` 解析出 typescript 包自己的 bin，再用**当前这个 node**
+ * 跑它——三方（node / tsc / 本脚本）用的是同一个可执行文件，跨平台且不经 PATH。
+ *
+ * @returns {string} tsc 入口脚本的绝对路径
+ */
+function tscEntry() {
+  const require = createRequire(import.meta.url);
+  const pkg = require.resolve("typescript/package.json");
+  return path.join(path.dirname(pkg), "bin", "tsc");
 }
 
 /**
@@ -100,7 +117,7 @@ export async function buildTypes() {
   // 先清空：tsc 不清 outDir，留着旧声明等于把陈旧类型一起发出去。
   await rm(outDir, { recursive: true, force: true });
   // tsc 自己已经按 tsconfig 排好了依赖与增量，这里只把失败原样抛出。
-  run("npx", ["tsc", "-p", "tsconfig.types.json"]);
+  run(process.execPath, [tscEntry(), "-p", "tsconfig.types.json"]);
   const files = await listDeclarations(outDir, "");
   await Promise.all(
     files.map(async (file) => {

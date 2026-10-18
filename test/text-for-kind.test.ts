@@ -36,7 +36,7 @@ function svcWithPreference(preference: unknown): never {
   return svcWithDescribe([{ ns: "locale", value: { preference } }]);
 }
 
-// E2：未知 kind 绝不能回退到任何一份 approved 文案（错文案比不发危害更大）。
+// 未知 kind 绝不能回退到任何一份 approved 文案（错文案比不发危害更大）。
 // 签名已从 `RescueKind | string | undefined → string | null` 收紧为
 // `RescueKind → string`：pending 快照只在进程内由 scheduler 产生，未知 kind 在
 // host 侧不可达，调用方也就没有 null 分支可走。防御随之从「返回 null」改为
