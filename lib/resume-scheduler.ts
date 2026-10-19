@@ -42,7 +42,7 @@ interface SessionRecord {
   counts: Record<RescueKind, number>;
   /** 冷却时间戳按 kind 分别记录：三种注入各有自己的 cooldownMs，共享一个
    *  lastFireAt 会让 resume 的 120s 冷却跨 kind 误拦 continue/unfinished。 */
-  lastFireAt: Record<RescueKind, number>;
+  lastFireAt: Record<RescueKind, number | null>;
   pending: PendingRecord | null;
   disposeTimer: (() => void) | null;
   /** 本会话已被处理过的最大**回合终态**编号（0 = 还没处理过任何一轮）。
@@ -110,7 +110,7 @@ export class ResumeScheduler {
     this.evictIdleSessions();
     rec = {
       counts: { resume: 0, continue: 0, unfinished: 0 },
-      lastFireAt: { resume: 0, continue: 0, unfinished: 0 },
+      lastFireAt: { resume: null, continue: null, unfinished: null },
       pending: null,
       disposeTimer: null,
       lastHandledTurn: 0,
@@ -164,7 +164,9 @@ export class ResumeScheduler {
     }
     const nowTime = this.now();
     const firedAt = rec.lastFireAt[kind];
-    const inCooldown = firedAt > 0 && nowTime - firedAt < cooldownMs;
+    // 哨兵用 `null` 而不是 `0`：`0` 是**合法时钟值**（测试注入的 now() 就从 0 起），
+    // 用 `> 0` 判「从未 fire」会把那台机器上的一次真实 fire 当成从没发生过，冷却被静默关闭。
+    const inCooldown = firedAt !== null && nowTime - firedAt < cooldownMs;
     if (inCooldown && chainDelayMs <= 0) {
       return { action: "skip", reason: "cooldown", retryAfterMs: cooldownMs - (nowTime - firedAt) };
     }
@@ -301,10 +303,11 @@ export class ResumeScheduler {
           unfinished: rec.counts.unfinished,
         },
         // 对外仍报告单一"最近一次注入时刻"（UI 只用它做展示，闸门判定在内部按 kind）。
+        // 内部哨兵是 `null`（见冷却判据），对外这一位仍是 number：全为 null（从没 fire）
+        // 时回 0，与旧契约逐字一致。
         lastFireAt: Math.max(
-          rec.lastFireAt.resume,
-          rec.lastFireAt.continue,
-          rec.lastFireAt.unfinished,
+          0,
+          ...Object.values(rec.lastFireAt).filter((at): at is number => at !== null),
         ),
         pending:
           rec.pending === null

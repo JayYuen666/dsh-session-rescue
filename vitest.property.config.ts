@@ -12,6 +12,8 @@ export default defineConfig({
   test: {
     include: ["test/property/**/*.test.ts"],
     environment: "node",
+    // 同 vitest.integration.config.ts：随机层更容易产出「只在全量跑时看得见」的日志，账本要在每一层都生效。
+    setupFiles: ["test/setup-logs.ts"],
     // 单条属性通常百来毫秒；给到 60s 是因为模型化调度器用例会跑到千级序列长度。
     testTimeout: 60_000,
     coverage: { reporter: ["text"], enabled: false },

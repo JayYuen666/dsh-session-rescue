@@ -50,6 +50,11 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 - 包在公共 npm 上，安装不需要凭据。
 - 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`。许可 MIT，源码仓见 `package.json` 的 `repository.url`。
 
+
+### shared 的版本下限
+
+如果你的 profile 用 pnpm `overrides` 把 `@jayyuen66/dsh-plugin-shared` 钉在某个版本，那个钉住的值必须不低于本包声明的 `@jayyuen66/dsh-plugin-shared` 版本。钉得更低就会装到一份缺少本包运行期所导入的名字的产物，宿主起来时报 `N entries did not activate` 加 `does not provide an export named ...`——包装得上、永远不生效，而各仓单仓 CI 看不见这一类。
+
 ### 在 dsh 里启用
 
 - 组合包形态：包内 `cordis.patch.yml` 带 `- id: session-rescue` + `name: "@jayyuen66/dsh-session-rescue"`，由 `package.json` 的 `dsh.bundle.patch` 指向，`dsh plugin add` 自动登记。

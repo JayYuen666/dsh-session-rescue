@@ -45,6 +45,33 @@ describe("onFailure 调度决策", () => {
     assert.equal(hasPending(scheduler, "s1"), true);
   });
 
+  it("时钟从 0 起时冷却照样生效（0 是合法时钟值，不是「从未 fire」）", () => {
+    // 旧实现用 `firedAt > 0` 判「有没有 fire 过」，于是注入一台从 0 起的时钟时，
+    // 一次真实 fire 留下的 `lastFireAt = 0` 被读成「从没发生过」，冷却被静默关闭。
+    // 宿主默认的 `Date.now()` 是 13 位，恰好掩盖了这一支——属"只有注入时钟才看得见"的缺陷。
+    const clock = makeClock(0);
+    const scheduler = new ResumeScheduler({ now: clock.now });
+    const first = scheduler.onFailure({
+      ...base,
+      kind: "resume",
+      delayMs: 10_000,
+      cooldownMs: 120_000,
+      maxResumes: 3,
+    });
+    assert.equal(first.action, "schedule");
+    scheduler.settle("s1", "fired");
+    // 此刻 now() 仍是 0，lastFireAt.resume 也是 0：必须判成"在冷却里"，而不是"从没 fire"。
+    const second = scheduler.onFailure({
+      ...base,
+      kind: "resume",
+      delayMs: 10_000,
+      cooldownMs: 120_000,
+      maxResumes: 3,
+    });
+    assert.equal(second.action, "skip", "0 时刻 fire 之后必须还在冷却里");
+    assert.equal(second.reason, "cooldown");
+  });
+
   it("冷却按 kind 独立：resume fire 后同秒的 continue 不被误拦", () => {
     const scheduler = new ResumeScheduler({ now: makeClock().now });
     scheduler.onFailure({
