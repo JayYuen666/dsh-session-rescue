@@ -10,6 +10,9 @@ export default defineConfig({
   test: {
     include: ["test/integration/**/*.test.ts"],
     environment: "node",
+    // 与单测项目同一份日志账本契约：接管 console，跑测期间漏出的每一行本包日志都必须被源码里的
+    // 模板片段认领（见 test/setup-logs.ts）。这一层起的是真宿主装配，插件日志最容易从这里漏进报告。
+    setupFiles: ["test/setup-logs.ts"],
     // 真服务启动 + 真网络往返 + 真定时器退避（首档 2s）都在这条时限里。
     testTimeout: 120_000,
     hookTimeout: 120_000,

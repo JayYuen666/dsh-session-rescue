@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-session-rescue",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Session rescue for dsh web: auto-resume on transient model failures, max-tokens continuation and unclosed-todo catch-up (host), plus edit-resend / retry / queue-withdraw / stop-and-reask / settings card (client).",
   "keywords": [
     "cordis",
