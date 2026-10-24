@@ -28,7 +28,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** build-host.mjs 的导出返回形状：单文件正文，或「落盘绝对路径 → 正文」的产物清单。 */
 type BuiltArtifacts = string | Map<string, string>;
@@ -104,6 +104,13 @@ function manifestOf(pkgDir: string, files: Map<string, string>, fromDisk: boolea
     const identity = fromDisk ? digestOf(readText(file)) : digestOf(code);
     rows.push(`${path.relative(pkgDir, file)}\t${identity}`);
   }
+  // 零条目时两侧都折成 "\n"，逐字节相等 —— 空清单会被读成「新鲜」。构建函数交回空 Map
+  // （builder 配错、打包器没产出 chunk）恰恰是产物坏了的形态，必须当场红而不是放过。
+  if (rows.length === 0) {
+    throw new Error(
+      `[${pkgDir}] 构建函数交回了空产物清单：两侧都为空会逐字节相等而假绿，门禁无从比对。`,
+    );
+  }
   return `${rows.join("\n")}\n`;
 }
 
@@ -123,10 +130,11 @@ export async function hostFreshnessEvidence(
   const artifact = options.artifact ?? DEFAULT_ARTIFACT;
   const pkgName = packageNameOf(pkgDir);
   // 动态导入 .mjs 对 TS 为 any，先收窄到调用面再 await（避免 no-unsafe-*）。
-  const mod = (await import(path.resolve(pkgDir, "build-host.mjs"))) as unknown as Record<
-    string,
-    (() => Promise<BuiltArtifacts>) | undefined
-  >;
+  // import() 只收 URL 或说明符，不收裸文件系统路径：Windows 上 `C:\…\build-host.mjs`
+  // 会被当成协议 `c:` 解析而抛 ERR_UNSUPPORTED_ESM_URL_SCHEME；POSIX 的 `/…` 只是恰好能过。
+  const mod = (await import(
+    pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href
+  )) as unknown as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
   const build = mod[builder];
   if (typeof build !== "function") {
     throw new TypeError(

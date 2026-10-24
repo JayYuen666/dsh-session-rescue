@@ -1,19 +1,19 @@
 # 自动生成：catalog 键值与 overrides 取值来自根 pnpm-workspace.yaml，改根不改这里。
 autoInstallPeers: false
 catalog:
-  "@jayyuen66/dsh-plugin-shared": ^0.1.6
+  "@jayyuen66/dsh-plugin-shared": 0.1.9
   "@types/node": 26.6.5
   "@types/react": 19.3.0
   "@types/react-dom": 19.3.0
   "@vitest/coverage-v8": 5.0.5
   "eslint-plugin-sonarjs": 4.2.2
-  happy-dom: 21.0.3
-  oxfmt: 0.73.0
-  oxlint: 1.88.0
-  "oxlint-tsgolint": 7.0.2004
-  rolldown: 1.2.14
+  happy-dom: 21.0.4
+  oxfmt: 0.74.0
+  oxlint: 1.89.0
+  "oxlint-tsgolint": 7.0.2005
+  rolldown: 1.2.15
   typescript: 7.0.2
-  vite: 8.3.4
+  vite: 8.3.5
   vitest: 5.0.5
 overrides:
   "@deepseek-ai/cordis": 4.0.5
@@ -21,93 +21,105 @@ overrides:
   "@deepseek-ai/cordis-plugin-loader": 1.0.6
   "@deepseek-ai/cordis-plugin-timer": 1.1.7
   "@deepseek-ai/cosmokit": 1.8.6
-  "@deepseek-ai/dsh-agent": 0.2.1-rc.2
-  "@deepseek-ai/dsh-agent-default-model": 0.2.1-rc.2
-  "@deepseek-ai/dsh-agent-preset-registry": 0.2.1-rc.2
-  "@deepseek-ai/dsh-anonymous-user-id": 0.2.1-rc.2
-  "@deepseek-ai/dsh-api-gateway": 0.2.1-rc.2
-  "@deepseek-ai/dsh-api-remotes": 0.2.1-rc.2
-  "@deepseek-ai/dsh-api-session-controller": 0.2.1-rc.2
-  "@deepseek-ai/dsh-api-workspace-controller": 0.2.1-rc.2
-  "@deepseek-ai/dsh-app-boot": 0.2.1-rc.2
-  "@deepseek-ai/dsh-atomic-write": 0.2.1-rc.2
-  "@deepseek-ai/dsh-attachment": 0.2.1-rc.2
-  "@deepseek-ai/dsh-brand": 0.2.1-rc.2
-  "@deepseek-ai/dsh-chunked-list": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-connection": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-file-upload": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-locale": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-store": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-chat": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-conversation": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-layout": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-plugin-manager": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-primitives": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-renderer": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-session": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-settings": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-slots": 0.2.1-rc.2
-  "@deepseek-ai/dsh-client-ui-workspace": 0.2.1-rc.2
-  "@deepseek-ai/dsh-command-feedback": 0.2.1-rc.2
-  "@deepseek-ai/dsh-commands": 0.2.1-rc.2
-  "@deepseek-ai/dsh-compaction": 0.2.1-rc.2
-  "@deepseek-ai/dsh-compaction-image-offload": 0.2.1-rc.2
-  "@deepseek-ai/dsh-config-editor": 0.2.1-rc.2
-  "@deepseek-ai/dsh-credentials": 0.2.1-rc.2
-  "@deepseek-ai/dsh-deque": 0.2.1-rc.2
-  "@deepseek-ai/dsh-file-reference": 0.2.1-rc.2
-  "@deepseek-ai/dsh-fs": 0.2.1-rc.2
-  "@deepseek-ai/dsh-hmr": 0.2.1-rc.2
-  "@deepseek-ai/dsh-home-paths": 0.2.1-rc.2
-  "@deepseek-ai/dsh-host-directory-picker": 0.2.1-rc.2
-  "@deepseek-ai/dsh-host-webserver": 0.2.1-rc.2
-  "@deepseek-ai/dsh-http-proxy": 0.2.1-rc.2
-  "@deepseek-ai/dsh-jobs": 0.2.1-rc.2
-  "@deepseek-ai/dsh-jobs-local": 0.2.1-rc.2
-  "@deepseek-ai/dsh-llm": 0.2.1-rc.2
-  "@deepseek-ai/dsh-llm-retry": 0.2.1-rc.2
-  "@deepseek-ai/dsh-message-feedback": 0.2.1-rc.2
-  "@deepseek-ai/dsh-native-command": 0.2.1-rc.2
-  "@deepseek-ai/dsh-output-retention": 0.2.1-rc.2
-  "@deepseek-ai/dsh-package-manifest": 0.2.1-rc.2
-  "@deepseek-ai/dsh-permission-presets": 0.2.1-rc.2
-  "@deepseek-ai/dsh-ptc-runtime": 0.2.1-rc.2
-  "@deepseek-ai/dsh-sandbox": 0.2.1-rc.2
-  "@deepseek-ai/dsh-sandbox-policy": 0.2.1-rc.2
-  "@deepseek-ai/dsh-scope": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-format": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-format-catalog": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-format-v0-to-v1": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-format-v1-to-v2": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-format-v2-to-v3": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-format-v3-to-v4": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-persistence": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-projection": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-projection-cache": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-query": 0.2.1-rc.2
-  "@deepseek-ai/dsh-session-title": 0.2.1-rc.2
-  "@deepseek-ai/dsh-settings": 0.2.1-rc.2
-  "@deepseek-ai/dsh-shell": 0.2.1-rc.2
-  "@deepseek-ai/dsh-skill": 0.2.1-rc.2
-  "@deepseek-ai/dsh-storage": 0.2.1-rc.2
-  "@deepseek-ai/dsh-storage-domain": 0.2.1-rc.2
-  "@deepseek-ai/dsh-subagent": 0.2.1-rc.2
-  "@deepseek-ai/dsh-subprocess": 0.2.1-rc.2
-  "@deepseek-ai/dsh-system-prompt": 0.2.1-rc.2
-  "@deepseek-ai/dsh-timeout": 0.2.1-rc.2
-  "@deepseek-ai/dsh-tool-todo": 0.2.1-rc.2
-  "@deepseek-ai/dsh-tools": 0.2.1-rc.2
-  "@deepseek-ai/dsh-typert-protocol": 0.2.1-rc.2
-  "@deepseek-ai/dsh-typert-registry": 0.2.1-rc.2
-  "@deepseek-ai/dsh-user-approval": 0.2.1-rc.2
-  "@deepseek-ai/dsh-util-crypto": 0.2.1-rc.2
-  "@deepseek-ai/dsh-util-time": 0.2.1-rc.2
-  "@deepseek-ai/dsh-util-values": 0.2.1-rc.2
-  "@deepseek-ai/dsh-util-workspace-path": 0.2.1-rc.2
-  "@deepseek-ai/dsh-workspace": 0.2.1-rc.2
+  "@deepseek-ai/dsh": 0.2.1-rc.3
+  "@deepseek-ai/dsh-agent": 0.2.1-rc.3
+  "@deepseek-ai/dsh-agent-default-model": 0.2.1-rc.3
+  "@deepseek-ai/dsh-agent-loop": 0.2.1-rc.3
+  "@deepseek-ai/dsh-agent-loop-testkit": 0.2.1-rc.3
+  "@deepseek-ai/dsh-agent-preset-registry": 0.2.1-rc.3
+  "@deepseek-ai/dsh-anonymous-user-id": 0.2.1-rc.3
+  "@deepseek-ai/dsh-api-gateway": 0.2.1-rc.3
+  "@deepseek-ai/dsh-api-remotes": 0.2.1-rc.3
+  "@deepseek-ai/dsh-api-session-controller": 0.2.1-rc.3
+  "@deepseek-ai/dsh-api-workspace-controller": 0.2.1-rc.3
+  "@deepseek-ai/dsh-app-boot": 0.2.1-rc.3
+  "@deepseek-ai/dsh-atomic-write": 0.2.1-rc.3
+  "@deepseek-ai/dsh-attachment": 0.2.1-rc.3
+  "@deepseek-ai/dsh-brand": 0.2.1-rc.3
+  "@deepseek-ai/dsh-chunked-list": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-connection": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-file-upload": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-locale": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-shortcuts": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-store": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-chat": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-conversation": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-layout": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-plugin-manager": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-primitives": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-renderer": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-session": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-settings": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-slots": 0.2.1-rc.3
+  "@deepseek-ai/dsh-client-ui-workspace": 0.2.1-rc.3
+  "@deepseek-ai/dsh-command-feedback": 0.2.1-rc.3
+  "@deepseek-ai/dsh-commands": 0.2.1-rc.3
+  "@deepseek-ai/dsh-compaction": 0.2.1-rc.3
+  "@deepseek-ai/dsh-compaction-image-offload": 0.2.1-rc.3
+  "@deepseek-ai/dsh-config-editor": 0.2.1-rc.3
+  "@deepseek-ai/dsh-credentials": 0.2.1-rc.3
+  "@deepseek-ai/dsh-deque": 0.2.1-rc.3
+  "@deepseek-ai/dsh-file-reference": 0.2.1-rc.3
+  "@deepseek-ai/dsh-fs": 0.2.1-rc.3
+  "@deepseek-ai/dsh-fs-local": 0.2.1-rc.3
+  "@deepseek-ai/dsh-goal": 0.2.1-rc.3
+  "@deepseek-ai/dsh-goal-round-driver": 0.2.1-rc.3
+  "@deepseek-ai/dsh-hmr": 0.2.1-rc.3
+  "@deepseek-ai/dsh-home-paths": 0.2.1-rc.3
+  "@deepseek-ai/dsh-host-directory-picker": 0.2.1-rc.3
+  "@deepseek-ai/dsh-host-webserver": 0.2.1-rc.3
+  "@deepseek-ai/dsh-http-proxy": 0.2.1-rc.3
+  "@deepseek-ai/dsh-jobs": 0.2.1-rc.3
+  "@deepseek-ai/dsh-jobs-local": 0.2.1-rc.3
+  "@deepseek-ai/dsh-launch-environment": 0.2.1-rc.3
+  "@deepseek-ai/dsh-llm": 0.2.1-rc.3
+  "@deepseek-ai/dsh-llm-deepseek": 0.2.1-rc.3
+  "@deepseek-ai/dsh-llm-deepseek-api-key": 0.2.1-rc.3
+  "@deepseek-ai/dsh-llm-mock-server": 0.2.1-rc.3
+  "@deepseek-ai/dsh-llm-retry": 0.2.1-rc.3
+  "@deepseek-ai/dsh-message-feedback": 0.2.1-rc.3
+  "@deepseek-ai/dsh-native-command": 0.2.1-rc.3
+  "@deepseek-ai/dsh-output-retention": 0.2.1-rc.3
+  "@deepseek-ai/dsh-package-manifest": 0.2.1-rc.3
+  "@deepseek-ai/dsh-permission-presets": 0.2.1-rc.3
+  "@deepseek-ai/dsh-ptc-runtime": 0.2.1-rc.3
+  "@deepseek-ai/dsh-sandbox": 0.2.1-rc.3
+  "@deepseek-ai/dsh-sandbox-policy": 0.2.1-rc.3
+  "@deepseek-ai/dsh-scope": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-format": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-format-catalog": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-format-v0-to-v1": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-format-v1-to-v2": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-format-v2-to-v3": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-format-v3-to-v4": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-persistence": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-projection": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-projection-cache": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-query": 0.2.1-rc.3
+  "@deepseek-ai/dsh-session-title": 0.2.1-rc.3
+  "@deepseek-ai/dsh-settings": 0.2.1-rc.3
+  "@deepseek-ai/dsh-shell": 0.2.1-rc.3
+  "@deepseek-ai/dsh-skill": 0.2.1-rc.3
+  "@deepseek-ai/dsh-storage": 0.2.1-rc.3
+  "@deepseek-ai/dsh-storage-domain": 0.2.1-rc.3
+  "@deepseek-ai/dsh-subagent": 0.2.1-rc.3
+  "@deepseek-ai/dsh-subprocess": 0.2.1-rc.3
+  "@deepseek-ai/dsh-system-prompt": 0.2.1-rc.3
+  "@deepseek-ai/dsh-timeout": 0.2.1-rc.3
+  "@deepseek-ai/dsh-tool-todo": 0.2.1-rc.3
+  "@deepseek-ai/dsh-tools": 0.2.1-rc.3
+  "@deepseek-ai/dsh-typert-protocol": 0.2.1-rc.3
+  "@deepseek-ai/dsh-typert-registry": 0.2.1-rc.3
+  "@deepseek-ai/dsh-user-approval": 0.2.1-rc.3
+  "@deepseek-ai/dsh-util-crypto": 0.2.1-rc.3
+  "@deepseek-ai/dsh-util-time": 0.2.1-rc.3
+  "@deepseek-ai/dsh-util-values": 0.2.1-rc.3
+  "@deepseek-ai/dsh-util-workspace-path": 0.2.1-rc.3
+  "@deepseek-ai/dsh-working-directory": 0.2.1-rc.3
+  "@deepseek-ai/dsh-workspace": 0.2.1-rc.3
   "@deepseek-ai/schemastery": 3.18.5
-  "@deepseek-ai/dsh-client-shortcuts": 0.2.1-rc.2
+  koffi: 3.1.1
   zod: 4.6.7
 # esbuild 由 vite 传递引入，其安装脚本负责落下当前平台的二进制；本仓没有包直接依赖它。
 # koffi 由 dsh-fs-local 引入（集成层的真 Loader 装配走它），安装脚本同样负责落二进制——
@@ -115,4 +127,6 @@ overrides:
 allowBuilds:
   esbuild: true
   koffi: true
+# 发布冷却刻意为 0：内部 @jayyuen66/* 与宿主族 rc 包必须发布后即时可装；第三方新版的供应链
+# 缓冲由 catalog 与 overrides 的精确钉版承担，不靠时间窗。
 minimumReleaseAge: 0

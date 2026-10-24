@@ -1,0 +1,34 @@
+# 依赖更新：action 一条线。
+#
+# action 侧覆盖本仓的全部 workflow 引用：这些引用都钉了 commit SHA，Dependabot 提的 PR
+# 会把「换了哪个提交」变成一次可评审的 diff。
+#
+# 这里刻意**没有** npm 更新块：本仓依赖只有两类，两类都不该由更新机器人改动。
+# 一是工具链与大部分宿主依赖写成 catalog:，那条范围的真源在伞根的 pnpm-workspace.yaml；
+# 二是其余依赖写成字面版本，而每一枚都在本仓 pnpm-workspace.yaml 的 overrides 里被钉死
+# （宿主族统一 0.2.1-rc.2 那条线）。Dependabot 对第二类提的 PR 会被 overrides 解析回原版本，
+# 合进去也不改变安装树——留着它只会造出「看起来升了、实际没升」的 PR。要升这些版本只能在
+# 伞根改真源，再投影下来。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      # 本仓引用的 action 全部放进一组，避免每个 action 各占一个 PR 去抢同一个名额。
+      # 模式按 `<owner>/<repo>` 写：通配符覆盖该仓库下的全部条目（codeql-action 的 init、
+      # analyze、upload-sarif 就是三条不同的引用），跨仓库不会互相匹配，所以两个 owner 各列一条。
+      actions:
+        patterns:
+          - "actions/*"
+          - "pnpm/*"
+          - "github/codeql-action*"
+          - "ossf/scorecard-action*"
+        # 只把 minor/patch 折进这一组：major 升级可能带破坏性变更（action 的大版本经常改
+        # 输入名或权限面），跟 patch 挤在同一个 PR 里时，要么为了修一处而重跑全部，要么
+        # 整组被推迟到没人再看得懂它改了什么。它们各自单独成一个 PR。
+        update-types:
+          - "minor"
+          - "patch"

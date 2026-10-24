@@ -19,8 +19,10 @@ import plugin from "../host.ts";
  *  不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本桩件里被判成
  *  非 volatile，而宿主照样把它投影进表单 ⇒ 测试绿、卡片少一项。 */
 function isVolatileField(node: SchemaNode): boolean {
-  const flag = node.meta?.["volatile"];
-  return flag !== undefined && flag !== false;
+  // 直接问真值，不自己拼一个"排除 undefined 与 false"的近似：宿主那句 `if (meta?.volatile)`
+  // 把 null / 0 / "" / NaN 一律当假，而近似式把它们全当真有 ⇒ 那些 schema 在宿主里不进表单、
+  // 在本桩件里被判 volatile，测试绿而卡片少一项。
+  return Boolean(node.meta?.["volatile"]);
 }
 
 /** Config schema 的字段节点（读 meta/type/dict 用，不复制 schema 结构）。 */
@@ -36,9 +38,19 @@ export interface ConfigureCall {
   owner: unknown;
 }
 
-/** 导出 Config schema 的 dict（字段名与元数据都从宿主实际读的那份来）。 */
+/** 导出 Config schema 的 dict（字段名与元数据都从宿主实际读的那份来）。
+ *  `dict` 缺位时抛而不是回落 `{}`：空字典会让「每个 schema 字段都被配置项覆盖」这条断言
+ *  在**零个字段**上成立，而 schemastery 换成别的形状（Config 不再是带 dict 的 object schema）
+ *  正是它会发生的时候——那时门禁会安静地全绿，而卡片可能一个字段都没接上。 */
 export function configDict(): Record<string, SchemaNode> {
-  return (plugin.Config as unknown as SchemaNode).dict ?? {};
+  // 解构而不是直接取成员：`plugin.Config.dict` 这条读法被判 prefer-destructuring，
+  // 而这里要的也只是 dict 一个字段。
+  const { dict } = plugin.Config as unknown as SchemaNode;
+  assert.ok(
+    dict !== undefined && Object.keys(dict).length > 0,
+    "plugin.Config 上没有 dict：schemastery 的 object schema 形状变了，配置面门禁无从比对",
+  );
+  return dict;
 }
 
 /**
@@ -113,8 +125,23 @@ export function volatileFormOf(node: SchemaNode): string[] | null {
  *  写死会让测试与包体漂移。 */
 export function patchEntryId(): string {
   const yml = readFileSync(fileURLToPath(new URL("../cordis.patch.yml", import.meta.url)), "utf8");
-  const match = /^\s*-\s+id:\s*(?<id>\S+)\s*$/mu.exec(yml);
+  const pkgName = (
+    JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      name: string;
+    }
+  ).name;
+  // 取「紧跟着本包 name」的那一条，而不是文件里第一个裸 `- id:`：patch 里插入的条目不止
+  // 本包一个时（将来把别的插件一起拼进来），第一个 id 会静默变成别人的，而三处对齐的
+  // 断言仍会全绿——它们比的都是同一个错值。
+  const pattern = new RegExp(
+    `^\\s*-\\s+id:\\s*(?<id>\\S+)\\s*$[\\s\\S]*?^\\s*name:\\s*["']?${pkgName.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)}["']?\\s*$`,
+    "mu",
+  );
+  const match = pattern.exec(yml);
   const id = match?.groups?.["id"];
-  assert.ok(typeof id === "string" && id.length > 0, "cordis.patch.yml 里没有裸 `- id:` 条目");
+  assert.ok(
+    typeof id === "string" && id.length > 0,
+    `cordis.patch.yml 里没有跟着 ${pkgName} 的裸 \`- id:\` 条目`,
+  );
   return id;
 }

@@ -2,18 +2,18 @@ import { definePluginConfig } from "@jayyuen66/dsh-plugin-shared/config/oxlint";
 
 export default definePluginConfig({
   // 无包内规则例外：基线（只读那一组同步 API）已覆盖本包的全部用法。
-  // titlePrefixes 只登记"标题确实以这个完整术语开头"的技术名（方法名、env 常量、视图组件名）。
-  // 短一级都不许：实测 oxlint 前缀一命中就免检整条标题，`Retry` 会把 `Retry-After …` 与
-  // `RetryPolicySection …` 两类一起放过 —— 陈旧/过宽条目没有任何判据兜住，只能靠读配置的人巡检。
-  // 带连字符的 HTTP 头名（Retry-After）登记不进来：基线那条 `只收裸标识符` 的校验会拒（它挡的是
-  // 通配与带点形式）⇒ 这类标题改成中文主体在前、把头名留在句中，免检面为零。
+  //
+  // titlePrefixes 只登记「标题确实以这个完整术语开头」的技术名（方法名、env 常量、视图组件名）。
+  // 登记项越短，被它顺手放过的标题越多，而放过的那些没有任何门会红，所以宁缺勿滥：本列表只
+  // 留实际用到的长术语，加入新项前先确认有标题真的以它开头、且它已是最长的那个术语。
+  //
+  // 登记项本身要满足什么形式（是否收通配、能否带点、前缀如何与实际标题匹配），判据在共享包
+  // 基线与它自己的用例里（dsh-plugin-shared/config/oxlint.base.ts、test/config-oxlint.test.ts）；
+  // 这里不重复描述那些口径——写在消费方会与基线脱钩，而被写下的那句话不会被任何门检验。
   titlePrefixes: [
     "Config",
-    "GET",
     "MAX_SESSIONS",
-    "POST",
     "QUOTA",
-    "QueueSection",
     "RescueDockView",
     "RescueEditor",
     "RescueSettingsCard",

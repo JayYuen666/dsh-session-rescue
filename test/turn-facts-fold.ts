@@ -10,8 +10,24 @@
 import { rescueFactsProjection } from "../lib/turn-facts.ts";
 import type { RescueFacts } from "../lib/turn-facts.ts";
 
-/** 与 host 替身 `stateOf` 同一形状：整串事件现折一份状态（真注册表增量折叠，同串同值）。 */
+/**
+ * 与 host 替身 `stateOf` 同一形状：整串事件现折一份状态（真注册表增量折叠，同串同值）。
+ *
+ * 两处 `as never` 都是「替身交不出官方名义类型」的老问题（见 host.ts 的 ProjectionsRegistry
+ * 注释）：`init` 要 SessionHeader，`apply` 要 SessionEvent，而夹具只带本包读的那几位。
+ * 但 `as never` 也让**签名漂移**不可见——`init` 改成收三个参数、`apply` 改名或换形状，
+ * 这里照样编译通过，只在运行时折出不一样的状态。所以在绕过类型之前先做一次形状探针：
+ * 拿到的不是函数就立刻点名，而不是把「注册表接口变了」表现成「折叠结果不对」。
+ */
 export function foldEvents(events: readonly unknown[]): RescueFacts {
+  if (
+    typeof rescueFactsProjection.init !== "function" ||
+    typeof rescueFactsProjection.apply !== "function"
+  ) {
+    throw new TypeError(
+      "turn-facts 投影缺 init 或 apply：ProjectionDefinition 的形状变了，折叠替身要先跟上",
+    );
+  }
   let state = rescueFactsProjection.init({} as never, 0 as never);
   for (const event of events) {
     state = rescueFactsProjection.apply(state, event as never);

@@ -1,0 +1,4 @@
+# 钉住行尾，不让 checkout 跟着平台走：Windows runner 上 Git for Windows 的机器级
+# core.autocrlf=true 会把工作树换成 CRLF，而 oxfmt 的 endOfLine 默认是 lf —— 于是
+# fmt:check 只在 windows 那一格把每个文件都判成未格式化（内容一字不差）。
+* text=auto eol=lf

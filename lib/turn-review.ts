@@ -24,9 +24,9 @@
 /** 会话事件的本插件读面：元素来自宿主（跨版本字段会缺），一律守卫投影，
  *  不声明成具体 interface——那只会把 `unknown` 换成需要断言的假精确。 */
 
-/** 事件类型（非对象/缺 type → 空串）。 */
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
+/** 事件类型（非对象/缺 type → 空串）。 */
 function typeOf(ev: unknown): string {
   const type = fieldOf(ev, "type");
   return typeof type === "string" ? type : "";
@@ -76,6 +76,14 @@ export interface TurnReview {
 const USER_QUESTION_TOOL = "ask_user_question";
 const SCHEDULE_SOURCE_KIND = "schedule";
 
+/** 官方 `TodoItem.status` 的全部取值（`@deepseek-ai/dsh-tool-todo` 的
+ *  `'pending' | 'in_progress' | 'completed'`）。这里按**白名单**收未闭合项，
+ *  不按「status !== "completed"」收：后者把任何别的串（宿主将来新增的
+ *  `cancelled`、载荷里拼错的 `compelted`、甚至一个空串）都算成没做完，于是
+ *  一次正常收尾的回合被读成「还有活没干」，自动续跑就会追着用户问「继续」。
+ *  白名单遇到不认识的取值时不计入——未知状态不等于未完成。 */
+export const OPEN_TODO_STATUSES = new Set(["pending", "in_progress"]);
+
 /** 从 todo/write 载荷算未闭合条数；载荷非法返回 undefined（表示"这份快照不可用"）。 */
 function openCountOf(todos: unknown): number | undefined {
   let open = 0;
@@ -86,7 +94,7 @@ function openCountOf(todos: unknown): number | undefined {
       // Array.isArray 收窄为 any[]；isRecord 守卫经 typeof 收窄，不经 any 断言
       if (isRecord(item)) {
         const { status } = item;
-        if (typeof status === "string" && status !== "completed") {
+        if (typeof status === "string" && OPEN_TODO_STATUSES.has(status)) {
           open += 1;
         }
       }
@@ -117,14 +125,26 @@ function findLastTurnEnd(events: readonly unknown[]): TurnEndInfo | null {
   return null;
 }
 
-/** 该 turn 的 turn/start 下标；找不到返回 -1（老日志/崩溃恢复等场景）。 */
+/** 该 turn 的 turn/start 下标；找不到返回 -1（老日志/崩溃恢复等场景）。
+ *
+ *  倒扫时不能见到 turn/start 就收：日志里可能缺本轮的 start，却留着更早轮的。
+ *  那种情况下把更早轮的 start 当边界，`inTurn` 会把上一轮的事件也算进本轮——
+ *  上一轮里若有 `ask_user_question`，本轮就被读成「在等用户」而抑制续跑；
+ *  上一轮写过 todo，本轮「清单是否本回合写的」也会错判。
+ *  所以倒扫途中碰到另一条 turn/end 就停：有 turn/end 夹在中间说明那个 start
+ *  属于更早的轮，本轮没有 start。 */
 function findTurnStart(
   events: readonly unknown[],
   lastEndIndex: number,
   lastTurn: number | null,
 ): number {
-  for (let i = lastEndIndex; i >= 0; i -= 1) {
+  // 从终态**之前**一条开始倒扫：events[lastEndIndex] 就是那条 turn/end 自己，
+  // 从它开始的话第一轮就命中「碰到另一条 turn/end」直接返回 -1。
+  for (let i = lastEndIndex - 1; i >= 0; i -= 1) {
     const ev = events[i];
+    if (typeOf(ev) === "turn/end") {
+      return -1;
+    }
     if (typeOf(ev) === "turn/start" && (lastTurn === null || numIn(ev, "turn") === lastTurn)) {
       return i;
     }
@@ -153,6 +173,23 @@ function todosSnapshot(
   return { openTodos, todoUpdatedInTurn };
 }
 
+/** 单条事件是否构成本回合里的「等用户」调用。拆出来是为了让主循环只剩一件事：
+ *  扫窗口、命中即真——把归属判据写在循环体里会让那个函数同时承担遍历与分类。 */
+function isAwaitsUserCall(ev: unknown, lastTurn: number | null, inWindow: boolean): boolean {
+  if (typeOf(ev) !== "tool/call" || !inWindow) {
+    return false;
+  }
+  if (directStr(ev, "name") !== USER_QUESTION_TOOL) {
+    return false;
+  }
+  // `turn` 缺失不能判成「不是本轮」：`numIn` 返回 undefined 时等式恒 false，于是
+  // 模型正在等用户的那条 call 被排除，本回合被判成「不在等用户」，自动续跑就插进
+  // 了澄清流程。窗口 `inTurn` 已经把它限定在本轮的 seq 区间内，缺失时按窗口归属算；
+  // 交回了 turn 而与本轮不符的仍然排除（那是别轮的 call）。
+  const callTurn = numIn(ev, "turn");
+  return lastTurn === null || callTurn === undefined || callTurn === lastTurn;
+}
+
 /** 本回合内的 tool/call 里是否出现 ask_user_question（模型在等用户）。 */
 function scanAwaitsUser(
   events: readonly unknown[],
@@ -161,13 +198,7 @@ function scanAwaitsUser(
   inTurn: (index: number) => boolean,
 ): boolean {
   for (let i = 0; i < lastEndIndex; i += 1) {
-    const ev = events[i];
-    if (
-      typeOf(ev) === "tool/call" &&
-      inTurn(i) &&
-      (lastTurn === null || numIn(ev, "turn") === lastTurn) &&
-      directStr(ev, "name") === USER_QUESTION_TOOL
-    ) {
+    if (isAwaitsUserCall(events[i], lastTurn, inTurn(i))) {
       return true;
     }
   }

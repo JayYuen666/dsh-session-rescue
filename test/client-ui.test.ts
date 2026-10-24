@@ -575,6 +575,23 @@ describe("rescueState 轮询契约", () => {
     );
   });
 
+  it("订阅者抛错也照排下一跳：轮询不因一次通知失败而永久停表", async () => {
+    // 这个循环没有 setInterval 兜底，下一跳只由 refresh() 自己排。通知循环抛错时
+    // 若续排被跳过，timer 会停在 null、inFlight 已复位 —— 连「订阅即补一跳」也救不回来，
+    // 宿主横幅从此不再刷新。这条用例钉住 finally 里那两行。
+    stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
+    let calls = 0;
+    const unsub = rescueState.subscribe(() => {
+      calls += 1;
+      throw new Error("listener boom");
+    });
+    await flush();
+    assert.equal(calls, 1, "通知确实发出过一次");
+    assert.notEqual(rescueState.timer, null, "抛错后下一跳仍然排好");
+    assert.equal(rescueState.inFlight, false, "在飞标志已复位");
+    unsub();
+  });
+
   it("订阅抖动不放大：在飞期间的订阅/退订不再各补一发", async () => {
     stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
     const first = rescueState.subscribe(() => {
@@ -1920,10 +1937,12 @@ describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外�
     });
   });
 
-  it("sessions 非对象 → 只认 ok（不带着坏数据渲染横幅）", async () => {
+  it("sessions 非对象 → 这一跳没读到有效快照（不折成「读到了，只是没有会话」）", async () => {
+    // 折成 { ok: true } 等于把「读坏了」显示成「读到了，一切正常」：开关行照常显示、
+    // 每个会话都按没关过判 on。坏载荷应当走与传输失败同一条路（记连跳、到档判过期）。
     stubFetch(() => ({ ok: true, body: { ok: true, sessions: "nope" } }));
     await rescueState.refresh();
-    assert.deepEqual(rescueState.data, { ok: true });
+    assert.equal(rescueState.data, null, "坏载荷不得落成一份确信的空快照");
   });
 
   it("服务端会话键 `__proto__` 落在表里成为一行，不换掉快照表的骨架", async () => {
@@ -2836,7 +2855,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     assert.equal(callsTo(POLICY_URL), 1, "被拒一次就交回用户，不自动重试");
   });
 
-  it("落盘 {ok:false} 且无 error → 回退到 rejected 文案", async () => {
+  it("落盘 {ok:false} 且无 error → 回退到本包的「宿主拒绝且未给原因」文案", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return { ok: true, body: { ok: true, providers: [xkiroRow] } };
@@ -2848,10 +2867,14 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     });
     await pickPreset(container, 0, "off");
     await clickRetrySave(container);
-    assert.ok(container.textContent.includes("xkiro→off: rejected"));
+    // 文案走 UI_MESSAGES（中英双语字典），不再硬编码英文。
+    assert.ok(
+      container.textContent.includes("xkiro→off：宿主拒绝了这次落盘，但没有给出原因"),
+      "无原因时用本包措辞，不只回一个英文单词",
+    );
   });
 
-  it("读面中途缺席 → 保存报 remote unavailable 且保留暂存", async () => {
+  it("读面中途缺席 → 保存报「远端面不可用」且保留暂存", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return { ok: true, body: { ok: true, providers: [xkiroRow] } };
@@ -2861,7 +2884,9 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     await pickPreset(container, 0, "off");
     rescueState.reader = undefined;
     await clickRetrySave(container);
-    assert.ok(container.textContent.includes("xkiro→off: remote unavailable"));
+    assert.ok(
+      container.textContent.includes("xkiro→off：远端面不可用（读不到 sessionRescue 命名空间）"),
+    );
     assert.ok(container.textContent.includes("保存（1 个改动）"), "未落盘的档位必须留着");
     rescueState.reader = readerFromFetch();
   });

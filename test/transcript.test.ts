@@ -118,6 +118,19 @@ describe("userText", () => {
   it("text 非字符串 → null", () => {
     assert.equal(userText([{ type: "text", text: 42 } as unknown as ContentBlock]), null);
   });
+
+  it("全是空白 → null（拼出来没有可重发的内容）", () => {
+    // 空串与非空空白同解：返回它们等于告诉调用方「这条消息有正文」，
+    // 于是会原样发回一条什么都没有的消息。
+    assert.equal(userText([{ type: "text", text: "" }]), null);
+    assert.equal(
+      userText([
+        { type: "text", text: "  " },
+        { type: "text", text: "\n\t" },
+      ]),
+      null,
+    );
+  });
 });
 
 describe("lastCompletedUserTarget（编辑重发目标）", () => {
@@ -186,6 +199,17 @@ describe("本轮 seq 窗口（边界判据经唯一读者 turnHasToolActivity �
   it("第一轮下界是 0：seq 1 落在 turn 1 的窗口内", () => {
     const view = mkView({ nodes: [toolResult(1)], turnEnds });
     assert.equal(turnHasToolActivity(view, 1), true);
+  });
+
+  it("turnEnds 倒挂（start >= end）时窗口无可信边界，一律判「没跑过工具」", () => {
+    // 乱序条目下窗口为空或倒挂：这时按 start < seq <= end 取会取到空集，
+    // 但更糟的是把「上一轮的 end」当本轮的 start 用，会让后续轮的节点混进来。
+    const inverted = new Map([
+      [1, 5],
+      [2, 3],
+    ]);
+    const view = mkView({ nodes: [toolResult(4)], turnEnds: inverted });
+    assert.equal(turnHasToolActivity(view, 2), false);
   });
 
   it("后续轮下界是上一轮 end：seq 5 出界、seq 6 入界", () => {
@@ -261,12 +285,36 @@ describe("轮内失败节点识别", () => {
     });
     assert.equal(turnHasToolActivity(v3, 4), true);
   });
+
+  it("turnHasToolActivity：同轮号之后的活动不因上界缺失被算进窗口", () => {
+    // turnEnds 里没有该轮（窗口上界无界）时，退化成「start 之后全是本轮的」会把
+    // 后续轮次的活动全算进来，`hasTools` 于是把「没跑过工具的一轮」报成跑过，
+    // 续跑文案会去叮嘱「别重复副作用」——而那一轮其实什么都没跑。
+    const view = mkView({
+      nodes: [command(3), command(40)],
+      turnEnds: new Map([[1, 5]]),
+    });
+    // 轮 2 既没有 turn/end，也没有运行中调用：窗口不可信，不当工具活动。
+    assert.equal(turnHasToolActivity(view, 2), false);
+  });
 });
 
 describe("failureOfLastTurn", () => {
   it("running → null", () => {
     const view = mkView({ running: true, turnEnds: new Map([[1, 5]]) });
     assert.equal(failureOfLastTurn(view), null);
+  });
+
+  it("removed → null（与 lastCompletedUserTarget 同判：两条判据喂同一排按钮）", () => {
+    // 会话已移除时日志只是残留，任何「重发/继续」都会打到一个不存在的会话上。
+    // 挡的边界若与 lastCompletedUserTarget 不一致，就会出现「编辑入口关着、重试入口开着」。
+    const view = mkView({
+      removed: true,
+      nodes: [user(1, "a"), turnError(5, 1, "boom")],
+      turnEnds: new Map([[1, 5]]),
+    });
+    assert.equal(failureOfLastTurn(view), null);
+    assert.equal(lastCompletedUserTarget(view), null, "两条判据在这里必须同判");
   });
 
   it("无轮 → null", () => {

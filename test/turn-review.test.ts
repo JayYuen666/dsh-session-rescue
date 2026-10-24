@@ -109,6 +109,31 @@ describe("reviewLastTurn — todo 清单（最新快照 last-wins）", () => {
     ]);
     assert.equal(result.openTodos, 0);
   });
+
+  it("不认识的 status 不计入未闭合（未知状态 ≠ 未完成）", () => {
+    // 白名单口径：只有官方那三个取值里的 pending/in_progress 算没做完。
+    // 收「status !== "completed"」的话，宿主将来新增的 cancelled、载荷里拼错的
+    // compelted、甚至空串都会被算成「还有活没干」——正常收尾的回合被读成没做完，
+    // 自动续跑就会追着用户问「继续」。
+    const result = reviewLastTurn([
+      todoWrite([
+        DONE,
+        { content: "d", status: "cancelled" },
+        { content: "e", status: "compelted" },
+        { content: "f", status: "" },
+      ]),
+      turnEnd(1, "completed"),
+    ]);
+    assert.equal(result.openTodos, 0);
+  });
+
+  it("未闭合口径仍然只认 pending 与 in_progress 两个", () => {
+    const result = reviewLastTurn([
+      todoWrite([DONE, OPEN, DOING, { content: "d", status: "cancelled" }]),
+      turnEnd(1, "completed"),
+    ]);
+    assert.equal(result.openTodos, 2);
+  });
 });
 
 describe("reviewLastTurn — 清单是否属于最后回合（防陈旧清单误触发）", () => {
@@ -149,6 +174,26 @@ describe("reviewLastTurn — 清单是否属于最后回合（防陈旧清单误
     const result = reviewLastTurn([todoWrite([OPEN]), turnEnd(5, "completed")]);
     assert.equal(result.openTodos, 1);
     assert.equal(result.todoUpdatedInTurn, false);
+  });
+
+  it("本轮缺 turn/start 而上一轮留有 → 不把上一轮的 start 当成本轮边界", () => {
+    // 倒扫「见到 turn/start 就收」时，本轮缺失的 start 会让上一轮的那个被当成
+    // 边界，于是上一轮的 ask_user_question 被算进本轮 → 本轮被判「在等用户」，
+    // 续跑被无谓抑制（用户其实什么都没在等）。
+    // 终态缺 turn 字段时 `lastTurn` 退化为 null，而 null 会让「这个 start 是不是
+    // 本轮的」那半条判据整体短路——所以这一形才是真正会被越界读到的场景。
+    const result = reviewLastTurn([
+      turnStart(1),
+      toolCall(1, "c1", "ask_user_question"),
+      toolResult(1, "c1"),
+      turnEnd(1, "completed"),
+      // 轮 2 的 turn/start 在日志里丢了（崩溃恢复），终态也缺 turn 字段。
+      toolCall(2, "c2", "bash"),
+      toolResult(2, "c2"),
+      ev("turn/end", { reason: { kind: "completed" } }),
+    ]);
+    assert.equal(result.lastTurn, null);
+    assert.equal(result.awaitsUser, false, "上一轮的提问不属于本轮");
   });
 });
 

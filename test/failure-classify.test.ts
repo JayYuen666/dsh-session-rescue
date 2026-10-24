@@ -16,6 +16,9 @@ function payloadLike(raw: unknown): FailureLike {
   return raw as FailureLike;
 }
 
+/** 余额耗尽的原始措辞（provider 回执里的原话）：三处用例都拿它当「不可恢复」的证据。 */
+const BALANCE_TEXT = "Insufficient quota, please top up";
+
 describe("classifyFailure（失败分类：瞬时/永久）", () => {
   it("瞬时：标准码 RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE", () => {
     for (const code of ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"]) {
@@ -35,12 +38,64 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     );
   });
 
+  it("瞬时：408 / 425 与 429 同一档（请求内容无关，等一会儿重发）", () => {
+    for (const status of [408, 425]) {
+      const verdict = classifyFailure({ code: "", message: "", status });
+      assert.equal(verdict.transient, true, `status ${status} 是瞬时`);
+      assert.match(verdict.reason, new RegExp(`status ${String(status)}`, "u"));
+      assert.equal(
+        isRequestRetryWorthy({ code: "", message: "", status }),
+        true,
+        `status ${status} 请求级也值得原地重发`,
+      );
+    }
+  });
+
+  it("402 按 QUOTA 同一支判：无证据永久，随信限速措辞可翻成瞬时", () => {
+    // 裸 402：账单侧「先付钱」，没有随信证据就是永久。
+    const bare = classifyFailure({ code: "", message: "", status: 402 });
+    assert.equal(bare.transient, false);
+    assert.match(bare.reason, /billing status 402/u);
+    assert.equal(isRequestRetryWorthy({ code: "", message: "", status: 402 }), false);
+    // 正文明确写了限速措辞：那是「伪装成账单的限流」，与 QUOTA 码第一支同解
+    // （适配器把 402 归进 QUOTA 码，见 isQuotaExceededError(detail) || status === 402）。
+    const rateWording = classifyFailure({
+      code: "",
+      message: "429 too many requests",
+      status: 402,
+    });
+    assert.equal(rateWording.transient, true);
+    assert.match(rateWording.reason, /rate-limit text pattern/u);
+  });
+
   it("瞬时：百度 token plan 429（code QUOTA + 限流文本证据）", () => {
     const verdict = classifyFailure({
       code: "QUOTA",
       message: "HTTP 429: type quota_exceeded, rate limit",
     });
     assert.equal(verdict.transient, true);
+  });
+
+  it("裸数字 429 只在 HTTP 语境里算限速证据", () => {
+    // 正文里任意一个 429 数字都当限速，等于给「重开一个回合」开了一道误判口子：
+    // 请求 id、trace 号、端口、计数都可能撞上这个数，而误判的代价是一次无意义续跑。
+    for (const message of ["request req-429 failed", "trace 429 recorded", "processed 429 items"]) {
+      assert.equal(
+        classifyFailure({ code: "ANY", message }).transient,
+        false,
+        `不该被当限速：${message}`,
+      );
+    }
+    // 真限速的几个写法仍要认得（`429` 裸串是宿主实测交回的形态）。
+    for (const message of ["HTTP 429: rate limit", "429 too many requests", "status 429"]) {
+      assert.equal(
+        classifyFailure({ code: "ANY", message }).transient,
+        true,
+        `该判限速：${message}`,
+      );
+    }
+    // 整个正文就是一个 429（清空了 code）：这是宿主交回的裸形态，仍要判限速。
+    assert.equal(classifyFailure({ code: "", message: "429" }).transient, true);
   });
 
   it("瞬时：仅文本模式命中（429/rate limit/throttle/too many）", () => {
@@ -91,13 +146,13 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     // code 路由之前，`{code:"RATE_LIMIT", message:"Insufficient quota…"}` 就永久不续跑——
     // 一个明确自称限速的失败被一句账单文案钉死，正是本包最不该漏的那一形。
     for (const code of ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"]) {
-      const verdict = classifyFailure({ code, message: "Insufficient quota, please top up" });
+      const verdict = classifyFailure({ code, message: BALANCE_TEXT });
       assert.equal(verdict.transient, true, `${code} 应按 code 路由判瞬时：${verdict.reason}`);
       assert.match(verdict.reason, /code /u);
     }
     // 与之对照：没有码可路由时，账单措辞仍然是永久证据（上一条用例的判据不被这次调序抹掉）。
     assert.equal(
-      classifyFailure({ message: "Insufficient quota, please top up" }).transient,
+      classifyFailure({ message: BALANCE_TEXT }).transient,
       false,
       "无 code 可路由 ⇒ 文本兜底仍判永久",
     );
@@ -162,6 +217,16 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
         .transient,
       true,
     );
+    // 反例：已知的确定性结束理由出现在 error 里，不该被当成「上游异常、重试即成功」。
+    // 把它们洗成可重试，会让同一份坏请求被反复重发。
+    for (const known of ["end_turn", "stop", "tool_use", "max_tokens", "content_filter"]) {
+      assert.equal(
+        classifyFailure({ code: "PI_AI_ERROR", message: `Provider finish_reason: ${known}` })
+          .transient,
+        false,
+        `${known} 是确定性结束理由，不该判瞬时`,
+      );
+    }
   });
 
   it("瞬时：PI_AI_ERROR + 上游空响应原文（网关措辞；2026-09 真实漏跑案例）", () => {
@@ -201,6 +266,14 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
 });
 
 describe("请求级判据 isRequestRetryWorthy（与回合级同源）", () => {
+  it("余额耗尽的措辞对任何状态码都成立：5xx 也不能放成「值得再发」", () => {
+    // 判序在 isRequestRetryWorthy 里与回合级同源：余额耗尽排在瞬时状态码之前。
+    // 少了这一条，`{status:500, message:"Insufficient quota"}` 会被当成普通服务端错误重发，
+    // 而重发对余额耗尽没有任何意义，只会多烧几轮。
+    assert.equal(isRequestRetryWorthy({ code: "", message: BALANCE_TEXT, status: 500 }), false);
+    assert.equal(isRequestRetryWorthy({ code: "", message: "out of credits", status: 503 }), false);
+  });
+
   it("QUOTA + 429 无限流证据 ⇒ 不重发（真宿主对余额/配额到期的交回形）", () => {
     // 这条即 test/integration/agent-loop.test.ts 抓到的原始载荷。host 的内联判据
     // 曾用 `status===429 ||` 直接放行，于是无策略 provider 上最多连发 requestRetryMax 次。
