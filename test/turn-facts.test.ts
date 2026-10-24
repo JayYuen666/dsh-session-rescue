@@ -162,6 +162,23 @@ describe("投影 ≡ 旧扫描（干净日志）", () => {
     assertEquivalent(evs);
   });
 
+  it("未闭合口径只认 pending/in_progress：cancelled、拼错与空串不算（与同步扫描同解）", () => {
+    const evs = [
+      turnStart(1),
+      userMsg(USER),
+      todoWrite([
+        DONE,
+        { content: "d", status: "cancelled" },
+        { content: "e", status: "compelted" },
+        { content: "f", status: "" },
+      ]),
+      turnEnd(1),
+    ];
+    const state = foldEvents(evs);
+    assert.equal(reviewFromFacts(state)?.openTodos, 0);
+    assertEquivalent(evs);
+  });
+
   it("陈旧清单（更早回合所写）：两侧都不算本回合的", () => {
     const evs = [
       turnStart(1),
@@ -334,7 +351,19 @@ describe("投影 ≡ 旧扫描（异常日志：不可采信则交回扫描）",
     // 首条 user/message 的 source 不可用 ⇒ kind null ⇒ 认不出任何 producer 身份（两侧同判）
     assert.equal(turnOpenerKind(state, 1), null);
     assert.equal(turnOpenerKind(state, 1), scanOpenerKind(evs, 1));
-    assert.equal(review.awaitsUser, false, "缺号/异号 tool/call 都不算本回合的等待用户");
+    // 缺号（turn 丢失）的那条 ask_user_question 落在本轮窗口里，按归属算——模型可能
+    // 正在等用户，抑制续跑才是安全方向；异号（turn 9）的仍在窗口外被排除。
+    assert.equal(review.awaitsUser, true, "缺号按窗口归属算，异号才排除");
+  });
+
+  it("异号 tool/call 不进本回合的等待用户判定（缺号与异号要分开）", () => {
+    // 只留异号那一条：两侧都必须判 false，否则「缺号按窗口算」会被误读成
+    // 「任何 ask_user_question 都算」。
+    const evs = [turnStart(1), toolCall(9, "ask_user_question"), turnEnd(1)];
+    const state = foldEvents(evs);
+    const review = reviewFromFacts(state);
+    assert.deepEqual(review, reviewLastTurn(evs));
+    assert.equal(review.awaitsUser, false, "异号 tool/call 属于别的回合");
   });
 
   it("start 之后一直没有 user/message：两侧都判 null", () => {

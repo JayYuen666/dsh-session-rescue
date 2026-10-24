@@ -1,110 +1,221 @@
-# @jayyuen66/dsh-session-rescue
+<p align="center">
+  <img src="https://cdn.jsdelivr.net/gh/JayYuen666/dsh-session-rescue@main/icon.svg" width="96" height="96" alt="dsh-session-rescue logo" />
+</p>
 
-[中文](./README.zh-CN.md)
+<h1 align="center">dsh-session-rescue</h1>
 
-### What it does
+<p align="center"><em>When a turn ends badly, the session picks itself back up: auto-resume after transient failures, auto-continue after truncation, catch-up for open todo lists — plus manual rescue actions below the input box.</em></p>
 
-- It removes the manual chore when a turn ends badly, via three automatic injections: **resume** after a transient failure, **continue** after output truncation, **re-run** after an open todo list.
-- There is also a request-level 429 backstop, and it only takes over when the host resolved **no** `retryPolicy` for that provider: it listens on `agent/request-error` (waterfall) and returns `{ kind: "retry" }` on rate limiting so the host re-sends that request inside the same turn.
-  - Both chains hang on one waterfall, and cordis makes the **first registered** listener the outermost one: whichever runs first can decide without calling `next()`. Official `llm-retry` returns without delegating while its signal is aborted or its entry is disposed (`llm-retry/src/index.ts:163,250`) — in that window this plugin is not consulted at all — and in `always` mode it *adopts* the decision coming back from downstream (`:212`) rather than racing it. When a policy exists the official plugin owns the retry (`retryableCodes` filtering, `providerRetryAfterMs`, jitter, durable `llm/retry` events) and this plugin steps aside. Note the measured host behaviour: the deepseek adapter resolves a policy even when none is configured, so this ladder only ever engages for adapters that resolve none — and a profile without `dsh-llm-retry` mounted leaves a 429 terminal with no request-level retry at all.
-  - The backoff ladder defaults to 2s/5s/10s/20s/30s with at most 5 retries per session (the ladder and the counter are both non-volatile deployment values, see Settings), and the counter resets when the turn closes (`agent/status` → `idle`).
-  - A provider `Retry-After` wins over the ladder, and anything above the 30s cap (`requestRetryBackoffCapMs`) is not waited out - the plugin delegates back to `next()`.
-- The client half (built artifact `client.js`) docks below the input box:
-  - edit-resend (this session) / fork-resend (new branch) / stop-and-re-ask / manual retry and continue-output / a countdown banner / a per-session switch
-- The `/state` poll is a **self-scheduling two-tier loop**: 1s while a pending exists (the banner counts down by the second), 5s as a fallback when nothing is pending.
-- The next hop is armed only after the current one lands, so an in-flight request neither overlaps with it nor strands the loop.
-- It stops with no subscribers or while the tab is hidden, and catches up one tick on return. Subscribers are only notified when the snapshot actually changed.
-- The `subscribe`/`getSnapshot` pair handed to `useSyncExternalStore` is made of **module-level stable references**, so a re-render never re-subscribes.
-- Inline closures make React re-run the subscribe effect on every render (the shipped React 18.3.1 is `useEffect(bind(...),[subscribe])`): unsubscribe then re-subscribe turns one render into an extra `/state`.
-- There is also a settings card and per-platform 429 retry presets.
-- Host surface read: `agent/error`, `agent/status`, `agent/request-error`, `agent/disposed` (cleanup).
-- Turn facts (`turn/start`, `turn/end`, `user/message`, `tool/call`, `todo/write`) fold incrementally into a `ctx.sessionProjections` unit; every verdict reads the synchronous `stateOf()` watermark.
-  - On profiles without that registry, or on shapes the fold cannot vouch for (a `turn/end` whose `turn/start` is outside the window, an evicted opener), it falls back to a full `session.snapshotEvents()` scan with identical verdicts.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-session-rescue"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-session-rescue?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-session-rescue"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-session-rescue?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://github.com/JayYuen666/dsh-session-rescue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-session-rescue/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
+  <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
+</p>
 
-### The three automatic actions
+<p align="center">
+  <img src="https://skillicons.dev/icons?i=typescript,nodejs,react,vitest,githubactions" alt="tech stack" />
+</p>
 
-- `resume`: `error.failure` on `agent/error` is judged transient by `lib/failure-classify.ts`; the message lands after `resumeDelayMs`.
-  - Transient shapes: `RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`, HTTP 429, 5xx, `QUOTA` carrying rate-limit wording, `PI_AI_ERROR` carrying an unrecognized `finish_reason` or empty-response wording.
-- `continue`: `agent/status` goes to `idle` and the last `turn/end` carries `reason.kind === "max-tokens"`; the "continue from the truncation" message lands after `continueDelayMs`.
-- `unfinished`: that same `turn/end` is `completed`, but the `todo/write` snapshot **that turn wrote itself** still holds non-`completed` items (`lib/turn-review.ts`, a purely structured signal, no text guessing); the message lands after `unfinishedDelayMs`.
-- Each kind has its own delay / cooldown / quota gates (`lib/resume-scheduler.ts`, cooldowns tracked per kind).
-  - Every injection is a `role: "user"` message with `source: { kind: "plugin:session-rescue" }`: the model picks the conversation back up, so tokens and quota keep being spent.
+<p align="center">
+  <a href="https://github.com/JayYuen666"><img src="https://img.shields.io/badge/GitHub-JayYuen666-181717?style=flat-square&logo=github&logoColor=white" alt="GitHub" /></a>
+  <a href="mailto:cqwkkj@gmail.com"><img src="https://img.shields.io/badge/Email-cqwkkj@gmail.com-EA4335?style=flat-square&logo=gmail&logoColor=white" alt="Email" /></a>
+  <a href="https://twitter.com/JayYuen666"><img src="https://img.shields.io/badge/Twitter-X%2FJayYuen666-000000?style=flat-square&logo=x&logoColor=white" alt="Twitter/X" /></a>
+  <a href="./README.zh-CN.md"><img src="https://img.shields.io/badge/lang-简体中文-658EFF?style=flat-square" alt="简体中文" /></a>
+</p>
 
-### When it does nothing
+**A [dsh](https://github.com/deepseek-ai/deepseek-harness) plugin: three automatic user-role injections when a turn ends badly (transient failure / max-tokens truncation / an open todo list), a request-level 429 backstop, and a client dock with manual rescue actions and a settings card. Zero model tools, zero HTTP routes of its own.**
 
-- Permanent failures: `CONTEXT_WINDOW_EXCEEDED`/`AUTH`/`INVALID_CREDENTIAL`/`MISSING_CREDENTIAL`/`INVALID_REQUEST`/`INVALID_ARGS`/`NO_ADAPTER`/`INVALID_MODEL_CONTEXT`/`INVALID_PREPARED_CALL`, HTTP 401/403.
-  - Exhausted-balance wording (`insufficient quota|balance|credits` and friends) and anything unrecognized; an `error` without `.failure` (a plain Error) counts the same.
-  - Classification is built-in safety logic and the card deliberately exposes no way to change it.
-- Non-root sessions (sub-agents); `resume` on a provider listed in `providerExcludes` - which does not gate `continue`, `unfinished`, or the request-level 429 retry.
-- You stopped it: when the last `turn/end` carries `reason.kind` `aborted` or `interrupted`, nothing is injected and no quota is spent.
-- It is waiting for you: the turn called `ask_user_question` → no re-run message. A turn whose first `user/message` carries `source.kind: "schedule"` (the official Schedule reminder) → all three kinds stand down. A `"goal"` turn is not an automatic stand-down: the official `goal-round-driver` only disarms on `agent/error` and never auto-retries, so standing down unconditionally would abandon that round to nobody. Instead the decision is taken at fire time from the driver's own state — `active` + `armed` means it is still driving, so we stand down; `active` + `disarmed` means it gave up, so we take the round over. `paused` / `blocked` / `complete` are human or lifecycle decisions and are never overridden, and if the goal state cannot be read at all we stand down too.
-- The pre-fire check (`preFireCheck`) fails: the agent is gone, the status is not `idle`, the inbox holds queued messages, or a newer turn already started → the pending injection is silently voided, without counting or entering cooldown.
-  - The gates block it when that kind already has a pending record, is inside its cooldown, or has spent its quota.
-  - Quota is a _consecutive_ notion - one `completed` turn zeroes `resume`/`continue`, while `unfinished` only refills once the list closes.
+## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Contents
 
-### Install
+- [What it does](#what-it-does)
+  - [How a decision is made](#how-a-decision-is-made)
+- [Install](#install)
+  - [Shared version floor](#shared-version-floor)
+- [Verify it is live](#verify-it-is-live)
+- [What it does not provide](#what-it-does-not-provide)
+- [Enabling it in dsh](#enabling-it-in-dsh)
+- [The three automatic actions](#the-three-automatic-actions)
+- [Settings](#settings)
+- [Public interface](#public-interface)
+- [Data and privacy](#data-and-privacy)
+- [Known boundaries](#known-boundaries)
+- [FAQ](#faq)
+- [Development](#development)
+- [License](#license)
+
+## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
+
+- **Three automatic injections when a turn ends badly**, each with its own delay / cooldown / quota gates (`lib/resume-scheduler.ts`, cooldowns tracked per kind):
+  - **resume** — `agent/error` whose failure `classifyFailure` (`lib/failure-classify.ts`) judges transient; the message lands after `resumeDelayMs`.
+  - **continue** — the turn ended with `reason.kind === "max-tokens"`; "continue from the truncation" lands after `continueDelayMs`.
+  - **unfinished** — the turn ended `completed`, but the todo list **that turn itself wrote** still holds open items (`lib/turn-review.ts`, a purely structural signal, no text guessing); the catch-up message lands after `unfinishedDelayMs`.
+  - Every injection is a `role: "user"` message with `source: { kind: "plugin:session-rescue" }` sent through `agent.followup()` — the model keeps running, so tokens and quota keep being spent.
+- **A request-level 429 backstop**, engaged only when the host resolved **no** `retryPolicy` for that provider: it listens on `agent/request-error` (waterfall) and returns `{ kind: "retry" }` on rate limiting, so the host re-sends that request inside the same turn.
+  - Fixed backoff ladder (defaults 2 s / 5 s / 10 s / 20 s / 30 s, at most 5 retries per session — deployment values); a provider `Retry-After` wins over the ladder, and anything above the cap is not waited out but delegated back to `next()`. The counter resets when the turn closes.
+  - When a policy exists the official `llm-retry` owns the retry (code filtering, provider retry-after, jitter, durable events). The deepseek adapter resolves a policy even when none is configured, so this ladder only ever engages for adapters that resolve none.
+- **A client dock below the input box**: edit-resend (this session) / fork-resend (new branch) / stop-and-reask / manual retry and continue-output / a countdown banner / a per-session switch. Stop-and-reask queues your re-ask first and then cancels, so the message survives the cancel; the manual retry stays disabled while the host's built-in retry is still in progress.
+- **Connection-aware**: an injection whose send failed (transport trouble) is suspended instead of dropped, shown as a reconnecting banner, and re-armed with its remaining delay once the connection returns.
+- **`/state` polling is a self-scheduling two-tier loop**: 1 s while a pending exists (the banner counts down by the second), 5 s otherwise; the next hop is armed only after the current one lands, so an in-flight request neither overlaps nor strands the loop. After three consecutive unreadable polls the cached snapshot is discarded — the banner and the per-session switch fall back to their neutral state instead of counting down from a value nobody confirmed — and polling backs off by doubling up to 30 s.
+- **A settings card** with the rescue knobs and per-provider 429 retry presets written into the official `llm-pi-ai` namespace.
+- Host read surface: `agent/error`, `agent/status`, `agent/request-error`, `agent/disposed` (cleanup). Turn facts (`turn/start`, `turn/end`, `user/message`, `tool/call`, `todo/write`) fold incrementally through `ctx.sessionProjections`; on profiles without that registry, or on shapes the fold cannot vouch for, it falls back to a full `session.snapshotEvents()` scan with identical verdicts.
+
+### How a decision is made
+
+- Classification (`classifyFailure`) is a fixed ladder. Permanent failure codes veto first (`CONTEXT_WINDOW_EXCEEDED` / `AUTH` / `INVALID_CREDENTIAL` / `MISSING_CREDENTIAL` / `INVALID_REQUEST` / `INVALID_ARGS` / `NO_ADAPTER` / `INVALID_MODEL_CONTEXT` / `INVALID_PREPARED_CALL`). The `QUOTA` code is then split by evidence: HTTP 429, `Retry-After` or rate-limit wording means transient; balance-exhausted wording means permanent. HTTP 401/403 and billing status 402 are permanent; the explicit transient codes (`RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT` / `EMPTY_RESPONSE`), HTTP 408/425/429/5xx and rate-limit wording are transient; `PI_AI_ERROR` with an unrecognized `finish_reason` or empty-response wording is transient. Everything unrecognized is permanent — conservative by design.
+  - An `error` without a `.failure` face counts the same as permanent; the classifier unwraps host-wrapped `AggregateError` before giving up.
+  - Classification is built-in safety logic; the card deliberately exposes no way to change it.
+- **Standing down:** non-root (subagent) sessions; `providerExcludes` hits `resume` only; the last `turn/end` says `aborted` or `interrupted` (you stopped it — nothing is injected, no quota spent); the turn called `ask_user_question` (no catch-up); the turn was opened by the official Schedule reminder (all three kinds stand down).
+  - A `"goal"` turn is decided **at fire time** from the official goal service, not unconditionally: `active` + `armed` (the driver is still driving) → stand down; `active` + `disarmed` (the driver gave up — by its own design it never auto-retries) → this plugin takes the round over; `paused` / `blocked` / `complete` are human or lifecycle decisions and are never overridden; an unreadable goal state stands down too.
+- **Pre-fire check** (`preFireCheck`): the agent is gone, the status is not `idle`, the inbox holds queued messages, or a newer turn already started → the pending injection is silently voided, without counting or entering cooldown.
+- **Quota is consecutive**: one `completed` turn zeroes `resume` / `continue`; `unfinished` only refills once the todo list closes (otherwise inject → still open → inject again would self-oscillate).
+
+## <img src="https://api.iconify.design/lucide/package.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Install
 
 ```sh
 dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 ```
 
-- Requires dsh `^0.2.1-rc.2` (that is, the `0.2.x` line — `^` on a `0.` version caps below `0.3.0`): the source of truth is the `@deepseek-ai/dsh` entry under `peerDependencies` (the host validates it on plugin install from 0.1.7-rc, and it checks the `@deepseek-ai/dsh-*` peers the same way). `engines.dsh` carries the same range but nothing reads it.
-- The packages are on the public npm registry, so installation needs no credentials.
-- Remove with `dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`. MIT licensed; the source repository is in `repository.url` of `package.json`.
+Remove with `dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`. The package is on the public npm registry, so installation needs no credentials and no scoped-registry line.
 
+- **Requires Node.js `>= 22.12`.** This is an ESM-only package; that Node floor is what makes `require()` of an ESM entry work at all, which is why `engines.node` is declared.
+- **Requires host `dsh` at the `0.2.1-rc.3` line.** The requirement the host validates at install time is the `@deepseek-ai/dsh` entry under `peerDependencies` (`^0.2.1-rc.3`, i.e. the `0.2.x` line — `^` on a `0.` version caps below `0.3.0`); the `@deepseek-ai/dsh-*` peers are checked the same way, and `engines.dsh` carries the same range.
+- **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package under `dependencies` is materialized as a real directory next to the copy the running host already loaded — native tool calls then throw while build, typecheck and coverage stay green. The host packages `host.js` imports for value (`@deepseek-ai/dsh-brand`, `@deepseek-ai/schemastery`) are required peers repeated under `devDependencies` at the same pin, so the bundler externalizes them instead of inlining official function bodies.
+- **What ships**: the `prepack`-rebuilt `host.js` and `client.js`, `types/`, `cordis.patch.yml`, plus `README*`, `LICENSE`, `CHANGELOG.md` and `icon.svg`. Artifacts are not committed, and are not minified on purpose — the bare cross-package specifiers must survive for the externalization assertions to mean anything.
+- Install fails with 404: that version was never published (check `dist-tags.latest`). It usually means the sibling library package `@jayyuen66/dsh-plugin-shared` is not on the registry yet — this package value-imports its `lib/locale`, `lib/record`, `lib/errors`, `lib/card-apply`, `lib/card-diff` and `lib/lesson-bus`, so a missing one surfaces as `ERR_MODULE_NOT_FOUND`.
 
-### Shared version floor
+### <img src="https://api.iconify.design/lucide/arrow-down-to-line.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Shared version floor
 
-If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entry, that pin must be at least the `@jayyuen66/dsh-plugin-shared` version this package declares. A lower pin installs a copy without the names this package imports at runtime, and the host then reports `N entries did not activate` with `does not provide an export named ...` when it boots -- the package installs fine and never loads, and no per-repo CI run can see it.
+If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entry, that pin must be at least the version this package declares. A lower pin installs a copy without the names imported at runtime, and the host then reports `N entries did not activate` together with `does not provide an export named ...` at boot — the package installs fine and never loads, and no per-repository CI run can see it.
 
-### Enabling it in dsh
+## <img src="https://api.iconify.design/lucide/circle-check.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Verify it is live
 
-- Bundle form: the package's own `cordis.patch.yml` carries `- id: session-rescue` + `name: "@jayyuen66/dsh-session-rescue"` and is pointed at by `dsh.bundle.patch` in `package.json`, so `dsh plugin add` registers it.
-  - The published entry points are the `prepack`-rebuilt `host.js` and `client.js`.
-- The host half hard-depends on `timer` and `settings` (`inject: ["timer", "settings"]`); the client read surface is the official Typert Remote service `sessionRescue`, registered into the host `remote` gateway through an injected child fiber. It does not depend on `webServer`, so a host without that service (TUI) keeps auto-resume working and only loses the settings card data plane.
-- The settings card lives in `plugins.bundle.config` on the plugin page, keyed by the bundle package name `@jayyuen66/dsh-session-rescue` (that is the `dsh.profile.bundles` row in `~/.dsh/profiles/web/package.json`).
-  - `configForms.get()` and the settings namespace stay the bare entry id `session-rescue`; edits are staged, Save writes them into settings, Revert discards them.
+1. **Mounted**: `dsh --profile web --dump-config` shows this package's layer.
+   - That command is the only accepted "it is in the layer stack" signal, and it is **not read-only** — it rewrites the profile's root assembly file. Read layer lines from stdout **and** check stderr separately: an unmatched patch target appears only on stderr, so the exit code alone proves nothing.
+   - A layer line may read `# == <layer>` or `# == <layer>, patched by <path>`; accept both forms.
+2. **The dock renders**: with a session open, the rescue dock sits below the input box — the per-session switch row, stop-and-reask while a turn is running, and the edit-resend / retry / continue actions on a completed or failed turn.
+3. **The settings card renders live data**: the plugin page lists the session-rescue card, and its 429 preset section loads your `llm-pi-ai` providers (name, retry mode, quota coverage). A permanently "unavailable" readout means the layer is mounted but the Remote namespace did not reach the browser.
+4. **A live rescue**: make the model call fail transiently mid-turn (for example by cutting the network); the banner appears and counts down by the second, and the log carries `[session-rescue]` lines naming the kind and the gate. Counter-check: a turn you stop yourself (`aborted`) injects nothing, by design — "no injection" there is not a broken install.
+
+## <img src="https://api.iconify.design/lucide/circle-slash.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does not provide
+
+- **It registers no model tools.** The surface is host events plus the Remote namespace; there is no `session_rescue` tool for the model to call.
+- **It opens no HTTP route of its own.** The data plane is the official Typert Remote namespace `sessionRescue`, reached through the host `/api` gateway; authentication, Host / DNS-rebinding / Origin checks and body limits are all the gateway's.
+- **It adds no CLI subcommand.**
+- **It renders no queued-message UI of its own**: the official conversation package already docks the queue with per-item edit / delete / interject, and this package does not duplicate it.
+- **The host half writes no file and makes no outbound request** (see Data and privacy).
+- What it *does* consume optionally: the `lessonLoop` bus (facts and passes), `sessionProjections` (fast turn facts) and the goal service (fire-time takeover verdict). A profile without them keeps rescuing — it just falls back to the full log scan, and goal turns are left alone.
+
+## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
+
+- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, whose single line is `- id: session-rescue` with `name` set to the bare package name — the host scans `dsh.client` on bare-name entries only. `dsh plugin add/remove` maintains the assembly layer.
+- The host half hard-depends on `timer` and `settings` (`inject: ["timer", "settings"]`); the read surface is registered through an injected child fiber into the host `remote` gateway. It does not depend on `webServer`, so a host without that service (TUI) keeps auto-rescue working and only loses the settings card's data plane.
+- The settings card lives in `plugins.bundle.config` on the plugin page, keyed by the **bundle package name**; `configForms.get()` and the settings namespace stay the bare entry id `session-rescue`. Edits are staged, Save writes them into settings, Revert discards.
 - Without UI, deployment defaults go on the registration line's `config:`; precedence = card runtime value > line `config` > schema `.default()`, and an invalid `config` fails the plugin load loudly.
 
-### Settings
+## <img src="https://api.iconify.design/lucide/refresh-cw.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> The three automatic actions
 
-Namespace `session-rescue`: registered implicitly (it IS the entry id in `cordis.patch.yml` — the package does not call `settings.register`). The settings form and the line `config` share one `Config` schema in `host.ts` (single source, drift-proof); built-in defaults sit on each field's `.default()`, and the thirteen `.volatile()` fields are what the card exposes (three further non-volatile deployment values sit at the end of the list below). Times in ms. Ranges: delays 1000-300000 (`continueDelayMs` 500-300000), cooldowns 5000-3600000, counters 0-20.
+| Kind | Trigger | Default delay / cooldown / quota |
+|---|---|---|
+| `resume` | `agent/error`, failure classified transient (`lib/failure-classify.ts`) | 10 s / 120 s / 3 |
+| `continue` | Turn ended `max-tokens` (output truncated) | 3 s / 60 s / 3 |
+| `unfinished` | Turn ended `completed`, its own todo list still open (`lib/turn-review.ts`) | 5 s / 120 s / 2 |
 
-- Global: `enabled` `true`, `providerExcludes` `[]`.
-- `resume`: `resumeDelayMs` `10000`, `resumeCooldownMs` `120000`, `maxResumes` `3`, `chainResumeDelayMs` `60000` (when the turn opened by a resume message fails again, the cooldown is bypassed and it re-schedules at this delay).
-- `continue`: `continueDelayMs` `3000`, `continueCooldownMs` `60000`, `maxContinues` `3`.
-- `unfinished`: `resumeOnOpenTodos` `true` (this kind's own switch), `unfinishedDelayMs` `5000`, `unfinishedCooldownMs` `120000`, `maxUnfinished` `2`.
-- The three deployment values of the request-level 429 retry: not `.volatile()`, so the card has no row for them - they go on the registration line's `config:` only (plain values, so a change applies on restart).
-  - Defaults: `requestRetryMax` `5` (0-20), `requestRetryBackoffMs` `[2000, 5000, 10000, 20000, 30000]` (at least one entry), `requestRetryBackoffCapMs` `30000` (min 1000).
+- `resumeOnOpenTodos` is the catch-up kind's own switch; `providerExcludes` gates `resume` only and touches neither of the other kinds nor the request-level 429 retry.
+- A resume-opened turn that fails again transiently **bypasses the cooldown** and re-schedules at `chainResumeDelayMs` (default 60 s): `resumeDelayMs` plus failure time always sits inside the 120 s cooldown, so without this exception a failing chain would be silently swallowed.
+- The injected text comes from the fixed bilingual templates in `lib/messages.ts` and follows the official locale preference (Chinese when that entry is not projected); no session content is interpolated.
 
-### Public surface
+## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Settings
 
-- Six methods on the official Typert Remote namespace `sessionRescue`: `state`, `cancel({ sessionId })`, `toggle({ sessionId })`, `resume`, `retryProviders`, `retryPolicy({ provider, preset })`. Parameters go through strict codecs; results use `src-json`.
-  - Authentication and transport boundaries are enforced by the host `/api` gateway (Host/DNS-rebinding/Origin checks, signed browser-session cookie, body limits); the package no longer opens raw HTTP routes and keeps no CSRF token of its own.
-- When the read surface is unreachable the dock degrades instead of pretending — after three consecutive unreadable polls it discards the cached snapshot (the countdown banner and the per-session switch fall back to their neutral state rather than counting down from a value nobody confirmed) and polling backs off by doubling up to a 30 s ceiling, while the turn-relative actions stay available because they read live session state rather than the read surface.
-- `retry-policy` writes into the official `llm-pi-ai` namespace at `providers.<name>.retryPolicy` (presets `default`/`enhanced`/`always`/`off`, persisted via `settings.mutate`); the package keeps no second retry configuration of its own.
-- The only model-visible artifact: one message through `agent.followup()` with `role: "user"`, an `id` like `session-rescue-<timestamp>-<seq>`, and text taken from the fixed bilingual templates in `lib/messages.ts` - no session content is interpolated.
-- Optional read of `ctx.get("lessonLoop")`: when present it receives the `transient-failure`, `unclassified-failure`, `max-tokens` and `unfinished-turn` facts, and one `pass` once the same provider genuinely finishes a `completed` turn.
-  - An absent or throwing bus only warns, the main path never depends on it.
+Namespace `session-rescue` = the entry id (implicit registration — the package does not call `settings.register`). The settings form and the line `config` share one `Config` schema in the host entry; the `.volatile()` fields are the card's editable face. Times in ms.
 
-### Data and privacy
+| Field | Type / range | Default | Card | Purpose |
+|---|---|---|---|---|
+| `enabled` | boolean | `true` | yes | Master switch; `false` stops all three injections and the request-level 429 retry, the manual dock stays |
+| `providerExcludes` | string[] | `[]` | yes | Providers whose `resume` never auto-fires (e.g. ones with a dedicated retry policy) |
+| `resumeDelayMs` | 1000–300000 | `10000` | yes | Wait after a transient failure |
+| `resumeCooldownMs` | 5000–3600000 | `120000` | yes | Minimum interval between two resumes in one session |
+| `maxResumes` | 0–20 | `3` | yes | Per-session resume quota (consecutive semantics) |
+| `chainResumeDelayMs` | 1000–300000 | `60000` | yes | Re-schedule delay when a resume-opened turn fails again (cooldown bypassed) |
+| `continueDelayMs` | 500–300000 | `3000` | yes | Wait after a max-tokens truncation |
+| `continueCooldownMs` | 5000–3600000 | `60000` | yes | Minimum interval between two continues |
+| `maxContinues` | 0–20 | `3` | yes | Per-session continue quota |
+| `resumeOnOpenTodos` | boolean | `true` | yes | The catch-up kind's own switch |
+| `unfinishedDelayMs` | 1000–300000 | `5000` | yes | Wait after an open-todo turn |
+| `unfinishedCooldownMs` | 5000–3600000 | `120000` | yes | Minimum interval between two catch-ups |
+| `maxUnfinished` | 0–20 | `2` | yes | Catch-up quota; refills only when the list closes |
+| `requestRetryMax` | 0–20 | `5` | no | Request-level 429 retry cap |
+| `requestRetryBackoffMs` | number[] (≥ 1 entry) | `[2000, 5000, 10000, 20000, 30000]` | no | Backoff ladder for the request-level retry |
+| `requestRetryBackoffCapMs` | ≥ 1000 | `30000` | no | Longest this plugin will wait; a longer `Retry-After` delegates back downstream |
 
-- The host half writes no files and makes no outbound requests (no `node:fs`, no network calls).
-  - All runtime state is in memory and bounded: at most 200 session records in the scheduler, 64 suspended pendings and 64 pending pass entries, oldest trimmed first, with timers released on `agent/disposed` and on plugin unload.
-- Persistence happens in exactly two places, both through the official settings service: this package's namespace `session-rescue` and the `llm-pi-ai` retry presets, stored under `<dsh data dir>` (`$DSH_HOME`) and surviving restarts.
-- The per-session switch lives only in process memory; a restart falls back to the global `enabled`.
-- The injected text follows the official locale preference (`value.preference` on the `locale` row of `settings.describe()`) and defaults to Chinese when that entry is not projected.
-- Content only leaves towards `lesson-loop` if that plugin is installed: it receives the failure code/status/message verbatim, the session id and the session's `cwd`, and lesson-loop alone decides where that is written. Without it, nothing is recorded.
+The three `requestRetry*` rows are deployment values: not `.volatile()`, so the card has no row for them — they go on the registration line's `config:` only (plain values, applied on restart).
 
-### FAQ
+## <img src="https://api.iconify.design/lucide/network.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Public interface
 
-- Does it silently spend money: yes. The injections are user-role messages, so the model continues and keeps consuming tokens and quota.
-- One switch off: the card's "Enable auto-resume" (`enabled = false`) stops all three injections and the request-level 429 retry while keeping the manual UI.
-- Narrower exits: the dock's per-session switch, `resumeOnOpenTodos` (re-run only), `providerExcludes` (resume on one provider only).
-- Why did it stop without resuming: look for `[session-rescue] <sid>: auto-<kind> skipped (<reason>)` (`pending`/`cooldown`/`max-resumes`) or `vetoed at fire time (<reason>)` in the log; the budget is consecutive-semantics and one finished turn refills it.
-- Will it interrupt a question aimed at me: no. Nothing is injected after `ask_user_question`. A goal round is only taken over once the official driver has disarmed for it — while the goal is still `armed`, or when it is `paused`/`blocked`/`complete`, this plugin stays out.
-- The re-run never fires: it requires that turn to have written a `todo/write` list that still holds non-`completed` items - sessions that never use the todo tool structurally cannot trigger it (`openTodos` stays `null`).
-- Install fails with 404: that version was never published to npmjs (check `dist-tags.latest`).
-  - 404 usually means the sibling library package `@jayyuen66/dsh-plugin-shared` is not on the registry yet - this package value-imports its `lib/locale`, `lib/record`, `lib/errors`, `lib/card-apply`, `lib/card-diff` and `lib/lesson-bus`, so a missing one is `ERR_MODULE_NOT_FOUND`.
-- What backs these decisions: `test/` covers the four main chains - transient failure resumes, a successful turn refills the quota, an open todo list re-runs, and a waiting-for-user turn stays untouched.
-  - `test/integration/loader-boot.test.ts` boots the published artifact through the real cordis loader.
+Six methods on the official Typert Remote namespace `sessionRescue`. Parameters go through strict codecs; results use `src-json`.
+
+| Method | Input | Reply |
+|---|---|---|
+| `state` | — | `ok` plus a per-session snapshot: pending kind, remaining-ms countdown, chained / suspended flags, fire counters, the per-session switch |
+| `cancel` | `{ sessionId }` | Cancels that session's pending injection, suspended ones included |
+| `toggle` | `{ sessionId }` | Flips the per-session switch; switching off also cancels pendings. 409 when the toggle ledger is full with no dead session to evict |
+| `resume` | — | Restores suspended injections after a reconnect; `ok` plus the restored count |
+| `retryProviders` | — | The official `llm-pi-ai` providers with retry mode / count / quota coverage; 503 when that namespace is unavailable |
+| `retryPolicy` | `{ provider, preset }` | Writes `providers.<name>.retryPolicy` (presets `default` / `enhanced` / `always` / `off`) via `settings.mutate`; a revision conflict answers 409 |
+
+- A refusal's `status` is a retained semantic code, not an HTTP status of a route of this package — there are no routes.
+- The only model-visible artifact: one `role: "user"` message through `agent.followup()`, with an id like `session-rescue-<timestamp>-<seq>` and text from the fixed templates. This package keeps no second retry configuration of its own.
+- Optional `lessonLoop` bus: when present it receives the `transient-failure`, `unclassified-failure`, `max-tokens` and `unfinished-turn` facts, and one `pass` once the same provider genuinely finishes a `completed` turn. An absent or throwing bus only warns; the main path never depends on it.
+
+## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Data and privacy
+
+| Aspect | Content |
+|---|---|
+| Nothing written, nothing fetched | The host half uses no `node:fs` and makes no network calls; the only output surfaces are `console.*` lines and the injected message |
+| In memory, bounded | At most 200 session records in the scheduler, 64 suspended pendings, 64 pending-pass entries and 200 per-session toggle entries — oldest trimmed first, timers released on `agent/disposed` and on plugin unload |
+| Persisted, exactly two places, both through official settings | This namespace `session-rescue` and the `llm-pi-ai` retry presets, stored under the dsh data directory and surviving restarts |
+| Per-session switch | Process memory only; a restart falls back to the global `enabled` |
+| Language | The injected text follows the official locale preference; Chinese when that entry is not projected |
+| The only exit path | Content leaves only towards lesson-loop, and only when it is installed: it receives the failure code / status / message verbatim, the session id and the session's `cwd`, and lesson-loop alone decides where that is written. Without it nothing is recorded |
+
+## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Known boundaries
+
+- **Unknown failure shapes are permanent, by design.** Everything the classifier cannot recognize is left alone; the card exposes no override. A mis-guessed "transient" would re-open turns that can never succeed.
+- **`providerExcludes` gates `resume` only** — `continue`, `unfinished` and the request-level 429 retry do not consult it.
+- **Subagent sessions are never touched** — only root sessions are rescued.
+- **The catch-up kind has a structural precondition**: the turn must have written a `todo/write` list that still holds `pending` or `in_progress` items. Sessions that never use the todo tool cannot trigger it.
+- **The 429 ladder only engages for providers that resolve no `retryPolicy`**, and the deepseek adapter resolves one even unconfigured. A profile without `dsh-llm-retry` mounted leaves a 429 terminal with zero request-level retries.
+- **The official `llm-retry` is not always downstream**: while its abort signal is fired or its entry is disposed it returns without delegating, and in `always` mode it adopts the decision coming back — this plugin is simply not consulted in those windows.
+- **While the read surface stays unreachable the dock degrades instead of pretending**: the banner and the per-session switch fall back to neutral and polling backs off. The turn-relative actions keep working — they read live session state, not the read surface.
+
+## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> FAQ
+
+| Question | Answer |
+|---|---|
+| Does it silently spend money? | Yes. The injections are user-role messages, so the model continues and keeps consuming tokens and quota. |
+| I want one switch off. | The card's master switch (`enabled = false`) stops all three injections and the request-level 429 retry while keeping the manual UI. |
+| Narrower exits? | The dock's per-session switch, `resumeOnOpenTodos` (catch-up only), `providerExcludes` (resume on one provider only). |
+| The model stopped but nothing resumed. | Look for `[session-rescue] <sid>: auto-<kind> skipped (pending/cooldown/max-resumes)` or `vetoed at fire time (<reason>)` in the log. Quota is consecutive — one finished turn refills it. |
+| Will it interrupt a question aimed at me? | No. Nothing is injected after `ask_user_question`, and a goal round is only taken over once the official driver has disarmed for it. |
+| The catch-up never fires. | It requires that turn to have written a todo list that still holds open items — sessions that never use the todo tool structurally cannot trigger it. |
+| The banner counts down but nothing happens. | The pre-fire check voided it (agent gone, status not idle, queued inbox messages, or a newer turn) — check the `vetoed at fire time` log line. |
+
+## <img src="https://api.iconify.design/lucide/wrench.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Development
+
+```sh
+pnpm install
+pnpm run check   # typecheck → lint → client build → host build → types → tests → integration → property → format
+```
+
+- Unit tests (hand-written host stubs) drive the pure chains: failure classification, scheduler gates, turn-facts fold, dock payload parse.
+- `test/integration/` drives the real thing: the published artifact booted through the real cordis loader; a real AgentLoop with the official testkit; a real goal round with the official `goal-round-driver` and a scripted failing mock LLM; abort semantics (a turn you stopped consumes no quota).
+- `test/property/` (fast-check) covers the classification order, the turn-facts fold, the `/state` payload parse, and the scheduler's state-machine invariants under random command sequences — each property carries a reach guard, so a criterion that was never exercised turns red instead of green.
+- Coverage thresholds are 100% across four metrics, so a new branch needs a case that reaches it.
+- `test/publish-manifest.test.ts` guards the published shape: entry targets shipped, no source entry, no `@deepseek-ai/*` under `dependencies`, `dsh-*` peers pinned exactly with `engines.dsh` on the same range, and no dates or machine paths in comments or docs. `test/dist-size.test.ts` holds a size budget over the artifacts.
+
+## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License
+
+MIT. Source at [github.com/JayYuen666/dsh-session-rescue](https://github.com/JayYuen666/dsh-session-rescue). Issues go to that repository's tracker.

@@ -9,7 +9,7 @@
 //   running/removed/lastAgentError/queue ← useSession
 // 组件合并成 view 后再调 transcript 函数。禁止从 useSession 读 nodes。
 
-import { createElement, useEffect, useState, useSyncExternalStore } from "react";
+import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -333,17 +333,33 @@ export const rescueState: RescueStateStore = {
       return;
     }
     this.inFlight = true;
-    const data = await readStateHop(this);
-    // 通知门控：只有快照内容**变了**（含「由有到过期」那一种）才惊动订阅者。每 tick
-    // 无条件遍历 listeners 会把内容不变的每个订阅者都 schedule 进 React 一遍。
-    const worthNotifying = data === null ? noteUnreachableHop(this) : commitHop(this, data);
-    this.inFlight = false;
-    if (worthNotifying) {
-      for (const listener of this.listeners) {
-        listener();
+    try {
+      const data = await readStateHop(this);
+      // 通知门控：只有快照内容**变了**（含「由有到过期」那一种）才惊动订阅者。每 tick
+      // 无条件遍历 listeners 会把内容不变的每个订阅者都 schedule 进 React 一遍。
+      const worthNotifying = data === null ? noteUnreachableHop(this) : commitHop(this, data);
+      if (worthNotifying) {
+        for (const listener of this.listeners) {
+          // 逐个隔离：通知循环里的异常没有接收方，refresh() 的三个调用点全是
+          // `void this.refresh()`（定时器回调、订阅补跳、可见性回补），抛出去就是一条
+          // 无人接的 unhandled rejection；而且一个订阅者抛错会连带跳过后面的订阅者。
+          // 把失败挡在单个订阅者边界内，轮询与其余订阅者照常。
+          try {
+            listener();
+          } catch {
+            // 订阅者是 React 的 schedule 回调，它的失败已由它自己的渲染边界处理，
+            // 这里只负责不让它掀掉整轮通知与下一跳。
+          }
+        }
       }
+    } finally {
+      // 在飞标志与续排都必须在 finally 里：这个循环没有 setInterval 兜底，下一跳**只**
+      // 在这里排。旧实现把两行都写在通知之后，任何一个订阅者抛错都会让定时器永久停表
+      //（timer 保持 null、inFlight 已复位 ⇒ 连「订阅即补一跳」那条路也救不回来）：
+      // 宿主横幅从那一刻起不再刷新，而页面看起来一切正常。
+      this.inFlight = false;
+      this.schedule();
     }
-    this.schedule();
   },
   schedule(): void {
     this.stop();
@@ -1020,7 +1036,16 @@ function RescueDockView(props: DockProps): ReactNode {
   // 轮询快照未就绪/会话切换缺状态时 toggle=unknown（中性态），
   // hasContent 只控容器显隐，同一会话内常驻挂载（本地状态不丢）。
   const decision = decideDockState(
-    { canStopReask, canEdit: canEditDock, canRetry: canRetryDock, canContinue: canContinueDock },
+    {
+      canStopReask,
+      canEdit: canEditDock,
+      canRetry: canRetryDock,
+      canContinue: canContinueDock,
+      // 本地状态那两位：它们渲染在 dock 容器里，漏算就会让容器藏起自己正在显示的内容
+      // （编辑态在中途转成运行中时 `canEdit` 变假；写通道失败时 pending 可能已不在）。
+      editing: dockEditing && target !== null,
+      hostActionFailed: hostActionError !== null,
+    },
     rescue,
     sessionId,
   );
@@ -1061,6 +1086,11 @@ function RescueDockView(props: DockProps): ReactNode {
         "div",
         { key: "dock-edit", style: { padding: "4px 0" } },
         createElement(RescueEditor, {
+          // key 带上会话与目标轮：草稿是 `useState(target.text)` 只初始化一次的局部状态，
+          // 而 dock 是常驻挂载点、React 按 key 复用组件实例。固定 key 下同一个实例会先后
+          // 服务不同会话/不同轮次，草稿于是留着上一轮（甚至上一会话）的文本——用户在 A
+          // 会话打了一半切到 B，B 的编辑框里显示的是 A 的内容，一点「重发」就把它发进 B。
+          key: `dock-edit:${sessionId}:${target.seq}`,
           sessionId,
           actions,
           target,
@@ -1297,8 +1327,7 @@ interface NumberRowProps {
 }
 
 function NumberRow(props: NumberRowProps): ReactNode {
-  const { label, hint, value, min, max, disabled, onCommit } = props;
-  void props.field;
+  const { field, label, hint, value, min, max, disabled, onCommit } = props;
   const [draft, setDraft] = useState(String(value));
   useEffect(() => {
     setDraft(String(value));
@@ -1334,7 +1363,7 @@ function NumberRow(props: NumberRowProps): ReactNode {
     ),
     createElement("input", {
       type: "number",
-      "data-field": props.field,
+      "data-field": field,
       value: draft,
       min,
       max,
@@ -1461,7 +1490,10 @@ function retryRowElement(
     createElement(
       "select",
       {
-        value: pending[row.provider] ?? presetOfRow(row),
+        // 原型链防护：row.provider 来自 host 载荷，取到的名字是 "constructor"、
+        // "toString" 这类自有属性名时 `pending[...]` 会返回原型上的函数，`??` 也就
+        // 不再回落到当前档位——下拉框把函数当 value 渲染成空串。只认自有键。
+        value: Object.hasOwn(pending, row.provider) ? pending[row.provider] : presetOfRow(row),
         disabled,
         onChange: (ev: React.ChangeEvent<HTMLSelectElement>) => {
           onChange(row, ev.target.value);
@@ -1510,10 +1542,15 @@ function settingsSectionTitle(text: string, bordered: boolean): ReactNode {
  *  返回文案=host 拒绝。失败可能是 `{ok:false, error}` 业务结果，也可能是远程面拒绝；
  *  两者都不得落到"成功"分支，否则 pending 被清空、用户以为档位已保存。 */
 
-const applyPreset = async (provider: string, preset: string): Promise<string | null> => {
+const applyPreset = async (
+  t: Translate,
+  provider: string,
+  preset: string,
+): Promise<string | null> => {
+  const target = `${provider}→${preset}`;
   const { reader } = rescueState;
   if (reader === undefined) {
-    return `${provider}→${preset}: remote unavailable`;
+    return t("remoteUnavailable", { target });
   }
   try {
     const body = await reader.retryPolicy(provider, preset);
@@ -1521,9 +1558,10 @@ const applyPreset = async (provider: string, preset: string): Promise<string | n
       return null;
     }
     const error = fieldOf(body, "error");
-    return `${provider}→${preset}: ${typeof error === "string" ? error : "rejected"}`;
+    // host 给了原因就用原因（它是写给用户看的原文），没给才回落到本包的措辞。
+    return typeof error === "string" ? `${target}: ${error}` : t("hostRejected", { target });
   } catch (error) {
-    return `${provider}→${preset}: ${String(error)}`;
+    return `${target}: ${String(error)}`;
   }
 };
 
@@ -1556,7 +1594,7 @@ function retryProvidersBody(
   return createElement(
     "div",
     { className: "sr-hint" },
-    `${t("presetFaceUnavailable")}${state.error ?? ""}`,
+    t("presetFaceUnavailable", { detail: state.error ?? "" }),
   );
 }
 
@@ -1629,11 +1667,13 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const load = async (): Promise<void> => {
+  // load 依赖 t（文案走 UI_MESSAGES），所以用 useCallback 把身份固定下来：它同时被挂载
+  // 那一次和「保存成功后重读」调用，写成裸函数会让 useEffect 的依赖数组没法写对。
+  const load = useCallback(async (): Promise<void> => {
     try {
       const parsed: unknown = await rescueState.reader?.retryProviders();
       if (!isRecord(parsed)) {
-        setState({ ok: false, error: "retry providers unavailable" });
+        setState({ ok: false, error: t("retryProvidersUnavailable") });
         return;
       }
       // 逐字段守卫投影 providers（坏行直接丢弃，防御纵深；不经 any 断言）
@@ -1650,11 +1690,11 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     } catch (error) {
       setState({ ok: false, error: String(error) });
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   const dirtyCount = Object.keys(pending).length;
   const saveAll = async (): Promise<void> => {
@@ -1665,14 +1705,15 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     setSaveError(null);
     const entries = Object.entries(pending);
     const outcomes = await Promise.all(
-      entries.map(([provider, preset]) => applyPreset(provider, preset)),
+      entries.map(([provider, preset]) => applyPreset(t, provider, preset)),
     );
     setSaving(false);
     const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
     if (failures.length > 0) {
       // 保留 pending：失败的档位仍是用户选的意图，重试点一次即可（已成功的
       // 档位重复写是幂等的——host 侧同一 preset 写同一 retryPolicy）。
-      setSaveError(`${t("saveFailed")}${failures.join(t("failureJoiner"))}`);
+      const detail = failures.join(t("failureJoiner"));
+      setSaveError(t("saveFailed", { detail }));
       return;
     }
     setPending({});
@@ -1760,7 +1801,7 @@ async function commitTouched(
   const outcomes = await Promise.all(writes.map((item) => props.set(item.field, item.value)));
   const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
   if (failures.length > 0) {
-    return `${props.t("saveFailed")}${failures.join(props.t("failureJoiner"))}`;
+    return props.t("saveFailed", { detail: failures.join(props.t("failureJoiner")) });
   }
   return null;
 }
@@ -2050,7 +2091,9 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
       failure = await commitTouched(props, touched, excludesDraft, value);
     } catch (error) {
       // 写通道本身抛错（远端 reject / scope 已失效）：同样必须可见。
-      failure = `${t("saveFailed")}${String(error instanceof Error ? error.message : error)}`;
+      failure = t("saveFailed", {
+        detail: String(error instanceof Error ? error.message : error),
+      });
     }
     setBusy(false);
     if (failure !== null) {
@@ -2307,5 +2350,5 @@ export { inject, apply };
 
 // 类型补充：globalThis 上的幂等标记（浏览器运行时由本文件声明）。
 declare global {
-  var __sessionRescueApplied: boolean | undefined;
+  var __sessionRescueApplied: boolean | symbol | undefined;
 }

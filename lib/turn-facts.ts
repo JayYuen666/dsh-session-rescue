@@ -30,6 +30,9 @@ import type { SessionEvent, SessionHeader, SessionLogOffset } from "@deepseek-ai
 import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import type { TurnReview } from "./turn-review.ts";
+// 未闭合口径必须与同步扫描同源（test/property/turn-facts.property.test.ts 钉着两侧逐项
+// 同解）；白名单的理由见 test/turn-review.test.ts 的「未知状态 ≠ 未完成」用例。
+import { OPEN_TODO_STATUSES } from "./turn-review.ts";
 
 /** 本包投影单元的注册键（host-only：不声明 wire ⇒ 不进客户端快照）。 */
 export const RESCUE_FACTS_KEY = "session-rescue.turnFacts";
@@ -189,7 +192,7 @@ function openCountOf(todos: unknown): number | undefined {
     for (const item of todos) {
       if (isRecord(item)) {
         const { status } = item;
-        if (typeof status === "string" && status !== "completed") {
+        if (typeof status === "string" && OPEN_TODO_STATUSES.has(status)) {
           open += 1;
         }
       }
@@ -248,8 +251,12 @@ function foldToolCall(state: RescueFacts, event: unknown): RescueFacts {
     return state;
   }
   // 旧 awaitsUser 另带一条 `event.turn === lastTurn` 的等式判据（lastTurn 即该 end 的轮次号；
-  // 采信路径上它与 start.turn 同一个值）。缺 turn 的事件：undefined !== 号码 ⇒ 不计数，同旧。
-  if (start.turn === null || numIn(event, "turn") !== start.turn) {
+  // 采信路径上它与 start.turn 同一个值）。但**缺 turn 的事件不能因此被排除**：等式对
+  // `undefined` 恒 false，于是模型正在等用户的那条 call 被漏掉，本回合被判成「不在等
+  // 用户」，自动续跑插进澄清流程。窗口已限定在本轮，缺号时按窗口归属算；交回了 turn
+  // 而与本轮不符的仍然排除（那是别轮的 call）。与 lib/turn-review.ts 逐字同判据。
+  const callTurn = numIn(event, "turn");
+  if (start.turn !== null && callTurn !== undefined && callTurn !== start.turn) {
     return state;
   }
   return start.ask ? state : { ...state, start: { ...start, ask: true } };
@@ -339,7 +346,11 @@ export const rescueFactsProjection = {
   stateSchema: rescueFactsSchema,
   // 空日志的初态就地给出：生产侧只有这一个调用方，单独导出一份 init 只会养出一个
   // 「只被测试引用」的出口。官方 `init` 交回 header 与 fork 继承前缀长度，本包两位都
-  // 不需要：判定全由事件流自身推出。
+  // 不需要：判定全由事件流自身推出（事件自带绝对 seq，不靠前缀长度定位）。
+  //
+  // 继承前缀（fork 从父会话带过来的那一段）刻意与子会话自己的事件同等对待，因为回退扫描
+  // 那条路读的是 `snapshotEvents()` 全量，它同样分不出边界——若这里按前缀长度把继承段
+  // 裁掉，投影与扫描就会对同一份日志给出不同答案，而裁决这条冲突的判据本来就不存在。
   init: (_header: SessionHeader, _inherited: SessionLogOffset): RescueFacts => ({
     end: null,
     latestTurnStart: null,

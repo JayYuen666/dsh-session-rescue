@@ -60,7 +60,8 @@ export interface UiMessages {
   readonly continueTitle: string;
   readonly continueOutput: string;
   // ── 每会话开关行 ──
-  /** 状态展示：已开启。 */
+  /** 开关行的「开启」字样：与 toggleStateOff 成对，用于已关闭时提供开启入口，
+   *  不是「已开启」这一状态的描述（那个态由 toggleStateOff 缺席 + 按钮禁用表达）。 */
   readonly toggleStateOn: string;
   /** 状态展示：已关闭。 */
   readonly toggleStateOff: string;
@@ -76,6 +77,8 @@ export interface UiMessages {
   /** 宿主拒绝落盘时的模板（`{field}`/`{value}` 插值）。 */
   readonly fieldRejected: string;
   /** 保存失败前缀（后接逐字段原因）。 */
+  /** 前缀 + 失败明细。明细走 `{detail}` 占位符而不是靠尾部空白拼接：靠空白意味着任何一次
+   *  本地化改写（换全角冒号、去掉尾空格）都会让下一段粘上去，而那种错在类型系统里看不出来。 */
   readonly saveFailed: string;
   /** 多条失败原因的连接符。 */
   readonly failureJoiner: string;
@@ -130,6 +133,12 @@ export interface UiMessages {
   readonly presetDirty: string;
   readonly retrySectionTitle: string;
   readonly retrySectionHint: string;
+  /** 远端面不可用（读不到命名空间或调用被拒），`{target}` 是「provider→preset」。 */
+  readonly remoteUnavailable: string;
+  /** 远端返回了业务失败但没带原因，`{target}` 同上。 */
+  readonly hostRejected: string;
+  /** 取不到重试提供方清单时显示在面板上的那句话。 */
+  readonly retryProvidersUnavailable: string;
 }
 
 /**
@@ -212,7 +221,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     sessionToggleLabel: "自动续跑（本会话）：{state}",
     toggleWaiting: "状态同步中，稍后重试",
     fieldRejected: "{field} 未被宿主接受（值已回退到 {value}）",
-    saveFailed: "保存失败：",
+    saveFailed: "保存失败：{detail}",
     failureJoiner: "；",
     statusReadOnly: "当前作用域只读",
     statusDirty: "有未保存的修改，点「保存」生效",
@@ -256,12 +265,15 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     presetAlways: "always（无限重试 + 5s→60s 退避）",
     presetOff: "关闭（不自动重试）",
     presetLoading: "加载 llm-pi-ai providers…",
-    presetFaceUnavailable: "官方 retryPolicy 面不可用：",
+    presetFaceUnavailable: "官方 retryPolicy 面不可用：{detail}",
     saveCount: "保存（{count} 个改动）",
     presetDirty: "有未保存的档位改动",
     retrySectionTitle: "429 重试策略（官方 llm-retry，按平台）",
     retrySectionHint:
       "pi-ai 把 429+配额措辞归码 QUOTA；默认码表不含 QUOTA 时 llm-retry 放行。改档位后点「保存」经官方 settings 落盘，重启不丢。",
+    remoteUnavailable: "{target}：远端面不可用（读不到 sessionRescue 命名空间）",
+    hostRejected: "{target}：宿主拒绝了这次落盘，但没有给出原因",
+    retryProvidersUnavailable: "取不到重试提供方清单：远端面不可用",
   },
   en: {
     retryText:
@@ -303,7 +315,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     sessionToggleLabel: "Auto-resume (this session): {state}",
     toggleWaiting: "State still syncing — try again shortly",
     fieldRejected: "{field} was not accepted by the host (value reverted to {value})",
-    saveFailed: "save failed: ",
+    saveFailed: "save failed: {detail}",
     failureJoiner: "; ",
     statusReadOnly: "This scope is read-only",
     statusDirty: "Unsaved changes — press Save to apply",
@@ -354,11 +366,19 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     presetAlways: "always (unlimited retries + 5s→60s backoff)",
     presetOff: "Off (no automatic retries)",
     presetLoading: "loading llm-pi-ai providers…",
-    presetFaceUnavailable: "official retryPolicy face unavailable: ",
-    saveCount: "Save ({count} changes)",
+    presetFaceUnavailable: "official retryPolicy face unavailable: {detail}",
+    // 数与名词脱钩：调用点在 dirtyCount > 0 时就取这条键，1 个改动时
+    // “Save (1 changes)” 是错的。模板塞不进条件式，把 count 挪到括号里当独立数字，
+    // 任何数量读起来都成立，也不用在渲染侧新增分支。
+    saveCount: "Save changes ({count})",
     presetDirty: "Unsaved preset changes",
     retrySectionTitle: "429 retry policy (official llm-retry, per platform)",
     retrySectionHint:
       "pi-ai maps 429 + quota wording onto the QUOTA code; llm-retry passes through when the default code table omits QUOTA. After changing a preset, press Save to persist it through the official settings — it survives restarts.",
+    remoteUnavailable:
+      "{target}: the remote face is unavailable (the sessionRescue namespace could not be reached)",
+    hostRejected: "{target}: the host rejected this write without giving a reason",
+    retryProvidersUnavailable:
+      "Could not load the retry provider list: the remote face is unavailable",
   },
 };

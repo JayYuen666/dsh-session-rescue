@@ -89,6 +89,25 @@ function releaseDisposer(dispose: TimerDisposer | null): void {
   }
 }
 
+/**
+ * 释放记录上挂着的定时器并置回 null。
+ *
+ * 三个出口（cancel / suspendSession / disposeAll）原本各写一份「有就调、吞异常、置 null」，
+ * 措辞还不一样；漏改其中一处就是定时器泄漏，而泄漏的表现只是「进程退出慢一点」。
+ * 收敛到这里之后，「释放」只有一个定义，`settle()` 刻意不走这条：那里定时器已经触发过，
+ * 再调一次 disposer 是重复释放。
+ */
+function releaseTimer(rec: SessionRecord): void {
+  if (rec.disposeTimer !== null) {
+    try {
+      rec.disposeTimer();
+    } catch {
+      /* 释放失败不阻断当前动作：记录马上就要被丢弃或重置。 */
+    }
+    rec.disposeTimer = null;
+  }
+}
+
 /** 会话记录上限：长驻进程防 Map 无界膨胀（每条记录很小，但会话数会一直涨）。
  *  超限时淘汰最旧的"空闲"记录（无 pending、无挂载定时器——有定时器的记录
  *  绝不淘汰，否则定时器泄漏）。与 quality-gate(50)/ctx-observe(200) 同一纪律。 */
@@ -212,14 +231,7 @@ export class ResumeScheduler {
     if (rec.pending === null) {
       return { cancelled: false, reason: "no-pending" };
     }
-    if (rec.disposeTimer !== null) {
-      try {
-        rec.disposeTimer();
-      } catch {
-        /* 释放失败不阻断取消 */
-      }
-      rec.disposeTimer = null;
-    }
+    releaseTimer(rec);
     const { turn } = rec.pending;
     rec.pending = null;
     return { cancelled: true, turn };
@@ -327,14 +339,7 @@ export class ResumeScheduler {
   /** 插件停止：释放所有待办定时器，清空全部记录。 */
   public disposeAll(): void {
     for (const rec of this.sessions.values()) {
-      if (rec.disposeTimer !== null) {
-        try {
-          rec.disposeTimer();
-        } catch {
-          /* 释放失败不阻断清理 */
-        }
-        rec.disposeTimer = null;
-      }
+      releaseTimer(rec);
       rec.pending = null;
     }
     this.sessions.clear();
@@ -367,14 +372,7 @@ export class ResumeScheduler {
     if (rec.pending === null) {
       return null;
     }
-    if (rec.disposeTimer !== null) {
-      try {
-        rec.disposeTimer();
-      } catch {
-        /* 定时器释放失败不阻断挂起 */
-      }
-      rec.disposeTimer = null;
-    }
+    releaseTimer(rec);
     const { pending } = rec;
     rec.pending = null;
     rec.suspended = true;

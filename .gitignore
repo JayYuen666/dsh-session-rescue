@@ -1,7 +1,19 @@
 node_modules/
-client.js
 .toolchain/
-.tmp/
-host.js
-coverage/
-types/
+
+# 构建产物：只有包根那一份要忽略。不加前导斜杠时 Git 在任意层级匹配同名文件，
+# 于是 src/ 或 lib/ 里将来出现同名源码也会被一起忽略，而且不会有任何提示。
+/client.js
+/host.js
+/types/
+/coverage/
+/.tmp/
+
+# 本地环境与凭据：这类文件一旦被 `git add -A` 扫进去就是泄漏，规则兜在最前面。
+.env
+.env.*
+*.pem
+*.key
+
+# 手工打包留下的 tarball（`pnpm pack` 与 smoke 回路都会在包根生成）。
+/*.tgz

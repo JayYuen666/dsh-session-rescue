@@ -65,7 +65,9 @@ export function userText(content: readonly ContentBlock[] | undefined): string |
     }
     text += block.text;
   }
-  return text;
+  // 拼完仍是空白：整条没有可重发的内容。返回空串会让调用方拿到「有文本」的假信号，
+  // 把一条什么都没有的消息原样发回去，或拿它去比对历史。与「没有文本块」同解。
+  return text.trim() === "" ? null : text;
 }
 
 export function lastUserNode(view: TranscriptView): TranscriptNode | null {
@@ -122,11 +124,32 @@ export function hostRetryPending(view: TranscriptView, turn: number): boolean {
   );
 }
 
-/** 最后完成轮的终态失败；running 会话永不产生失败。
+/** 该轮的失败类别与它独有的两个字段；不构成失败时返回 null。 */
+function classifyFailureOfTurn(
+  view: TranscriptView,
+  turn: number,
+): Pick<TurnFailure, "kind" | "message" | "code"> | null {
+  const error = turnErrorInTurn(view, turn);
+  if (error !== null) {
+    return { kind: "turn-error", message: error.message ?? null, code: error.code ?? null };
+  }
+  if (maxTokensInTurn(view, turn)) {
+    return { kind: "max-tokens", message: null, code: "turn-max-tokens" };
+  }
+  if (interruptedAssistantInTurn(view, turn) !== null) {
+    return { kind: "interrupted", message: view.lastAgentError, code: null };
+  }
+  return null;
+}
+/** 最后完成轮的终态失败；running 与 removed 会话永不产生失败。
  *  轮次择优就地完成：判据要的除了轮号还有它自己的 end seq，单列一份「取最大轮号」
- *  的导出只会多出一条只被单测取用的出口（同一条判据由本函数的用例钉住）。 */
+ *  的导出只会多出一条只被单测取用的出口（同一条判据由本函数的用例钉住）。
+ *
+ *  removed 与 running 同判：会话已被移除时它的日志只是历史残留，dock 上任何「重发/继续」
+ *  动作都会打到一个不存在的会话上。`lastCompletedUserTarget` 一直是这样挡的，两条判据
+ *  出自同一个 view、喂给同一排按钮，挡的边界不一致时会出现「编辑入口关着、重试入口开着」。 */
 export function failureOfLastTurn(view: TranscriptView): TurnFailure | null {
-  if (view.running) {
+  if (view.running || view.removed) {
     return null;
   }
   let turn = -1;
@@ -140,36 +163,20 @@ export function failureOfLastTurn(view: TranscriptView): TurnFailure | null {
   if (turn === -1) {
     return null;
   }
-  const error = turnErrorInTurn(view, turn);
-  if (error !== null) {
-    return {
-      kind: "turn-error",
-      turn,
-      turnEndSeq: end,
-      message: error.message ?? null,
-      code: error.code ?? null,
-      hasTools: turnHasToolActivity(view, turn),
-    };
+  // 先定「是不是失败、是哪一类」，再一次性填充公共字段：三个分支原本各自复制一份
+  // {turn, turnEndSeq, hasTools} 并各调一次 turnHasToolActivity，加字段时要改三处、
+  // 而 hasTools 对同一个 turn 也白扫三遍（它与失败类别无关，只取决于该轮有没有工具活动）。
+  const head: Pick<TurnFailure, "kind" | "message" | "code"> | null = classifyFailureOfTurn(
+    view,
+    turn,
+  );
+  if (head === null) {
+    return null;
   }
-  if (maxTokensInTurn(view, turn)) {
-    return {
-      kind: "max-tokens",
-      turn,
-      turnEndSeq: end,
-      message: null,
-      code: "turn-max-tokens",
-      hasTools: turnHasToolActivity(view, turn),
-    };
-  }
-  if (interruptedAssistantInTurn(view, turn) !== null) {
-    return {
-      kind: "interrupted",
-      turn,
-      turnEndSeq: end,
-      message: view.lastAgentError,
-      code: null,
-      hasTools: turnHasToolActivity(view, turn),
-    };
-  }
-  return null;
+  return {
+    ...head,
+    turn,
+    turnEndSeq: end,
+    hasTools: turnHasToolActivity(view, turn),
+  };
 }

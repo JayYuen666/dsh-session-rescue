@@ -49,7 +49,12 @@ describe("共享夹具的三条门禁", () => {
   });
 
   it(`${PKG_NAME}: 卡片覆盖 host schema 全部字段（改 host 字段必须同步卡片或声明豁免）`, () => {
-    const { pkgName, hostFields, bound, exemptions } = SCHEMA_COVERAGE;
+    const { pkgName, hostFields, bound, exemptions, unresolved } = SCHEMA_COVERAGE;
+    assert.deepEqual(
+      unresolved,
+      [],
+      `[${pkgName}] host.ts 里有解析不出的 Schema.object 块（改了 test/schema-coverage.ts 认得的写法）：\n${unresolved.join("\n")}\n→ 让解析器认这种写法，别靠"解析失败就跳过"缩小字段全集。`,
+    );
     assert.ok(hostFields.length > 0, "host.ts 未找到 Schema.object 字段（解析失败或该包无设置）");
     const missing = hostFields.filter((field) => !bound.has(field));
     const unexempted = missing.filter((field) => !exemptions.has(field));
@@ -109,7 +114,7 @@ describe("buildClient()", () => {
   it("产物包含 ModuleLoader 包装、react 外部化与两半内容", async () => {
     const out = await buildClient();
     assert.ok(out.includes("window.__ModuleLoader__.load({"));
-    assert.ok(out.includes(`id: '${PKG_NAME}'`));
+    assert.ok(out.includes(`id: ${JSON.stringify(PKG_NAME)}`));
     // react 外部化断言
     assert.ok(out.includes('require("react")') || out.includes("require('react')"));
     // UI/入口半断言

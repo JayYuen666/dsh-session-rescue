@@ -36,7 +36,12 @@ export interface TranscriptNode {
   code?: string;
   content?: readonly ContentBlock[];
   interrupted?: boolean;
-  retryState?: string;
+  /** 重试生命周期，同样取官方字面量联合（`ModelRetryNode` 的
+   *  `'scheduled' | 'started' | 'cancelled'`）。写成 `string` 时
+   *  `transcript.ts` 里 `retryState === "started"` 这类比较拼错也能编译，
+   *  而拼错的表现是「不在重试中」——续跑判定会漏掉正在重试的那一轮。
+   *  这里从官方类型派生而不是手抄三个串：手抄一份就多一处会与宿主脱钩的真值。 */
+  retryState?: Extract<ConversationNode, { kind: "model-retry" }>["retryState"];
 }
 
 /**
@@ -74,15 +79,24 @@ function turnStartSeq(view: TranscriptView, turn: number): number {
 
 /** 该轮是否跑过工具/命令：重跑会重复副作用，自动续跑文案需避免重做。 */
 export function turnHasToolActivity(view: TranscriptView, turn: number): boolean {
-  const end = view.turnEnds.get(turn) ?? Number.POSITIVE_INFINITY;
-  const start = turnStartSeq(view, turn);
-  for (const node of view.nodes) {
-    if (
-      (node.kind === "tool-result" || node.kind === "command") &&
-      node.seq > start &&
-      node.seq <= end
-    ) {
-      return true;
+  const end = view.turnEnds.get(turn);
+  // 没有该轮的 turn/end 时**不按节点序列判**：下界 `turnStartSeq` 是从「更早轮的
+  // end」推出来的，上界却没有，于是「start 之后的所有节点」都会被算进这一轮——
+  // 后续轮次的工具活动会把一轮没跑过工具的回合报成跑过。这种窗口没有可信上界，
+  // 只保留「运行中的工具调用」这一条判据（那一支按 turn 号精确匹配）。
+  if (end !== undefined) {
+    const start = turnStartSeq(view, turn);
+    // start >= end 说明 turnEnds 里出现了乱序条目：窗口空或倒挂，同样没有可信边界。
+    if (start < end) {
+      for (const node of view.nodes) {
+        if (
+          (node.kind === "tool-result" || node.kind === "command") &&
+          node.seq > start &&
+          node.seq <= end
+        ) {
+          return true;
+        }
+      }
     }
   }
   return view.runningCalls.some((call) => call.turn === turn);

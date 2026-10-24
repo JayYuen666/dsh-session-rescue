@@ -1,6 +1,6 @@
 // tsconfig.types.json —— 只为**发布**产出声明；类型检查走 tsconfig.json，两者范围不同是刻意的。
 //
-// 与 tsconfig.json 的差别有三处，都是为了产出物而不是为了检查：
+// 与 tsconfig.json 的差别有四处，都是为了产出物而不是为了检查：
 //   `declaration` + `emitDeclarationOnly` —— 前者出 .d.ts，后者保证不出 .js（运行期产物由
 //     build-host.mjs 的 rolldown 出，形状与 tsc 无关，两条路各管各的）。基线的
 //     `noEmit` 因此必须显式关掉，否则 `allowImportingTsExtensions` 会坚持要 noEmit。
@@ -9,6 +9,8 @@
 //     它由宿主按 bundle 载入，没有人 import 它。
 //   不开 `rewriteRelativeImportExtensions` —— 它只改写 JS 产物的说明符，对 emitDeclarationOnly
 //     是空操作。声明里的 `.ts` 后缀由 build-types.mjs 手工改成 `.js`，原因见该文件。
+//   `removeComments` —— 源码注释是写给读源码的人的（含内部路径与判据来由），而 `types/` 整目录
+//     进发布包。留着它们等于把内部实现笔记一并发给下游，且注释不参与类型消费。
 {
   "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.base.json",
   "compilerOptions": {
@@ -17,6 +19,7 @@
     "outDir": "types",
     "declaration": true,
     "emitDeclarationOnly": true,
+    "removeComments": true,
     "noEmit": false
   },
   "include": ["host.ts", "lib/**/*.ts"]

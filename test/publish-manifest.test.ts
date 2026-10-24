@@ -22,7 +22,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { listDeclarations } from "../build-types.mjs";
+import { canonicalizeDeclarationSpecifiers, listDeclarations } from "../build-types.mjs";
 
 const pkgDir = path.join(import.meta.dirname, "..");
 
@@ -375,6 +375,30 @@ describe("发布形态", () => {
         `types/${file} 的相对说明符仍指源码 .ts：请运行 npm run build:types`,
       ).toBe(false);
     }
+  });
+
+  it("说明符改写只认说明符位置：字面量类型与注释里的路径原样留着", () => {
+    // 判据按「引号里像路径」来认会一路改到底：`export type P = "./lib/foo.ts"` 里的字符串是
+    // 一个字面量类型，它的值就是那串字符；改成 .js 等于把类型悄悄改掉，而消费方只会看到
+    // 「类型对不上」，看不出是构建脚本干的。JSDoc 示例里的路径同理。
+    const source = [
+      'export type Keep = "./lib/foo.ts";',
+      'import type { A } from "./lib/a.ts";',
+      'export * from "./lib/d.ts";',
+      'export declare function f(): import("./lib/e.ts").E;',
+      'declare module "./lib/f.ts" {}',
+      "/** 示例：'./lib/doc-example.ts' 不是说明符。 */",
+    ].join("\n");
+    expect(canonicalizeDeclarationSpecifiers(source)).toBe(
+      [
+        'export type Keep = "./lib/foo.ts";',
+        'import type { A } from "./lib/a.js";',
+        'export * from "./lib/d.js";',
+        'export declare function f(): import("./lib/e.js").E;',
+        'declare module "./lib/f.js" {}',
+        "/** 示例：'./lib/doc-example.ts' 不是说明符。 */",
+      ].join("\n"),
+    );
   });
 });
 

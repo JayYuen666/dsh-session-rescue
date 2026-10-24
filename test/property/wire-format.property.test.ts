@@ -44,6 +44,8 @@ const NO_ACTIONS: DockActionSignals = {
   canEdit: false,
   canRetry: false,
   canContinue: false,
+  editing: false,
+  hostActionFailed: false,
 };
 
 function actionsOf(flags: boolean[]): DockActionSignals {
@@ -52,6 +54,8 @@ function actionsOf(flags: boolean[]): DockActionSignals {
     canEdit: flags[1] === true,
     canRetry: flags[2] === true,
     canContinue: flags[3] === true,
+    editing: flags[4] === true,
+    hostActionFailed: flags[5] === true,
   };
 }
 
@@ -186,7 +190,7 @@ describe("轮询档位与退避（数值面）", () => {
 
 describe("dock 渲染决策（信号组合）", () => {
   it("hasContent 恰等于「有区块要渲染」；toggle=unknown 恰等于「快照不在场」", () => {
-    const flagsArbitrary = fc.array(fc.boolean(), { minLength: 4, maxLength: 4 });
+    const flagsArbitrary = fc.array(fc.boolean(), { minLength: 6, maxLength: 6 });
     const rescueArbitrary = fc.oneof(fc.constant(null), fc.constant({ ok: true } as const));
     fc.assert(
       fc.property(flagsArbitrary, rescueArbitrary, (flags, rescue) => {
@@ -198,7 +202,9 @@ describe("dock 渲染决策（信号组合）", () => {
           actions.canStopReask ||
           actions.canEdit ||
           actions.canRetry ||
-          actions.canContinue;
+          actions.canContinue ||
+          actions.editing ||
+          actions.hostActionFailed;
         assert.equal(decision.hasContent, anyBlock, "hasContent 必须恰等于「有区块要渲染」");
         // 快照未就绪时 toggle 只能是中性态、开关行只能是隐藏（把「还没同步到」显示成
         // 「已关闭」是旧缺陷，动作位也不该把开关行带出来）。
