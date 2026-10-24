@@ -3,13 +3,46 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## Unreleased
-
-一类自动注入的判据变了：**goal 轮次不再一律让路**。其余改动集中在客户端侧的可见性与
-发布/构建面，注入文案与默认配置未改。
+## 0.1.4
 
 ### Changed
 
+- **失败分类器三个入口共用同一份字段投影与判序**：裸 429 只在 HTTP 语境里算限速证据；已知的 `finish_reason` 不再被当成上游异常；408/425 判瞬时，402 归永久，余额证据排在状态码之前。
+- **回合事实与评审面收口**：未闭合待办改成白名单，未知状态不再算「未完成」；缺 `turn` 的调用按本轮窗口判「等用户」；`retryState` 取官方字面量联合，没有 `turn/end` 时不再按节点区间判工具活动。
+- **Remote 数据面**：`$mount` 失败不再缓存；空的 `sessionId` / `provider` / `preset` 直接拒绝；六个端点收敛到同一条 `invoke`，错误带 `cause`。
+- **设置卡文案**改用 `{detail}` 占位，并补三条远端不可用文案。
+- **定时器释放收敛为 `releaseTimer`**（纯重构，行为不变）。
+- **宿主线抬到 `0.2.1-rc.3`**：`engines.dsh`、peer/dev 依赖、overrides 与 README 徽标/正文同值。
+- **CI/CodeQL/Scorecard/Dependabot 与 Windows 矩阵补齐**：构建脚本统一走 shared 的 `lib/build-*`，产物仍落 `dist/`。
+
+### Fixed
+
+- **dock 状态区分「字段缺失」与「坏形状」**：坏载荷不再显示成确信的空快照；非有限数被拒收；查表走 `Object.hasOwn`，原型链键不会冒充字段。
+- **轮询的 `refresh` 改 try/finally**：订阅者抛错不再让定时器停表；dock 显隐计入编辑态与写失败；`RescueEditor` 的 key 带上会话与轮次，草稿不串档。
+
+### Added
+
+- `DockActionSignals` 增加 `editing` 与 `hostActionFailed`。
+
+## 0.1.3
+
+### Fixed
+
+- **冷却哨兵 `lastFireAt` 由 `0` 改为 `null`**：`0` 是合法时钟值，零起点时钟下一次真实 fire 会被当成「从未发生」，冷却被静默关闭。对外快照仍是 number；全为 null 时回 0，与旧契约逐字一致。
+- **补上 integration / property 两份 vitest 配置的遗漏项**；client 产物里 `//#region` 行内的 pnpm store 路径一并折叠，跨机器构建字节一致。
+
+## 0.1.2
+
+这一版把数据面迁到官方 Typert Remote，并修掉非回环绑定的信任闸门回归；宿主生态升到 alpha.2 后继续跟到 rc.2，发布面补上类型声明、tarball 内容与 registry 元数据门禁。
+
+一类自动注入的判据也变了：**goal 轮次不再一律让路**。其余改动集中在客户端侧的可见性与发布/构建面，注入文案与默认配置未改。
+
+### Changed
+
+- **六条 `/_dsh/session-rescue/*` 端点改为官方 `sessionRescue` Remote**：客户端改走 source-mode descriptor + remote 读面；HTTP 路由、CSRF、`shared/lib/http`、`shared/lib/trust`、`connection.requestRejection` 与 webServer 子 fiber 一并删除。
+- **发布面补齐 `types/` 声明产物**：构建后把相对 `.ts` 说明符改写成 `.js`；`exports["."].types`、keywords/homepage/bugs/engines.node 与 `files` 同步。
+- **门禁补齐**：包根每份 `.md` 都进发布面；声明入口存在且不比源码旧、不含本机绝对路径与 pnpm 内容寻址目录；registry 与宿主发现面四道检查；产物体积预算。
+- **publish.yml 加固**：concurrency、action 钉 commit SHA、`--provenance`、`--publish-wait-timeout`、registry 预检，不再打印 token 长度。
 - **goal 轮次：让路判据从排期侧移到触发侧，driver 停机后由本包接管**。官方
   `goal-round-driver` 在 `agent/error`（以及 max-tokens、flush 失败、卸载）上只 `disarm`，
   其 README 明写「No abnormal auto-retry —— 瞬时 provider 与持久化失败要等人授权续跑」。

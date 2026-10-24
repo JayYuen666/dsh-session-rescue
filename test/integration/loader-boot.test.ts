@@ -2,7 +2,7 @@ import { afterEach, afterAll, beforeAll, describe, expect, it, vi } from "vitest
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildHost } from "../../build-host.mjs";
 
@@ -205,7 +205,11 @@ async function mount(
   await ctx.plugin(dependencies);
   await ctx.plugin(Loader);
   // 条目 id == settings 命名空间（隐式注册；见 cordis.patch.yml 的裸 id）。
-  await ctx.loader.create({ id: PLUGIN_ENTRY_ID, name: hostEntry, config });
+  await ctx.loader.create({
+    id: PLUGIN_ENTRY_ID,
+    name: pathToFileURL(hostEntry).href,
+    config,
+  });
   await ctx.loader.await();
 
   return {

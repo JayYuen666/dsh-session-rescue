@@ -1,0 +1,374 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+  # 每周跑一次。判据是 `pnpm install --frozen-lockfile`：这一跑重放的是**同一份锁定树**，
+  # 所以它抓不到宿主 @deepseek-ai/dsh 与工具链升级——那些要等 package.json 与 lockfile 一起
+  # 提交才会出现，而那次提交本身就会触发 push 门禁。定时这一跑能抓到的是锁外面那几样：
+  # runner 镜像与 setup-node 取到的 Node 补丁版、锁定版本在 registry 上还能不能装到、
+  # 以及依赖时间的测试行为。public 仓的标准 runner 免费。
+  # 注意：public 仓 60 天无活动时，GitHub 会自动停用定时工作流——这不需要额外维护，
+  # 但「上周没跑」不等于「上周全绿」，读结论时别把它当连续证据。
+  schedule:
+    - cron: "37 3 * * 1"
+# 同一分支上后到的提交取消前一个。发布用的是另一套口径（publish.yml 的
+# cancel-in-progress: false）——发布不能中途取消。
+# 组的键里带 event_name：周度漂移检测与 main 上的 push 都落在 refs/heads/main 上，
+# 只按 ref 分组会让后到的把先到的取消掉，而周度那一跑是「上游变了没有」的唯一信号，
+# 被取消等于这一周没量到。取消只给 push 与 pull_request：同一分支连推几次时，旧那一轮
+# 的五格矩阵没有任何人还要它的结论；其余事件各占一组，互不覆盖。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+# 门槛只需要读代码。写成白名单而不是省略：省略会拿到仓库默认权限，而默认可能是读写。
+permissions:
+  contents: read
+jobs:
+  gate:
+    name: gate (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      # fail-fast: false —— 一格红不该藏起其余格的结论。矩阵的价值在于「哪一档坏了」，
+      # 默认的快速失败会把它压成一个布尔值。
+      fail-fast: false
+      matrix:
+        # 本仓没有 win32 条件分支，所以 Windows 那一格跑的是同一份判定；它多验的只有检出
+        # 本身的行尾（见下），不是这组判定的额外覆盖。
+
+        # Windows 那一格有一件事只有它能验：检出本身的行尾。Git for Windows 的机器级
+        # core.autocrlf=true 会把工作树换成 CRLF，而 oxfmt 的 endOfLine 默认是 lf ——
+        # 于是 fmt:check 会把每个文件都判成未格式化（内容一字不差）。
+        # 本仓用 .gitattributes 钉住 eol=lf，这一格就是它的判据。
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22, 24]
+        exclude:
+          # 平台行为与 node 版本是两个正交维度：macOS 那一格只跑 node 24，
+          # 不让矩阵从 2 格变 4 格。全 9 仓的门禁在本机（darwin）上实跑通过，
+          # 所以这一格验的是真实 darwin 行为，不是重复劳动。
+          - os: macos-latest
+            node: 22
+    runs-on: ${{ matrix.os }}
+    # 官方对单 job 的上限是 6 小时，那是「系统允许」不是「应该允许」。不设这一行，
+    # 一个卡住的 install 或测试会烧满 6 小时 runner 分钟才被杀，而期间没有任何信号。
+    timeout-minutes: 35
+    # 定时触发的运行会把整个矩阵跑一遍。这里**不能**用 job 级 if 去裁矩阵：
+    # jobs.<job_id>.if 可用的上下文只有 github / needs / vars / inputs，没有 matrix，
+    # 写 matrix.os 会被判「Invalid workflow file」而让整个工作流加载失败。
+    # 想只跑主格只能放进 matrix 本身或拆成独立工作流；全矩阵每周跑一遍在 public 仓免费。
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
+          # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12
+      # registry-url 留空：本仓 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
+      # 配上 registry-url 会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成和开发者不一样。
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      # --frozen-lockfile：lockfile 与 package.json 不一致时直接失败，而不是在 CI 里静默改一份
+      # lockfile 后继续跑——那样绿的是「CI 现场解出来的那棵树」，不是仓库里这一份。
+      - run: pnpm install --frozen-lockfile
+      # check 里已串起 test:integration 与 test:property 两条腿，等于完整门禁；CI 不另起一遍，
+      # 否则两处清单会各自漂移，而红的时候分不清是哪一份口径在判。
+      - run: pnpm run check
+      # 门禁不该改写仓库内容。判据落在**跟踪文件**上：产物（host.js / client.js / types/）都在
+      # .gitignore 里，所以这里为「零」意味着构建没有回头动过被跟踪的字节。
+      # always()：install / check 先红时，最能解释「为什么红」的往往正是这一步列出的被改写文件，
+      # 跳过它等于把成因藏起来。下一步的上传以它的结论为条件（见那里的 if）：树既然已被判为
+      # 不合法，来自这棵树的覆盖率报告就不该落成 artifact——那份报告会留存 7 天，读的人未必知道
+      # 它出自哪一棵树。只把这一步排在前面对此没有作用，两个步骤都带 always()。
+      - name: 校验门禁没有改写被跟踪文件
+        id: tracked-tree
+        if: always() && matrix.os == 'ubuntu-latest'
+        run: |
+          # 命令替换会把 git 的清单吞掉，只剩一个退 1：日志里看不出是哪个文件被改写。
+          changed="$(git status --porcelain --untracked-files=no)"
+          if [ -n "$changed" ]; then
+            echo "::error::门禁跑完改写了被跟踪的文件："
+            printf '%s\n' "$changed"
+            exit 1
+          fi
+      # 覆盖率只在一次运行的日志里滚一遍就没了，翻起来费劲。落成产物之后，
+      # 「这次为什么掉了」可以直接把报告下下来看，而不必重跑一次。
+      # 只收 ubuntu 的 node 24 那一格：其余格各传一份只会得到同样的报告。
+      - name: 上传覆盖率报告
+        if: always() && steps.tracked-tree.outcome == 'success' && matrix.os == 'ubuntu-latest' && matrix.node == 24
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+          # 这里取 warn 而不是 error：这一步在 `if: always()` 下跑，而 coverage/
+          # 由 `pnpm run check` 里的 vitest 产出——typecheck / lint / build 任一先红时
+          # 目录根本不存在。此时判红会盖住真正的失败原因，还把后面的步骤一起中断。
+          # 缺产物本身就是「门禁没跑完」的信号，不需要这一步再报一次。
+          if-no-files-found: warn
+      # 运行页顶部的摘要：把结果留在这一页，不必点进每一步的日志里找。
+      # 它必须排在 job 的最后一步：job.status 在执行到那一步时才求值，后面若还有判定步骤，
+      # 后续步骤失败而摘要早已写成 success——那一行会成为唯一的结论面，且是错的。
+      - name: 运行摘要
+        if: always()
+        # 脚本体是 bash 写法（`{ …; } >> "$GITHUB_STEP_SUMMARY"`）；矩阵含 windows 格，
+        # 而 Windows runner 的默认 shell 是 pwsh，不显式声明的会解析失败。
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.os }} / node ${{ matrix.node }}"
+            echo ""
+            echo "- 门禁：${{ job.status }}"
+            echo '- 门禁命令：pnpm run check'
+          } >> "$GITHUB_STEP_SUMMARY"
+  # install-probe：门禁绿了不等于「装出去能用」。判据只能在消费侧的安装布局上，
+  # 所以这里打真包、进干净目录、真 import。
+  install-probe:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 只读。这个 job 在 PR 上也会跑，而 pnpm pack 会执行 PR 代码里的 prepack、npm install 会
+    # 执行依赖的安装脚本；给它任何写入权限，等于让 PR 里的代码决定用那权限做什么。
+    # 签来源证明需要的那两项权限留在下面的 attest job 里。
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
+          # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 12
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 只用 pnpm pack：`npm pack` 不解析 `catalog:`，会把未解析的协议原样写进 tarball 的
+      # package.json，随后任何 `npm install` 都在
+      # EUNSUPPORTEDPROTOCOL Unsupported URL Type "catalog:" 上失败——那不是产物缺陷，
+      # 是打包器选错了。publish.yml 走的是 `pnpm publish`。
+      - name: 打包（发布器与 CI 都用 pnpm）
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pkg
+          pnpm pack --pack-destination /tmp/pkg
+      # 交给 attest job。PR 的产物不签来源证明，传上去只是多一份没人认领的字节。
+      # 条件与 attest job 的准入判据逐字一致（含默认分支那一半）：留存的判据比下游宽时，
+      # 非默认分支的 workflow_dispatch 会传一份永远不会被签的字节，7 天后过期——不报错，
+      # 只是每次都在存储里多一份没人认领的产物。
+      - name: 留存 tarball 供 attest 使用
+        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-tarball
+          path: /tmp/pkg/**/*.tgz
+          retention-days: 7
+          if-no-files-found: error
+      - name: 干净目录安装 tarball（不带任何 flag）
+        run: |
+          set -euo pipefail
+          tarball="$(find /tmp/pkg -name '*.tgz' -print -quit)"
+          mkdir -p /tmp/probe && cd /tmp/probe
+          npm init -y >/dev/null
+          # 不传 --legacy-peer-deps：那正是本包 peer 面能不能被默认安装语义吃下去的判据。
+          npm install "$tarball" --no-audit --no-fund
+      - name: 装载探针（入口形状 + exports 逐条解引用 + bundle patch 随包）
+        run: |
+          # 单引号是刻意的：脚本体里有 JS 模板串，交给 shell 展开就坏了。
+          set -euo pipefail
+          cd /tmp/probe
+          node --input-type=module -e '
+          import { existsSync, readFileSync, statSync } from "node:fs";
+          import { createRequire } from "node:module";
+          import path from "node:path";
+          const NAME = "@jayyuen66/dsh-session-rescue";
+          const mod = await import(NAME);
+          // 入口形状两态都收：本仓用默认导出，而同级包里也有纯命名导出的。写死一种形态
+          // 会让另一种假红——判据是「apply 与 Config 能从入口拿到」，不是「挂在 default 上」。
+          const plugin = mod.default ?? mod;
+          if (typeof plugin?.apply !== "function") throw new Error("入口没有 cordis 插件形状：缺 apply");
+          if (plugin.Config === undefined) throw new Error("入口缺 Config：设置卡不会挂载");
+          const require = createRequire(import.meta.url);
+          const pkgDir = path.dirname(require.resolve(NAME + "/package.json"));
+          const manifest = require(NAME + "/package.json");
+          // exports 是消费方唯一能引用的面，所以判据取自装进来的这份 manifest 本身，
+          // 不在这里抄一份清单：抄来的清单与 exports 是两个真相，增删子路径时探针会
+          // 静默落后，而它正是「产物装出去还能不能被解析」的唯一判据。
+          //
+          // 按**目标形态**分档，不按名字分档。`.js` 还要再分两档——本包的 `./client`
+          // 是宿主按 bundle 载入的浏览器侧产物，顶层直接调 `window.__ModuleLoader__.load`，
+          // 在 Node 里 import 它必抛 ReferenceError: window is not defined。把它当 ESM
+          // 模块 import 不是「更严格的检查」，是把一条正确产物判成红的假红。所以判据
+          // 换成「它是合法的 ModuleLoader 外壳」：形态认得出来、id 是裸包名、文件非空。
+          // 不认得形态的 `.js` 走真 import —— 那是唯一能证「解析得到」的方式。
+          const esmSubs = [];
+          const clientSubs = [];
+          const jsonSubs = [];
+          const resourceSubs = [];
+          for (const [key, spec] of Object.entries(manifest.exports)) {
+            if (key === "." || key === "./package.json") continue;
+            const target = typeof spec === "string" ? spec : spec?.default;
+            if (typeof target !== "string") throw new Error(`${key} 的 exports 目标不是字符串`);
+            if (target.endsWith(".js")) {
+              const file = path.join(pkgDir, target);
+              if (!existsSync(file)) throw new Error(`${key} 的目标没随包发出：${target}`);
+              const text = readFileSync(file, "utf8");
+              if (/window\.__ModuleLoader__\.load\(/u.test(text)) clientSubs.push([key, target, text]);
+              else esmSubs.push([key, target]);
+            } else if (target.endsWith(".json")) jsonSubs.push([key, target]);
+            else if (target.endsWith(".yml")) resourceSubs.push([key, target]);
+            else throw new Error(`${key} 的目标形态不认识：${target}`);
+          }
+          if (esmSubs.length === 0 && clientSubs.length === 0) {
+            throw new Error("exports 里没有任何 .js 子路径，这一档探针等于没跑");
+          }
+          if (resourceSubs.length === 0) throw new Error("exports 里没有资源子路径，这一档探针等于没跑");
+          // 根入口由上面那次 import(NAME) 覆盖，但「拿到 apply」不等于「导出面非空」。
+          if (Object.keys(mod).length === 0) throw new Error("根入口没有任何导出");
+          for (const [key, target] of esmSubs) {
+            const sub = await import(NAME + key.slice(1));
+            if (sub === null || sub === undefined) throw new Error(`${key} 解引用后是空值（目标 ${target}）`);
+          }
+          for (const [key, target, text] of clientSubs) {
+            // 外壳里的 id 是宿主挂载这个 bundle 时用的键，必须是裸包名，否则层栈里
+            // 会出现一个谁也认不出的条目。
+            if (!text.includes(`id: "${NAME}"`)) throw new Error(`${key} 的 ModuleLoader 外壳没用裸包名当 id`);
+            if (!/factory:\s*\(require\)\s*=>/u.test(text)) throw new Error(`${key} 的 ModuleLoader 外壳缺 factory`);
+          }
+          for (const [key, target] of jsonSubs) {
+            const doc = (await import(NAME + key.slice(1), { with: { type: "json" } })).default;
+            if (doc === null || typeof doc !== "object") throw new Error(`${key} 不是 JSON 对象（目标 ${target}）`);
+          }
+          for (const [key, target] of resourceSubs) {
+            const file = path.join(pkgDir, target);
+            if (!existsSync(file)) throw new Error(`${key} 的目标没随包发出：${target}`);
+            if (statSync(file).size === 0) throw new Error(`${key} 的目标是空文件：${target}`);
+          }
+          // 类型面：exports["."].types 与 package.json 顶层的 types 都要在 tarball 里。
+          // 这里只判存在性——`.d.ts` 不是可 import 的模块，真判类型解析得在消费方
+          // 装一次 tsc，那是另一条更重的腿；本步要拦的是「files 漏了 types/」这一类。
+          const typesTargets = [manifest.types, manifest.exports["."]?.types].filter(
+            (t) => typeof t === "string",
+          );
+          if (typesTargets.length === 0) throw new Error("package.json 没声明 types，类型面无从验起");
+          for (const t of typesTargets) {
+            if (!existsSync(path.join(pkgDir, t))) throw new Error(`types 目标没随包发出：${t}`);
+          }
+          const patchRel = manifest.dsh?.bundle?.patch;
+          if (!patchRel) throw new Error("package.json 缺 dsh.bundle.patch：宿主不会把它 reconcile 进层栈");
+          const patch = path.join(pkgDir, patchRel);
+          if (!existsSync(patch)) throw new Error(`bundle patch 没随包发出：${patchRel}`);
+          const text = readFileSync(patch, "utf8");
+          // 守卫要判的是「有没有一条条目按裸包名引用本包」，不是「有没有 id 行」也不是
+          // 「全文出现过这个串」：注释里的 `# - id:` 会让前者过，而 `.../settings` 子路径
+          // 条目天然包含完整包名会让后者过——两种情况下主入口都丢了，条目却照样注册不上。
+          const patchLines = text.split(/\r?\n/u);
+          const entries = [];
+          for (let i = 0; i < patchLines.length - 1; i += 1) {
+            const idHit = /^[ \t]*-[ \t]*id:[ \t]*(\S+)[ \t]*$/u.exec(patchLines[i]);
+            if (idHit === null) continue;
+            const nameHit = /^[ \t]*name:[ \t]*(?:"([^"]*)"|(\S+))[ \t]*$/u.exec(patchLines[i + 1]);
+            if (nameHit === null) continue;
+            entries.push([idHit[1], nameHit[1] ?? nameHit[2]]);
+          }
+          if (entries.length === 0) throw new Error(`bundle patch 里没有 id/name 条目：${patchRel}`);
+          if (!entries.some(([, name]) => name === NAME)) throw new Error(`bundle patch 没有按裸包名引用 ${NAME} 的条目`);
+          console.log(
+            "装载通过：apply / Config / bundle patch 就位；exports 解引用",
+            esmSubs.length, "条 ESM +", clientSubs.length, "条客户端外壳 +", jsonSubs.length, "条 .json +",
+            resourceSubs.length, "条资源；types 目标", typesTargets.length, "条",
+          );
+          '
+
+  # 来源证明是给「这次运行打出来的这份产物」出的第三方可验凭据，不是多一步验证：
+  # 签在 PR 上，那张证明看起来属于本仓，指向的却是 PR 里 prepack 脚本产出的字节。
+  # 它也不能靠在同一 job 里给某一步加 if 来做——id-token 与 attestations 是 job 级权限，
+  # 挂上去就等于 PR 也拿到了写入能力，权限面不会因为某一步被跳过而收窄。所以拆成独立 job。
+  # 默认分支这一条挡的是 workflow_dispatch：手动触发可以在任意分支上跑，而在非默认分支上
+  # 签出来的证明同样「看起来属于本仓」、指向的却是一个没人合并的分支的字节。push 只有
+  # main 之外的分支被挡（on.push.branches 只列 main），所以合法的 push-to-main 不受影响。
+  attest:
+    needs: install-probe
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # 官方 README 要求三枚：id-token 换 Sigstore 身份，attestations 落证明，
+      # artifact-metadata 建产物存储记录。少最后一枚时证明仍能签，但存储记录那一步会失败。
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      # 不检出仓库：要签的是上面那一份产物的字节，与工作树无关。
+      - name: 取回 tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-tarball
+          path: /tmp/pkg
+      - name: 生成构建来源证明
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: /tmp/pkg/**/*.tgz
+
+  # 依赖审查：只在 PR 上跑。它比的是「这个 PR 引入的依赖」与 GitHub Advisory Database，
+  # 拦的是「今天能装、明天被披露有洞」那一类。push 上没有「引入」这个概念，所以不跑。
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
+          # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
+          persist-credentials: false
+      - name: 依赖审查
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # 高危即拦；低危只记录，否则一次上游披露会把所有仓的门都堵上。
+          fail-on-severity: high
+
+  # 工作流文件自身的静态检查。它抓的是「YAML 合法但 GitHub 不接受」那一类：
+  # 未知上下文、表达式语法、事件与输入拼写、shell 片段问题。job 级 if 里写 matrix
+  # 就属于这一类——YAML 解析得过，但整份工作流在 GitHub 上加载不起来。
+  #
+  # 只读权限：这个 job 只读工作流文件，不该有写仓库的能力。
+  # 覆盖本仓全部工作流（含 publish.yml）：只忽略 SC2016（理由见下），其余提示照常判红。
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
+          # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
+          persist-credentials: false
+      - name: 跑 actionlint
+        run: |
+          set -euo pipefail
+          # 版本与字节都钉住：release 的标签可以被上游移动，而这一个 job 是「工作流文件合不合法」
+          # 的唯一判据——判据本身可换，等于没有判据。校验和取自该 release 的
+          # actionlint_<版本>_checksums.txt，与本机下载到的产物逐字节核对过。
+          version=1.7.12
+          sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$sha256" /tmp/actionlint.tar.gz | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          # -ignore SC2016：探针脚本刻意用单引号包住 JS（脚本体里有 JS 模板串，
+          # 交给 shell 展开就坏了）。这是 shellcheck 的误报，而 shellcheck 指令在
+          # 跨行单引号构造上不被采信（已实测），所以只忽略这一条规则。
+          # shell 先把 glob 展开，再把文件清单交给它。
+          /tmp/actionlint -ignore 'SC2016' .github/workflows/*.yml

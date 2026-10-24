@@ -3,18 +3,20 @@
 // hasContent 多源合并（实时动作位在快照缺失时仍要显形）。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { decideDockState } from "../lib/dock-state.ts";
+import { decideDockState, parseStateBody } from "../lib/dock-state.ts";
 import type { DockActionSignals, RescueStateBody, RescueSessionState } from "../lib/dock-state.ts";
 
-/** 四条动作位全关。 */
+/** 全部信号位关。 */
 const NO_ACTIONS: DockActionSignals = {
   canStopReask: false,
   canEdit: false,
   canRetry: false,
   canContinue: false,
+  editing: false,
+  hostActionFailed: false,
 };
 
-/** 只亮一位动作位（其余全关）：hasContent 归属判定用。 */
+/** 只亮一位（其余全关）：hasContent 归属判定用。 */
 function oneAction(key: keyof DockActionSignals): DockActionSignals {
   return { ...NO_ACTIONS, [key]: true };
 }
@@ -86,6 +88,54 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
     );
     assert.equal(decision.pending, pending);
     assert.equal(decision.hasContent, true);
+  });
+
+  it("非有限数值不落进快照：NaN 计数归零、NaN 的 pending 整条丢弃", () => {
+    // `typeof === "number"` 放行 NaN/Infinity，而它们的下游是文案与倒计时（"NaN 次"、
+    // "NaN 秒"）。载荷来自网关交回的对象，不保证已经过 JSON 解析，所以守卫要在投影处。
+    const body = parseStateBody({
+      ok: true,
+      sessions: {
+        [sessionId]: {
+          count: Number.NaN,
+          lastFireAt: Number.POSITIVE_INFINITY,
+          pending: { turn: 1, kind: "resume", fireAt: 0, remainingMs: Number.NaN },
+        },
+      },
+    });
+    if (body?.sessions === undefined) {
+      throw new Error("parseStateBody 应当接受这份形状正常的载荷");
+    }
+    const projected = body.sessions[sessionId];
+    if (projected === undefined) {
+      throw new Error("该会话应当被保留在投影里");
+    }
+    assert.equal(projected.count, 0, "NaN 计数按「读不到」归零");
+    assert.equal(projected.lastFireAt, 0, "Infinity 同样归零");
+    assert.equal(projected.pending, null, "remainingMs 为 NaN 的 pending 必须整条丢掉");
+  });
+
+  it("sessions 形状损坏 → null（这一跳没读到有效快照），不是一份确信的空快照", () => {
+    // 「读坏了」与「读到了，只是没有会话」必须分开：后者是确信的空快照（开关行照常
+    // 显示、每个会话按没关过判 on），前者该让调用方退避。折成同一个值等于把读坏
+    // 显示成一切正常。
+    for (const broken of [[], "sessions", 42, true] as const) {
+      assert.equal(
+        parseStateBody({ ok: true, sessions: broken }),
+        null,
+        `sessions=${JSON.stringify(broken)} 是坏载荷，不能当成空快照`,
+      );
+    }
+  });
+
+  it("sessions 缺位 → 一份就绪但没有会话的快照（更早版本的载荷）", () => {
+    const body = parseStateBody({ ok: true });
+    assert.notEqual(body, null);
+    if (body === null) {
+      throw new Error("ok:true 的载荷应当解析成一份就绪快照");
+    }
+    assert.equal(body.ok, true);
+    assert.equal(body.sessions, undefined, "缺位不补一张空表：补了就无法与「真的没有会话」区分");
   });
 
   it("pending 为 null + 无实时动作 + 无开关行 → 区域无内容（组件仍常驻，仅容器隐藏）", () => {

@@ -131,8 +131,8 @@ describe("客户端读面（官方 Typert Remote）", () => {
   it("边界码器只收字符串字段，且丢掉未声明字段", () => {
     const session = strictOf("cancel");
     assert.deepEqual(session.create().parse({ sessionId: "s1", extra: 1 }), { sessionId: "s1" });
-    for (const bad of [null, [], {}, { sessionId: 42 }]) {
-      assert.throws(() => session.create().parse(bad), /string sessionId/u);
+    for (const bad of [null, [], {}, { sessionId: 42 }, { sessionId: "" }, { sessionId: "   " }]) {
+      assert.throws(() => session.create().parse(bad), /non-empty string sessionId/u);
     }
     assert.equal(strictOf("toggle"), session, "cancel 与 toggle 共用一枚码器");
 
@@ -147,8 +147,10 @@ describe("客户端读面（官方 Typert Remote）", () => {
       { provider: "p" },
       { provider: 1, preset: "normal" },
       { provider: "p", preset: 2 },
+      { provider: "", preset: "normal" },
+      { provider: "p", preset: "  " },
     ]) {
-      assert.throws(() => policy.create().parse(bad), /string provider and preset/u);
+      assert.throws(() => policy.create().parse(bad), /non-empty string provider and preset/u);
     }
   });
 
@@ -208,7 +210,7 @@ describe("客户端读面（官方 Typert Remote）", () => {
     await assert.rejects(reader.state(), /unavailable: gateway down/u);
   });
 
-  it("$mount 拒绝 → 原样抛给调用方，且不重试第二次挂载", async () => {
+  it("$mount 拒绝 → 原样抛给调用方，且失败不进缓存、下次调用重新挂载", async () => {
     let attempts = 0;
     const remote = {
       $mount: async (): Promise<unknown> => {
@@ -222,6 +224,33 @@ describe("客户端读面（官方 Typert Remote）", () => {
     assert.ok(reader !== undefined);
     await assert.rejects(reader.state(), /mount failed/u);
     await assert.rejects(reader.resume(), /mount failed/u);
-    assert.equal(attempts, 1, "已失败的挂载承诺被复用，不重复撞网关");
+    // 失败一旦被缓存，网关晚一步就绪就会把整张卡钉成永久「读不到」，只能刷新页面重来。
+    assert.equal(attempts, 2, "一次失败不该钉死后续所有调用：每次调用重新尝试挂载");
+  });
+
+  it("并发等待同一次挂载：清缓存只发生在第一个看到失败的那次", async () => {
+    let attempts = 0;
+    const remote = {
+      $mount: async (): Promise<unknown> => {
+        attempts += 1;
+        throw new Error("mount failed");
+      },
+    };
+    const reader = createRescueReader({
+      get: (name: string): unknown => (name === "remote" ? remote : undefined),
+    });
+    assert.ok(reader !== undefined);
+    // 两次调用在同一个 tick 里起跑，`mounted ??=` 让它们共用同一枚在途 Promise：
+    // 先跑到 catch 的那次负责清掉，后到的那次看到的是已经清空的 mounted。
+    const settled = await Promise.allSettled([reader.state(), reader.resume()]);
+    assert.deepEqual(
+      settled.map((entry) => entry.status),
+      ["rejected", "rejected"],
+    );
+    assert.equal(attempts, 1, "同一次在途挂载只问网关一遍");
+    // 清空只该发生一次：后到的那次若也无条件清一遍，会把这段时间里别人刚建好的
+    // 新挂载一并抹掉，等于两次失败互相踩。
+    await assert.rejects(reader.state(), /mount failed/u);
+    assert.equal(attempts, 2, "失败之后仍能重新挂载");
   });
 });

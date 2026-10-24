@@ -39,17 +39,26 @@ export interface RescueSessionState {
 /** 会话开关三态：on=开启 / off=已关闭 / unknown=快照未就绪（中性显示）。 */
 export type ToggleState = "on" | "off" | "unknown";
 
+/** 载荷里的数值守卫：只认有限数。NaN / ±Infinity 同样通不过 `typeof === "number"`，
+ *  而它们的下游是渲染文案，坏值会一直漂到用户眼前才被发现。 */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 /** 从原始 /state 载荷投影 pending（字段不全/类型不符 → null；防御纵深）。 */
 function parsePending(raw: unknown): RescuePending | null {
   if (!isRecord(raw)) {
     return null;
   }
   const { turn, kind, fireAt, remainingMs, chained, suspended } = raw;
+  // 有限性也要判：NaN 能通过 `typeof === "number"`，而它的下游是文案——倒计时会写出
+  // "NaN 秒"、计数会写出 "NaN 次"，那时已经离载荷很远了。JSON 里本没有 NaN，但本模块
+  // 拿的是宿主经网关交回的对象，不是解析后的 JSON 字符串。
   if (
-    typeof turn !== "number" ||
+    !isFiniteNumber(turn) ||
     typeof kind !== "string" ||
-    typeof fireAt !== "number" ||
-    typeof remainingMs !== "number"
+    !isFiniteNumber(fireAt) ||
+    !isFiniteNumber(remainingMs)
   ) {
     return null;
   }
@@ -68,23 +77,32 @@ function parsePending(raw: unknown): RescuePending | null {
 function parseSessionEntry(entry: Record<string, unknown>): RescueSessionState {
   const { count, lastFireAt, disabled, pending: pendingRaw } = entry;
   return {
-    count: typeof count === "number" ? count : 0,
-    lastFireAt: typeof lastFireAt === "number" ? lastFireAt : 0,
+    count: isFiniteNumber(count) ? count : 0,
+    lastFireAt: isFiniteNumber(lastFireAt) ? lastFireAt : 0,
     pending: pendingRaw === null ? null : parsePending(pendingRaw),
     ...(disabled === true ? { disabled: true } : {}),
   };
 }
 
 /** 解析 /state 载荷为本模块的快照类型：逐字段守卫投影，坏形状降级而非丢给断言。
- *  ok!==true 或 sessions 非对象 → 返回 null（调用方保持快照不动，并按「这一跳没读到
- *  有效快照」记连跳）。wire 是本包唯一的外部输入面，读法因此住在这里而不是渲染侧。 */
+ *  ok!==true → null。`sessions` **缺位**与**形状损坏**要分开判：
+ *    - 缺位 ⇒ `{ ok: true }`：宿主那一路 `state()` 总会带上 sessions，缺位只可能是更早
+ *      版本的载荷，当作「就绪但没有会话」；
+ *    - 存在但不是记录（数组/字符串/数字）⇒ null：这一跳读到的是坏载荷，调用方按
+ *      「没读到有效快照」退避。若也折成 `{ ok: true }`，dock 会把它读成一份**确信的**
+ *      空快照——开关行照常显示，每个会话都按「没关过」判成 on。把「读坏了」显示成
+ *      「读到了，一切正常」是最难查的那类失败。
+ *  wire 是本包唯一的外部输入面，读法因此住在这里而不是渲染侧。 */
 export function parseStateBody(parsed: Record<string, unknown>): RescueStateBody | null {
   if (fieldOf(parsed, "ok") !== true) {
     return null;
   }
   const sessions = fieldOf(parsed, "sessions");
-  if (!isRecord(sessions)) {
+  if (sessions === undefined) {
     return { ok: true };
+  }
+  if (!isRecord(sessions)) {
+    return null;
   }
   // 键来自服务端 JSON：`{}` 上 `"__proto__"` 命中的是原型 setter，那一行不进表、
   // 还把整张表的原型换掉。按条目构造就没有那个 setter。
@@ -98,13 +116,20 @@ export function parseStateBody(parsed: Record<string, unknown>): RescueStateBody
   return { ok: true, sessions: Object.fromEntries(entries) };
 }
 
-/** dock 四条动作按钮的可用性：全部由实时 view 推出，与轮询快照是否在场无关。 */
+/** dock 的渲染信号：动作位由实时 view 推出，另外两位是本组件的本地状态。
+ *  全部与轮询快照是否在场无关——它们一旦为真，容器就必须显形。 */
 export interface DockActionSignals {
   /** 「停止并重新提问」：会话在跑且有一条可复发的用户文本。 */
   readonly canStopReask: boolean;
   readonly canEdit: boolean;
   readonly canRetry: boolean;
   readonly canContinue: boolean;
+  /** 编辑态编辑器正在渲染（`dockEditing && target !== null`）。
+   *  单列而不是复用 `canEdit`：进入编辑后会话可能转成运行中，`canEdit` 随之变假，
+   *  而编辑器仍挂在树上——只按 `canEdit` 算会让容器藏起一个正在显示的编辑器。 */
+  readonly editing: boolean;
+  /** host 写通道（取消/开关）刚失败，错误行正在渲染。 */
+  readonly hostActionFailed: boolean;
 }
 
 export interface DockDecision {
@@ -125,7 +150,8 @@ export interface DockDecision {
  * 这是旧 hasContent 判定的纯函数化——竞态修复的关键语义：
  *  1. rescue === null（首帧/快照丢失）→ rescueKnown=false，开关行不显示、
  *     toggle=unknown（中性），但停止/编辑/重试/续写这些实时区块照常渲染；
- *  2. sessionState 缺该会话 → toggle=unknown（不再默认"开启"）；
+ *  2. 快照就绪但 sessionState 缺该会话 → toggle=on：host 快照只收调度过与被
+ *     toggle 关闭的会话，没记录就是没关过；只有快照整个未就绪才是 unknown；
  *  3. hasContent 只决定容器显隐，不卸载组件（本地状态安全）；
  *  4. hasContent 必须把动作行自己算进去：动作位的可用性只取决于实时 view，
  *     与快照在不在场无关。漏算的那一帧（快照空窗 + 无 pending +
@@ -140,10 +166,14 @@ export function decideDockState(
   sessionId: string,
 ): DockDecision {
   const rescueKnown = rescue !== null;
-  const sessionState = rescue?.sessions === undefined ? undefined : rescue.sessions[sessionId];
+  // 原型链防护：`sessions` 是 JSON 对象，但键来自 host 载荷里的 sessionId，
+  // 直接索引普通对象时 `"constructor"` / `"toString"` 会取到原型成员，
+  // 而不是「该会话没有记录」。只有自有键才算记录。
+  const sessions = rescue?.sessions;
+  const sessionState =
+    sessions !== undefined && Object.hasOwn(sessions, sessionId) ? sessions[sessionId] : undefined;
 
-  const pending =
-    sessionState !== undefined && sessionState.pending !== null ? sessionState.pending : null;
+  const pending = sessionState?.pending ?? null;
   // 开关三态语义：
   //   - 快照未就绪（首帧 rescue=null）→ unknown（中性"—"，行此时也不显示）；
   //   - 快照就绪但该会话无记录 → on：host 快照只含调度过/被 toggle 关闭的会话，
@@ -158,6 +188,15 @@ export function decideDockState(
 
   const showToggleRow = rescueKnown;
   const hasActions = actions.canEdit || actions.canRetry || actions.canContinue;
-  const hasContent = pending !== null || actions.canStopReask || hasActions || showToggleRow;
+  // 本地状态那两块必须算进来：它们渲染在同一个容器里，容器一藏，编辑器与失败提示
+  // 就一起消失。`hostActionFailed` 尤其要紧——那正是「用户按了取消但宿主拒绝了」的
+  // 那一刻，此时 pending 可能已经不在、动作位也可能全假，唯一要说的就是那行错误。
+  const hasContent =
+    pending !== null ||
+    actions.canStopReask ||
+    hasActions ||
+    actions.editing ||
+    actions.hostActionFailed ||
+    showToggleRow;
   return { rescueKnown, pending, toggle, showToggleRow, hasContent };
 }

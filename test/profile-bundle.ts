@@ -38,6 +38,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** 断言为 Record 并交回窄化后的值：assert.fail 走 never，isRecord 守卫完成收窄，
+ *  不需要 `as` 断言。 */
+function assertRecord(value: unknown, message: string): Record<string, unknown> {
+  if (!isRecord(value)) {
+    assert.fail(message);
+  }
+  return value;
+}
+
 /** 读一份 JSON 文件并投影为 Record（形状不对即抛，不静默兜成空对象）。 */
 function readJson(file: string): Record<string, unknown> {
   assert.ok(existsSync(file), `读不到 ${file}`);
@@ -55,18 +64,30 @@ function profileManifestPath(): string {
     : override;
 }
 
-/** profile 的 `dsh.profile.bundles` 清单；没装 profile 的环境（CI、消费者克隆）回 null。 */
+/** profile 的 `dsh.profile.bundles` 清单；没装 profile 的环境（CI、消费者克隆）回 null。
+ *  清单存在但结构损坏（缺 dsh/profile 段、bundles 非数组、混入非字符串项）是**另一回事**：
+ *  逐层显式断言并点名缺的是哪一段——回落成空表会把环境问题误报成「本包不在清单里」。 */
 function profileBundleListOrNull(): string[] | null {
   const file = profileManifestPath();
   if (!existsSync(file)) {
     return null;
   }
-  const dshSection = readJson(file)["dsh"];
-  const profileSection = isRecord(dshSection) ? dshSection["profile"] : {};
-  const listed = isRecord(profileSection) ? profileSection["bundles"] : [];
-  assert.ok(Array.isArray(listed), `${file} 的 dsh.profile.bundles 不是数组`);
+  const root = readJson(file);
+  const dshSection = assertRecord(root["dsh"], `${file} 缺 dsh 段或它不是对象：profile 清单损坏`);
+  const profileSection = assertRecord(
+    dshSection["profile"],
+    `${file} 缺 dsh.profile 段或它不是对象：profile 清单损坏`,
+  );
+  const listed = profileSection["bundles"];
+  assert.ok(Array.isArray(listed), `${file} 的 dsh.profile.bundles 不是数组：profile 清单损坏`);
   const items: unknown[] = listed;
-  return items.filter((item): item is string => typeof item === "string");
+  const nonStrings = items.filter((item) => typeof item !== "string");
+  assert.deepEqual(
+    nonStrings,
+    [],
+    `${file} 的 dsh.profile.bundles 含非字符串项（清单损坏，不静默丢弃）：${JSON.stringify(nonStrings).slice(0, 200)}`,
+  );
+  return items as string[];
 }
 
 /**
@@ -89,34 +110,111 @@ export function profileBundleName(): string {
   return name;
 }
 
+/** 剥 YAML 标量的行尾注释（` #` 起到行尾）：引号内的 `#` 不算注释。 */
+function stripYamlTrailingComment(raw: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < raw.length; i += 1) {
+    const char = raw[i] ?? "";
+    if (quote !== null) {
+      if (char === quote) {
+        quote = null;
+      }
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === "#" && i > 0 && /\s/u.test(raw[i - 1] ?? "")) {
+      return raw.slice(0, i).trim();
+    }
+  }
+  return raw.trim();
+}
+
 /**
  * cordis.patch.yml 里的裸条目 id —— 隐式 settings 命名空间与
  * `configForms.get(entryId)` 的入参都取它，与 bundle 包名是两回事。
+ * 收集**全部**裸 `- id:` 行并断言唯一：只取第一条的话，清单里多出第二条（或条目嵌进
+ * 别的键下）时会把无关条目当成命名空间，「隐式命名空间」这条证据失真却不报错。
+ * 引号与行尾注释都剥掉：`- id: "foo"  # 说明` 与 `- id: foo` 是同一条目。
  */
 function patchEntryId(): string {
   const yml = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
-  const line = yml.split("\n").find((item) => /^\s*-\s+id:\s*\S+\s*$/u.test(item)) ?? "";
-  const id = line.replace(/^\s*-\s+id:\s*/u, "").trim();
-  assert.notEqual(id, "", "cordis.patch.yml 里没有裸 `- id:` 条目");
-  return id;
+  const ids: string[] = [];
+  for (const line of yml.split("\n")) {
+    const match = /^\s*-\s+id:\s*(?<raw>.*?)\s*$/u.exec(line);
+    const raw = match?.groups?.["raw"] ?? "";
+    if (match !== null && raw !== "") {
+      const body = stripYamlTrailingComment(raw);
+      const unquoted = /^(?<quote>["'])(?<body>.*)\k<quote>$/u.exec(body)?.groups?.["body"] ?? body;
+      if (unquoted !== "") {
+        ids.push(unquoted);
+      }
+    }
+  }
+  assert.notEqual(ids.length, 0, "cordis.patch.yml 里没有裸 `- id:` 条目");
+  assert.equal(
+    ids.length,
+    1,
+    `cordis.patch.yml 里有 ${ids.length} 条裸 \`- id:\`（${ids.join(", ")}）：无法断定哪条是本包的 settings 命名空间`,
+  );
+  return ids[0] ?? "";
 }
 
-/** 产物里 `const <name> = "<字面量>"` 的值；取不到即抛（漂移针不许静默放过）。 */
+/** 产物里 `const <name> = "<字面量>"` 的值；取不到即抛（漂移针不许静默放过）。
+ *  标识符先进正则转义再拼模式（产物常量名可能带 `$`，不转义就成了行尾锚点），
+ *  并给 `const` 加词边界：注释或字符串里出现的同名片段不许命中。 */
 function constLiteral(text: string, name: string): string {
-  const pattern = new RegExp(`const ${name} = "(?<value>[^"]*)"`, "u");
+  const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  const pattern = new RegExp(`(?:^|[^A-Za-z0-9_$])const ${escaped}\\s*=\\s*"(?<value>[^"]*)"`, "u");
   const value = pattern.exec(text)?.groups?.["value"] ?? "";
   assert.notEqual(value, "", `产物里找不到 const ${name} = "…" 的字面量声明`);
   return value;
 }
 
-/** 取产物里 `plugins.bundle.config` 那次 register 的 key（字面量或常量标识符都解析）。 */
+/** 求文本中 `at` 所在对象字面量的跨度（前后向花括号配平、深度归零即边界）。
+ *  刻意不识别字符串里的花括号：注册 desc 的对象体没有含 `{`/`}` 的字符串，
+ *  若将来出现，跨度算错会让 key 读不到而判红（fail-loud），不会误报成别处的 key。 */
+function enclosingObjectSpan(text: string, at: number): [number, number] {
+  let start = at;
+  let depth = 0;
+  while (start > 0) {
+    const char = text[start - 1] ?? "";
+    if (char === "}") {
+      depth += 1;
+    } else if (char === "{") {
+      if (depth === 0) {
+        break;
+      }
+      depth -= 1;
+    }
+    start -= 1;
+  }
+  let end = at;
+  depth = 0;
+  while (end < text.length) {
+    const char = text[end] ?? "";
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      if (depth === 0) {
+        return [start, end + 1];
+      }
+      depth -= 1;
+    }
+    end += 1;
+  }
+  return [start, end];
+}
+
+/** 取产物里 `plugins.bundle.config` 那次 register 的 key（字面量或常量标识符都解析）。
+ *  搜索范围限定在本次 register 的对象字面量内：产物里别处也有裸 `key:`（槽位键、
+ *  React list key），全局抓会拿错；只往后看 500 字符又会在 key 写到 name 前面时漏看。 */
 function registeredSlotKey(text: string): string {
   const marker = text.indexOf('name: "plugins.bundle.config"');
   assert.notEqual(marker, -1, "产物里没有 plugins.bundle.config 的注册");
-  // 只看注册点之后的一小段：产物里别处也有 `key:`（React list key），不能全局抓。
-  const nearby = text.slice(marker, marker + 500);
+  const [start, end] = enclosingObjectSpan(text, marker);
   const groups =
-    /key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][A-Za-z0-9_$]*))/u.exec(nearby)?.groups ?? {};
+    /(?<![A-Za-z0-9_$])key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][A-Za-z0-9_$]*))/u.exec(
+      text.slice(start, end),
+    )?.groups ?? {};
   const literal = groups["literal"] ?? "";
   if (literal !== "") {
     return literal;
@@ -126,10 +224,40 @@ function registeredSlotKey(text: string): string {
   return constLiteral(text, ident);
 }
 
-/** 取产物里 `ctx.configForms.get(<入参>)` 实际用到的条目 id（同样兼容字面量/常量）。 */
+/** 从 openParen 处的 `(` 起做括号配平，交回括号内的实参文本（支持嵌套调用）。 */
+function balancedCallArg(text: string, openParen: number): string {
+  let depth = 0;
+  for (let i = openParen; i < text.length; i += 1) {
+    const char = text[i] ?? "";
+    if (char === "(") {
+      depth += 1;
+    } else if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(openParen + 1, i);
+      }
+    }
+  }
+  return "";
+}
+
+/** 取产物里 `ctx.configForms.get(<入参>)` 实际用到的条目 id（同样兼容字面量/常量）。
+ *  收集全部调用并断言唯一：产物里若出现多出的一次 get（另一处默认值读取），
+ *  只取第一处会把无关入参当成命名空间，断言结论整个错掉。 */
 function configFormsEntryId(text: string): string {
-  const arg = /configForms\.get\((?<arg>[^)]*)\)/u.exec(text)?.groups?.["arg"] ?? "";
-  assert.notEqual(arg, "", "产物里没有 ctx.configForms.get(…) 调用");
+  const args: string[] = [];
+  for (const match of text.matchAll(/configForms\.get\(/gu)) {
+    const raw = balancedCallArg(text, match.index + match[0].length - 1).trim();
+    if (raw !== "") {
+      args.push(raw);
+    }
+  }
+  assert.equal(
+    args.length,
+    1,
+    `产物里 configForms.get(…) 出现 ${args.length} 次（${args.join(", ")}）：无法断定哪次是卡片命名空间`,
+  );
+  const arg = args[0] ?? "";
   const inline = /^"(?<value>[^"]*)"$/u.exec(arg)?.groups?.["value"] ?? "";
   if (inline !== "") {
     return inline;
