@@ -1,0 +1,35 @@
+// test/log-templates.ts —— 本包算子可见日志的模板片段（由源码扫出，勿手改）。
+// 账本用它判「这条日志是不是源码里现存的模板」；新增 console.* 若没有对应片段，
+// 跑测时那条日志就会被判未认领（见 test/setup-logs.ts）。这里不读盘：规则面
+// （node/no-sync 等）不该为了测试脚手架开口子，且模板漂移应当是一次显式的改动。
+export const LOG_TEMPLATES: readonly string[] = [
+  "(rescue-opened turn) — bypassing cooldown, re-scheduling in",
+  ") — matcher may need extension:",
+  ") — pending preserved; will re-fire after connection/reset",
+  ") — preserved, waiting next reconnect",
+  "): failure looks rate-limit-ish but classified permanent (",
+  ": auto-",
+  ": chained failure at turn",
+  ": failed to send auto-",
+  ": provider Retry-After",
+  ": re-fire failed (",
+  ": suspended auto-",
+  ": turn",
+  "[session-rescue] lessonLoop pass failed:",
+  "[session-rescue] lessonLoop report failed:",
+  "[session-rescue] retry-policy mutate failed (",
+  "after reconnect:",
+  "dropped (disabled: plugin off or session toggle off)",
+  "is goal-driven — continue suppressed",
+  "is goal-driven — resume suppressed (goal-round-driver owns it)",
+  "message sent",
+  "message sent after reconnect",
+  "ms cap — delegating to llm-retry",
+  "ms exceeds",
+  "send failed (",
+  "skipped (",
+  "trigger at turn",
+  "vetoed at fire time (",
+  "vetoed at re-fire (",
+  "— auto-",
+];
