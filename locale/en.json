@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Session rescue",
+    "description": "Automatically resumes a turn after a transient provider failure, continues an output that was cut short, and finishes unclosed todos.",
+    "detail": "docs/DETAIL.md"
+  }
+}

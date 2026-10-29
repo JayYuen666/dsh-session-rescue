@@ -104,10 +104,10 @@ export interface RescueFacts {
 
 // 叶子 schema 先落成常量：`z.array(z.object({ turn: z.number().int() … }))` 三层嵌套
 // 会撞 unicorn/max-nested-calls，且这几个值域本来就该只有一个名字。
-const nullableInt = z.number().int().nullable();
-const nullableCount = z.number().int().nonnegative().nullable();
+const nullableInt = z.int().nullable();
+const nullableCount = z.int().nonnegative().nullable();
 const nullableString = z.string().nullable();
-const intKey = z.number().int();
+const intKey = z.int();
 
 const startRowSchema = z.object({
   turn: nullableInt,

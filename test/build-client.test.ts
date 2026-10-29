@@ -2,6 +2,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { readFileSync } from "node:fs";
+import { z } from "zod";
 import { buildClient } from "../build-client.mjs";
 import { clientFreshnessEvidence } from "./client-freshness.ts";
 import { slotKeyEvidence } from "./profile-bundle.ts";
@@ -177,6 +178,9 @@ describe("client.js 冒烟（stub ModuleLoader + stub react）", () => {
     const mod = loaded.factory((name: string) => {
       if (name === "react") {
         return fakeReact;
+      }
+      if (name === "zod") {
+        return { z };
       }
       throw new Error(`unexpected require in client factory: ${name}`);
     });

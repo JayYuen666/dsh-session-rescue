@@ -3,6 +3,28 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.1.5
+
+这一版把失败归因改到「本次请求实际走的线路」，投影挂载改成兼容新旧宿主协议的时序，
+设置卡与 dock 读面统一到 shared 组件和 zod。
+
+### Changed
+
+- **失败归因读实际请求线路**：`agent/request-error` 载荷里的 `provider` 记进每会话台账；`pass` 兑换与
+  未分类失败日志用它，取不到才回落初始化时的 `options.provider`。排期侧的排除名单改读
+  `model.current()`（旧宿主回落 `options`），不再拿初始化线路当下一步线路。
+- **投影挂载改双协议**：新增 `lib/projection-reader.ts`，`await register()` 之后按 disposer / handle
+  分流；读口只在注册成功后交出，卸载途中迟到的注册当场释放，注册失败与注册表缺席同档回退全量扫描。
+- **dock 状态解析改 zod**：信封 `ok` 必须为字面量 true，`sessions` 保留原对象再逐条投影；坏形状降级成
+  中性显示，原型链键不会被写进表。
+- **设置卡迁到 shared 组件与 zod**：时间输入按秒录入、按毫秒存，越界就地提示；保存条改整批拒绝文案。
+- **构建与依赖**：client 产物按宿主 `PLATFORM_MODULES` 外置 zod；devDependencies 与 catalog/overrides
+  抬到 `0.2.2-alpha.2`，`engines.dsh` 与 peer 保持 `^0.2.1-rc.3` 窗口，README 补滚动窗口说明。
+- **插件页展示面进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、`docs/DETAIL.zh.md`；
+  `exports` 增加 `./locale/en.json` 与 `./locale/zh.json` 两条显式子路径（install-probe 不解引用
+  通配键），`files` 收进 locale 与 docs。
+- **正则常量提取**：失败分类里的余额耗尽与限速措辞提取为命名常量，行为不变。
+
 ## 0.1.4
 
 ### Changed

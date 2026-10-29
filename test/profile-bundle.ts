@@ -87,7 +87,14 @@ function profileBundleListOrNull(): string[] | null {
     [],
     `${file} 的 dsh.profile.bundles 含非字符串项（清单损坏，不静默丢弃）：${JSON.stringify(nonStrings).slice(0, 200)}`,
   );
-  return items as string[];
+  const bundles = items as string[];
+  // 同名 profile 未必属于本工作面：`--from-default-profile web` 也会造一个只装官方基座的
+  // web profile。清单里一个 @jayyuen66 包都没有时按「没装 profile」处理——机器侧针只钉
+  // 在真装着本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
+  if (!bundles.some((name) => name.startsWith("@jayyuen66/"))) {
+    return null;
+  }
+  return bundles;
 }
 
 /**
@@ -212,7 +219,7 @@ function registeredSlotKey(text: string): string {
   assert.notEqual(marker, -1, "产物里没有 plugins.bundle.config 的注册");
   const [start, end] = enclosingObjectSpan(text, marker);
   const groups =
-    /(?<![A-Za-z0-9_$])key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][A-Za-z0-9_$]*))/u.exec(
+    /(?<![\w$])key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][\w$]*))/u.exec(
       text.slice(start, end),
     )?.groups ?? {};
   const literal = groups["literal"] ?? "";

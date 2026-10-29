@@ -385,6 +385,12 @@ function injectTextOf(agent: MockAgent): string {
   return call.content[0]?.text ?? "";
 }
 
+/** 排除名单用例共用的线路名（本文件多处引用，收常量）。 */
+const EXCLUDED_PROVIDER = "baidu-token-plan";
+
+/** 「会话还没记录过选择」：官方 `current()` 交回 undefined 的那一态。 */
+const NO_RECORDED_SELECTION: { readonly provider: string } | undefined = undefined;
+
 function makeAgent(
   id: string,
   provider?: string,
@@ -450,6 +456,14 @@ function runRescueInjectText(ctx: MockCtx, sessionId: string): string {
 /** 走真实 apply：第二参是**行 config**（组合包层/用户层行的 `config:`），0.1.7 由
  *  cordis 在装载期把它合进 schema 默认（显式 undefined 不覆盖，等价于旧的 compact()），
  *  再交 volatile 引用进来——这里复刻的就是那一步合并。 */
+/** 注册结果在 `await` 之后才交出读口（两版原始返回值都是函数，判别只能在 await 之后），
+ *  所以投影用例要等一拍再判定。 */
+const settle = (): Promise<unknown> => {
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  setImmediate(resolve);
+  return promise;
+};
+
 function applyPlugin(ctx: MockCtx, rowConfig?: Record<string, unknown>): void {
   // mock ctx 是 host 服务面的结构替身，与真实 cordis Context 仅接口上兼容。
   if (rowConfig !== undefined) {
@@ -583,11 +597,32 @@ describe("agent/error 闸门", () => {
   });
 
   it("provider 在 excludes → 不调度", () => {
-    ctx.scope.set({ providerExcludes: ["baidu-token-plan"] });
-    const agent = makeAgent("s1", "baidu-token-plan");
+    ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER] });
+    const agent = makeAgent("s1", EXCLUDED_PROVIDER);
     register(ctx, agent);
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
+  });
+
+  it("触发时读会话活线：它在 excludes ⇒ 到点也不发", () => {
+    ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER], resumeDelayMs: 7000 });
+    const agent = makeAgent("s1", "tokenrouter");
+    Object.assign(agent, { model: { current: () => ({ provider: EXCLUDED_PROVIDER }) } });
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1, "先按瞬时失败武装");
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 0, "到点读的是会话活线，它在排除名单里");
+  });
+
+  it("触发时会话没记录过选择 ⇒ 回落 options.provider，照常发", () => {
+    ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER], resumeDelayMs: 7000 });
+    const agent = makeAgent("s1", "tokenrouter");
+    Object.assign(agent, { model: { current: () => NO_RECORDED_SELECTION } });
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 1, "options 那条不在排除名单，照常续跑");
   });
 
   it("永久失败（上下文超长）→ 不调度", () => {
@@ -1478,6 +1513,125 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
   });
 });
 
+// ── 模型线路来源（计划四行矩阵）─────────────────────────────────────────
+// 排期读会话活线（current()），失败归因与 pass 兑换读「本次失败请求的实际线路」
+// （agent/request-error 的 provider）。两侧分开，才不会被旧 options 或下一步待选吞掉。
+describe("模型线路来源：排期、归因与 pass 各用各的来源", () => {
+  let ctx: MockCtx;
+  const lessons: Record<string, unknown>[] = [];
+  const passes: Record<string, unknown>[] = [];
+  beforeEach(() => {
+    ctx = createMockCtx();
+    lessons.length = 0;
+    passes.length = 0;
+    ctx.setService("lessonLoop", {
+      report: (input: Record<string, unknown>): void => {
+        lessons.push(input);
+      },
+      pass: (input: Record<string, unknown>): { ok: boolean } => {
+        passes.push(input);
+        return { ok: true };
+      },
+    });
+    applyPlugin(ctx);
+  });
+
+  /** 记一次「某条线路的请求失败了」：窗口内只有这条事件带得出实际线路。 */
+  async function failRequest(agent: MockAgent, provider: string): Promise<void> {
+    const handler = ctx.handlers["agent/request-error"] as unknown as (
+      payload: unknown,
+      next: () => Promise<unknown>,
+    ) => Promise<unknown>;
+    assert.ok(typeof handler === "function", "agent/request-error 监听器已注册");
+    await handler(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider,
+        failure: { code: "CONTEXT_WINDOW_EXCEEDED", message: "too long" },
+        retryPolicy: undefined,
+        signal: undefined,
+      },
+      nextNoop,
+    );
+  }
+
+  it("行1：options=A、活线 B 在排除表、请求 A 失败 → 排期按 B 阻断，归因仍是 A", async () => {
+    ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER], resumeDelayMs: 7000 });
+    const agent = makeAgent("mx1", "tokenrouter");
+    Object.assign(agent, { model: { current: () => ({ provider: EXCLUDED_PROVIDER }) } });
+    register(ctx, agent);
+    await failRequest(agent, "tokenrouter");
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1, "A 不在排除表，先按瞬时失败武装");
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 0, "到点读活线 B，它在排除表");
+    assert.equal(lessons.length, 1);
+    assert.match(String(lessons[0]?.["signature"]), /^tokenrouter\b/u, "失败归因是请求实际走的 A");
+  });
+
+  it("行2：options=A 在排除表、活线 B 不在、请求 B 失败 → 不被旧 options 阻断", async () => {
+    ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER], resumeDelayMs: 7000 });
+    const agent = makeAgent("mx2", EXCLUDED_PROVIDER);
+    Object.assign(agent, { model: { current: () => ({ provider: "tokenrouter" }) } });
+    register(ctx, agent);
+    await failRequest(agent, "tokenrouter");
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1, "归因按请求线路 B 判，不因旧 options 的 A 吞掉");
+    ctx.tick();
+    assert.equal(agent.followupCalls.length, 1, "B 不在排除表，照常续跑");
+    assert.match(String(lessons[0]?.["signature"]), /^tokenrouter\b/u);
+  });
+
+  it("行3：失败记在 B、活线已是待选 C → 成功只兑 B 的记录", async () => {
+    ctx.scope.set({ resumeDelayMs: 7000 });
+    const agent = makeAgent("mx3", "alpha");
+    Object.assign(agent, { model: { current: () => ({ provider: "pending-c" }) } });
+    register(ctx, agent);
+    await failRequest(agent, "beta");
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(lessons.length, 1);
+    replaceAllEvents(agent, evTurnEnd(2, "completed"));
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(passes.length, 1, "成功回合兑一条 pass");
+    assert.match(String(passes[0]?.["signature"]), /^beta\b/u, "兑的是失败请求 B，不是待选 C");
+  });
+
+  it("行4：请求 B 正在重试 → 重试只按捕获的 B，不读活线选择", async () => {
+    const agent = makeAgent("mx4", "alpha");
+    let reads = 0;
+    Object.assign(agent, {
+      model: {
+        current: () => {
+          reads += 1;
+          return { provider: "switched" };
+        },
+      },
+    });
+    register(ctx, agent);
+    const handler = ctx.handlers["agent/request-error"] as unknown as (
+      payload: unknown,
+      next: () => Promise<unknown>,
+    ) => Promise<unknown>;
+    const action = handler(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider: "beta",
+        failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
+        retryPolicy: undefined,
+        signal: undefined,
+      },
+      nextNoop,
+    );
+    ctx.tick();
+    assert.deepEqual(await action, { kind: "retry" });
+    assert.equal(reads, 0, "重试途中不读活线，没有换到新选择的窗口");
+  });
+});
+
 describe("max-tokens 自动继续（agent/status→idle 检测）", () => {
   let ctx: MockCtx;
   beforeEach(() => {
@@ -2337,13 +2491,14 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.deepEqual(attach(ctx).registered, [rescueFactsProjection]);
   });
 
-  it("卸载注入子 fiber → 交回官方 disposer 并停掉投影读", () => {
+  it("卸载注入子 fiber → 交回官方 disposer 并停掉投影读", async () => {
     // 官方把注册描述成 effect：`register` 交回的 disposer 随调用 fiber 回收
     // （session-projection/lib/types/index.d.ts:150-159）。disposer 不接、读口不清，
     // fiber 卸载后读口仍指向一个已注销的键。
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const projections = attach(ctx);
+    await settle();
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(projections.reads.length, 1, "装载期内经投影读，而不是全量扫描");
@@ -2356,12 +2511,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.equal(ctx.timers.length, timersBefore + 1, "读口清空后由回退扫描兜底，功能不塌");
   });
 
-  it("completed + 本回合未闭合清单 → 投影路径补跑，且不碰 snapshotEvents", () => {
+  it("completed + 本回合未闭合清单 → 投影路径补跑，且不碰 snapshotEvents", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
     const scans = countScans(agent);
     const projections = attach(ctx);
+    await settle();
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     assert.equal(ctx.timers[0]?.ms, 5000, "unfinished 延迟与回退路径同值");
@@ -2374,12 +2530,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.equal(agent.followupCalls.length, 1, "注入照常发出");
   });
 
-  it("goal 轮次驱动的失败回合：触发侧判停机位，且判定全在投影上（不读全量日志）", () => {
+  it("goal 轮次驱动的失败回合：触发侧判停机位，且判定全在投影上（不读全量日志）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(5, "goal"));
     const scans = countScans(agent);
     attach(ctx);
+    await settle();
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
     // 排期侧不再判 goal：让路/接管要到触发侧读 round driver 自己的停机位。
     assert.equal(ctx.timers.length, 1, "排期发生");
@@ -2388,13 +2545,14 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.equal(scans.value, 0, "opener 与 newer-turn 两位判定都读投影");
   });
 
-  it("goal 轮 + 投影路径 + driver 已停机 → 接管注入", () => {
+  it("goal 轮 + 投影路径 + driver 已停机 → 接管注入", async () => {
     const ctx = createMockCtx();
     ctx.setService("goals", { get: () => ({ phase: "active", activation: "disarmed" }) });
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(5, "goal"));
     const scans = countScans(agent);
     attach(ctx);
+    await settle();
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
     ctx.tick();
     assert.equal(agent.followupCalls.length, 1, "round driver 只 disarm 不重试 ⇒ 本包接管");
@@ -2410,12 +2568,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("rescue 开出的回合再失败 → 投影路径仍走链式例外（60s 跨出限流窗口）", () => {
+  it("rescue 开出的回合再失败 → 投影路径仍走链式例外（60s 跨出限流窗口）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(2, "user"));
     const scans = countScans(agent);
     attach(ctx);
+    await settle();
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     ctx.tick();
     openRescueTurn(agent, 3);
@@ -2425,12 +2584,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.equal(scans.value, 0);
   });
 
-  it("失败轮之后开出新轮 → 投影路径在触发前否决（newer-turn veto）", () => {
+  it("失败轮之后开出新轮 → 投影路径在触发前否决（newer-turn veto）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(1, "user"));
     const scans = countScans(agent);
     attach(ctx);
+    await settle();
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     (agent.session.evs ?? []).push({ type: TURN_START_EVENT, seq: 9, time: 9, data: { turn: 2 } });
     ctx.tick();

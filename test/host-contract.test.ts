@@ -417,6 +417,14 @@ function errorPayload(agent: MockAgent, turn: number, failure: unknown): Record<
   return { agent, turn, step: 1, error: failure === null ? null : { failure } };
 }
 
+/** 注册结果在 `await` 之后才交出读口（两版原始返回值都是函数，判别只能在 await 之后），
+ *  所以投影用例要等一拍再判定。 */
+const settle = (): Promise<unknown> => {
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  setImmediate(resolve);
+  return promise;
+};
+
 function applyPlugin(ctx: MockCtx): void {
   // 0.1.7：apply 的第二参是 volatile 引用（引用不变、值可变），故按 ctx 的活值表
   // 现读——用例之后 `ctx.scope.set(...)` 依然能被插件读到（等价于设置卡写了一次）。
@@ -2307,7 +2315,7 @@ describe("宿主交回形状的真实性", () => {
     assert.equal(ctx.mutations.length, 1);
   });
 
-  it("投影注册表 register 抛错时降级为扫描，而不是把整条 fiber 炸掉", () => {
+  it("投影注册表 register 抛错时降级为扫描，而不是把整条 fiber 炸掉", async () => {
     // 真注册表在同键不同 stateVersion 时直接抛（session-projection/src/index.ts:281-285）。
     // 抛在 inject 回调里等于整个插件不再工作，与「注册表缺席就退回扫描」的既定
     // 降级承诺相反。
@@ -2322,6 +2330,8 @@ describe("宿主交回形状的真实性", () => {
       },
     });
     applyPlugin(ctx);
+    // 注册失败现在是异步到达的（注册本身要 await），等一拍再读日志。
+    await settle();
     assert.match(loggedText(), /sessionProjections register failed, falling back to log scan/u);
     // 键没注册成功 ⇒ 读口压根不能装上：装了它每次判定都白走一趟「读不到→再回退扫描」。
     const agent = register(ctx, makeAgent("proj-throw", KNOWN_PROVIDER));
@@ -2334,6 +2344,86 @@ describe("宿主交回形状的真实性", () => {
     ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     ctx.disposeEffects();
+  });
+
+  it("新协议：等待后按 handle 读，已弃用的 stateOf 一次都不碰", async () => {
+    const ctx = createCtx();
+    let handleReads = 0;
+    let legacyReads = 0;
+    let disposed = 0;
+    ctx.setService("sessionProjections", {
+      register: async () => ({
+        stateOf: () => {
+          handleReads += 1;
+        },
+        dispose: async () => {
+          disposed += 1;
+        },
+      }),
+      stateOf: () => {
+        legacyReads += 1;
+      },
+    });
+    applyPlugin(ctx);
+    await settle();
+    const agent = register(ctx, makeAgent("proj-handle", KNOWN_PROVIDER));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    assert.equal(handleReads, 1, "读数走 handle.stateOf");
+    assert.equal(legacyReads, 0, "新版宿主上不碰已弃用的 stateOf");
+    ctx.disposeEffects();
+    assert.equal(disposed, 1, "卸载释放这一次注册");
+  });
+
+  it.each([
+    ["不是对象", 42],
+    ["缺 stateOf", {}],
+    ["缺 dispose", { stateOf: (): number => 0 }],
+  ] as const)("注册交回第三种形状（%s）⇒ 不交出读口，回退扫描", async (_label, raw) => {
+    const ctx = createCtx();
+    let legacyReads = 0;
+    ctx.setService("sessionProjections", {
+      register: () => raw,
+      stateOf: () => {
+        legacyReads += 1;
+      },
+    });
+    applyPlugin(ctx);
+    await settle();
+    const agent = register(ctx, makeAgent("proj-weird", KNOWN_PROVIDER));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    assert.equal(legacyReads, 0, "失效读口一条都不许装上");
+    assert.equal(ctx.timers.length, 1, "回退扫描照常续跑");
+    ctx.disposeEffects();
+  });
+
+  it("等待期间卸载：注册迟到也不交出读口，当场释放", async () => {
+    const ctx = createCtx();
+    let disposed = 0;
+    const gate = Promise.withResolvers<boolean>();
+    ctx.setService("sessionProjections", {
+      register: async () => {
+        await gate.promise;
+        return {
+          stateOf: (): number => 0,
+          dispose: async () => {
+            disposed += 1;
+          },
+        };
+      },
+      stateOf: (): number => 0,
+    });
+    applyPlugin(ctx);
+    await settle();
+    ctx.disposeEffects();
+    gate.resolve(true);
+    await settle();
+    assert.equal(disposed, 1, "迟到的那次注册必须当场释放");
   });
 
   it("toggle 台账有界：超过上限时只淘汰已不存在的会话", () => {

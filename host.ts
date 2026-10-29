@@ -83,14 +83,14 @@ import type { TurnReview } from "./lib/turn-review.ts";
 import {
   asFacts,
   hasNewerTurn,
-  rescueFactsProjection,
   reviewFromFacts,
   scanNewerTurn,
   scanOpenerKind,
   turnOpenerKind,
-  RESCUE_FACTS_KEY,
 } from "./lib/turn-facts.ts";
 import type { RescueFacts } from "./lib/turn-facts.ts";
+import { mountFactsReader } from "./lib/projection-reader.ts";
+import type { ProjectionsRegistry } from "./lib/projection-reader.ts";
 import { MESSAGES } from "./lib/messages.ts";
 import type { SessionRescueMessages } from "./lib/messages.ts";
 // host 侧文案语言跟官方 locale 插件的偏好同源：跨命名空间只有 `settings.describe()`
@@ -288,6 +288,8 @@ export type SessionEventsLike = Pick<Session, "id"> &
  */
 export interface RescueAgent extends Pick<Agent, "id" | "followup"> {
   options?: Agent["options"] | null;
+  /** 模型选择的活面。旧宿主运行时没有这一位（读成 `undefined`），故按可选收。 */
+  model?: Agent["model"] | null;
   status?: Agent["status"];
   inbox?: RescueInbox | null;
   session: SessionEventsLike;
@@ -437,6 +439,26 @@ export type RequestErrorAction = { kind: "retry" } | undefined;
  * （口径与 danger-guard/host.ts 的 `GuardExecution` 一致：借键名、换值域）。
  * `roots()` 返回按 `readonly` 收：本包只遍历不改写。
  */
+
+/**
+ * agent **下一步**要走哪条线：新版按 `model.current()`（含会话里已记录的待切换选择），
+ * 旧版没有这一位，回落到初始化时的 `options.provider`。
+ *
+ * `current()` 交回 undefined 是「这次会话还没记录过选择」，不是「读失败」——官方
+ * `AgentModel` 的文档写明 options 就是「直到记录下选择或请求为止的活线回落」。
+ *
+ * ⚠ 只用于**排期准入**这一类「接下来要动哪条线」的判断。失败归因（这次请求实际走了什么）
+ * 不能读它：`current()` 可能已含下一步的待切换选择。
+ */
+function currentProviderOf(agent: RescueAgent): string | undefined {
+  const selected = agent.model?.current()?.provider;
+  if (typeof selected === "string") {
+    return selected;
+  }
+  const fallback = agent.options?.provider;
+  return typeof fallback === "string" ? fallback : undefined;
+}
+
 export interface RescueAgents {
   roots: () => readonly RescueAgent[];
   get: (id: Parameters<AgentRegistry["get"]>[0]) => RescueAgent | undefined;
@@ -588,17 +610,8 @@ function readEvents(session: SessionEventsLike | undefined): readonly unknown[] 
   return Array.isArray(raw) ? raw : [];
 }
 
-/**
- * `ctx.sessionProjections` 的本包读面：官方 `SessionProjectionRegistry` 的成员投影
- * （installed lib/types/index.d.ts：host-only `register(definition)` 第二重载 :159、
- * `stateOf(session, key)` :167-175）。`stateOf` 的第一参官方钉名义类 `Session`，本包的
- * 会话替身永远满足不了 ⇒ 这里按 `unknown` 收，返回值再经 `asFacts` 过一次 stateSchema
- * （wukil-plugins/wukil-dev-tools.ts 的 ProjectionsRegistry 同形）。
- */
-export interface ProjectionsRegistry {
-  register: (definition: typeof rescueFactsProjection) => () => void;
-  stateOf: (session: unknown, key: typeof RESCUE_FACTS_KEY) => unknown;
-}
+/** 投影注册表的读面定义在 lib/projection-reader.ts（双协议分流同在那个文件）。 */
+export type { ProjectionsRegistry } from "./lib/projection-reader.ts";
 
 /** 投影态读口（`runtime.facts` 的装箱形状）：注册表在位时由 inject 回调装上。 */
 type FactsReader = (session: SessionEventsLike) => unknown;
@@ -769,7 +782,7 @@ function preFireCheck(
   // 排除名单同样现读：与 enabled 同一道窗口（失败到 fire 之间隔着 delay）。用户在
   // 窗口里把这个 provider 加进 `providerExcludes`，意思就是「这条线路别再自动动它」；
   // 只在排期侧判的话，已武装的那一发照样落进模型。
-  const provider = agent.options ? agent.options.provider : undefined;
+  const provider = currentProviderOf(agent);
   if (typeof provider === "string" && cfg.providerExcludes.includes(provider)) {
     return { ready: false, reason: "provider excluded" };
   }
@@ -835,6 +848,10 @@ interface ApplyRuntime {
   scheduler: ResumeScheduler;
   disabledSessions: Set<string>;
   requestRetryCounts: Map<string, number>;
+  /** 每个会话最近一次**失败请求**实际走的线路（来自 `agent/request-error` 的 `provider`）。
+   *  失败归因与 pass 兑换读它，不读 `options`（初始化线路），也不再读 `current()`
+   *  （后者可能已含下一步待切换的选择）。会话销毁时清。 */
+  requestProviders: Map<string, string>;
   /** 在途的请求级退避 sleep 释放器集合：这些定时器不属于 scheduler，
    *  disposeAll() 管不到它们，插件卸载必须逐个回收，否则卸载后还会唤醒注入。 */
   backoffs: Set<() => void>;
@@ -1034,10 +1051,21 @@ export function transientSignatureOf(provider: string | undefined, reason: strin
   return `${provider ?? "unknown"} ${reason}`.trim();
 }
 
+/** 最近一次失败请求的实际线路：只有 `agent/request-error` 带得出来。 */
+function requestProviderOf(runtime: ApplyRuntime, agent: RescueAgent): string | undefined {
+  return runtime.requestProviders.get(agent.session.id);
+}
+
+/** 失败归因的线路：请求级事件优先，没有时才回落到初始化线路。
+ *  不读 `current()`——它是排期判据，可能已含下一步待切换的选择。 */
+function failureProviderOf(runtime: ApplyRuntime, agent: RescueAgent): string | undefined {
+  return requestProviderOf(runtime, agent) ?? agent.options?.provider;
+}
+
 /** provider 归一键（缺失 → "unknown"）：pass 只在该会话**同一 provider** 的后续
  *  请求真跑成功时才兑，比对的键与签名首段同源。 */
-function providerKeyOf(agent: RescueAgent): string {
-  return agent.options?.provider ?? "unknown";
+function providerKeyOf(runtime: ApplyRuntime, agent: RescueAgent): string {
+  return failureProviderOf(runtime, agent) ?? "unknown";
 }
 
 /** 记下一次瞬时失败（待兑 pass）。同 (会话, 签名) 已在册则不重复记账——本地台账
@@ -1104,7 +1132,7 @@ function reportPass(runtime: ApplyRuntime, input: LessonPassInput): void {
  *  宁可少一条观测也不能给出"没验证过的已遵守"。 */
 function emitTransientPasses(runtime: ApplyRuntime, agent: RescueAgent): void {
   const sessionId = agent.session.id;
-  const provider = providerKeyOf(agent);
+  const provider = providerKeyOf(runtime, agent);
   const due = runtime.transientPasses.value.filter(
     (x) => x.sessionId === sessionId && x.provider === provider,
   );
@@ -1266,6 +1294,12 @@ async function handleRequestError(
   const cfg = settingsOf(runtime.config);
   if (!cfg.enabled) {
     return next();
+  }
+  // 这条事件是窗口内**唯一**带「本次请求实际线路」的宿主载荷（`agent/error` 与
+  // `agent/status` 都没有）。先记账再判重试：不重试的失败同样要能被归因。
+  const requestProvider = payload.provider;
+  if (typeof requestProvider === "string" && requestProvider.length > 0) {
+    runtime.requestProviders.set(agent.session.id, requestProvider);
   }
   const { failure } = payload;
   if (failure === null || failure === undefined) {
@@ -1537,7 +1571,7 @@ function observeUnclassifiedFailure(
   verdictReason: string,
   turn: number,
 ): void {
-  const provider = agent.options ? agent.options.provider : undefined;
+  const provider = failureProviderOf(runtime, agent);
   console.error(
     `[session-rescue] ${agent.id} (${provider ?? "?"}): failure looks rate-limit-ish but classified permanent (${verdictReason}) — matcher may need extension: ${stringifyValue(failure.message).slice(0, 160)}`,
   );
@@ -1560,7 +1594,7 @@ function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): vo
   if (!cfg.enabled) {
     return;
   }
-  const provider = agent.options ? agent.options.provider : undefined;
+  const provider = failureProviderOf(runtime, agent);
   if (typeof provider === "string" && cfg.providerExcludes.includes(provider)) {
     return;
   }
@@ -1609,7 +1643,7 @@ function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): vo
   // 只是它们到不了成功信号（兑不出去，随会话 dispose 撤销）。
   rememberTransientFailure(runtime, {
     sessionId: agent.session.id,
-    provider: providerKeyOf(agent),
+    provider: providerKeyOf(runtime, agent),
     signature,
     cwd: agent.session.header?.cwd,
   });
@@ -2217,6 +2251,8 @@ function apply(ctx: Context, config: PluginConfig): void {
   const disabledSessions = new Set<string>();
   // 每会话开关（运行期内存；重启回到全局默认；agent/disposed 时随会话释放）
   const requestRetryCounts = new Map<string, number>();
+  /** 会话 → 最近一次失败请求的线路（见 ApplyRuntime.requestProviders）。 */
+  const requestProviders = new Map<string, string>();
   // locale 偏好读一次即缓存：跨命名空间读只剩 describe() 一条路，而它对每个活跃条目
   // 都要 schema.toJSON() + JSON.stringify 算 revision 再投影 value/base/user 三份。
   // 失效链：写配置 → app-boot/config-reload → SettingsForms invalidate() → 微任务里
@@ -2234,6 +2270,7 @@ function apply(ctx: Context, config: PluginConfig): void {
     scheduler,
     disabledSessions,
     requestRetryCounts,
+    requestProviders,
     backoffs: new Set<() => void>(),
     msgSeq: { value: 0 },
     suspendedSnapshots: { value: [] },
@@ -2260,33 +2297,43 @@ function apply(ctx: Context, config: PluginConfig): void {
   // undefined ⇒ 三处判定沿用回退扫描（wukil-plugins 的 rules 判重同策）。
   // 不写进插件级 inject：那会让没装投影包的 profile 整个插件不再激活。
   svc.inject(["sessionProjections"], (child) => {
-    // 注册是 effect（disposer 随本注入子 fiber 回收，见官方 SessionProjectionRegistry 注记），
-    // 且必须**回收读口**：只注册不释放的话，键会随 fiber 活着，而 fiber 卸载后
-    // `stateOf` 永远回 undefined，读口留着等于把「已失效的投影」当成有效状态用。
+    const registry = child.sessionProjections;
+    // 注册是 effect 的语义不变：注册与释放都随这条注入子 fiber 回收。差别只在**时序**——
+    // 新宿主的 `register()` 要 await 之后才有 handle，所以注册结果迟到一步到达：
+    //   · 卸载先到、注册后到：`active` 已经是 false，读口不交出，注册当场释放；
+    //   · 注册先到：读口装上，随卸载撤下。
+    // 读口只在注册**成功之后**才装上；失败与注册表缺席同档——三类判定沿用回退扫描。
     child.effect(() => {
-      const registry = child.sessionProjections;
-      // register 在真注册表里是会抛的（session-projection/src/index.ts:281-285：
-      // 同键不同 stateVersion 直接抛），而抛在 inject 回调里等于整条 fiber 报废——
-      // 与本文件「注册表缺席就退回扫描」的既定降级承诺相反。
-      // 读口也只在注册成功时装上：键没注册成功时留着读口，等于每次判定都
-      // 走一趟「读不到 → 再回退扫描」的冤枉路。
-      try {
-        const disposeUnit = registry.register(rescueFactsProjection);
-        runtime.facts.value = (session) => registry.stateOf(session, RESCUE_FACTS_KEY);
-        return () => {
-          runtime.facts.value = undefined;
-          disposeUnit();
-        };
-      } catch (error: unknown) {
-        console.warn(
-          `[session-rescue] sessionProjections register failed, falling back to log scan: ${errorText(error)}`,
-        );
-        // cordis 的 effect(execute, label) 要求恒交回一个释放器，注册失败也要给一条
-        // （内容就是「读口从没装过」的清理，与成功支同形）。
-        return () => {
-          runtime.facts.value = undefined;
-        };
-      }
+      // 两个跨 await 的可变位收在一个对象里：`let` 会被类型面窄成字面量（`active` 永远是
+      // `true`、`release` 永远已赋值），于是"等待期间被卸载"那条分支会被判成恒假而删掉。
+      const mount: { active: boolean; release: (() => void) | undefined } = {
+        active: true,
+        release: undefined,
+      };
+      void (async () => {
+        try {
+          mount.release = await mountFactsReader(registry, (reader) => {
+            if (mount.active) {
+              runtime.facts.value = reader;
+            }
+          });
+        } catch (error: unknown) {
+          console.warn(
+            `[session-rescue] sessionProjections register failed, falling back to log scan: ${errorText(error)}`,
+          );
+          return;
+        }
+        if (!mount.active) {
+          // 等待期间被卸载：这次注册当场释放，读口一个都没交出去。
+          mount.release();
+          mount.release = undefined;
+        }
+      })();
+      return () => {
+        mount.active = false;
+        runtime.facts.value = undefined;
+        mount.release?.();
+      };
     }, "session-rescue: rescue facts projection");
   });
 
@@ -2300,6 +2347,7 @@ function apply(ctx: Context, config: PluginConfig): void {
       return;
     }
     requestRetryCounts.delete(sid);
+    requestProviders.delete(sid);
     disabledSessions.delete(sid);
     // 未兑的 pass 记录一并撤销：会话都没了，"之后跑成功"永不可能发生，
     // 继续留着就是一条永不兑现的观察（且可能被误兑）。

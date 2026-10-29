@@ -10,7 +10,7 @@
 // 组件合并成 view 后再调 transcript 函数。禁止从 useSession 读 nodes。
 
 import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 // plugin-manager 是 `plugins.bundle.config` 这条 keyed 槽的**属主**（installed
@@ -70,8 +70,21 @@ import type { RescuePending, RescueStateBody, ToggleState } from "../lib/dock-st
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { z } from "zod";
 import { claimApply } from "@jayyuen66/dsh-plugin-shared/lib/card-apply";
 import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
+import {
+  CARD_UI_CSS,
+  CardForm,
+  NumberField,
+  SaveBar,
+  Section,
+  SelectField,
+  TextField,
+  ToggleField,
+  splitHint,
+} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
+import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
 import { createRescueReader } from "./remote.ts";
 import type { RescueReader } from "./remote.ts";
 
@@ -131,8 +144,6 @@ const CSS = [
   ".sr-button:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05))}",
   ".sr-button:disabled{opacity:.5;cursor:not-allowed}",
   ".sr-primary{border-color:var(--dsw-alias-brand-primary,#2f6fed);color:var(--dsw-alias-brand-primary,#2f6fed)}",
-  ".sr-btn-solid{border-color:var(--dsw-alias-brand-primary,#2f6fed);background:var(--dsw-alias-brand-primary,#2f6fed);color:var(--dsw-alias-label-primary-foreground,#fff)}",
-  ".sr-btn-solid:hover:not(:disabled){filter:brightness(.96)}",
   ".sr-button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6fed);outline-offset:1px}",
   ".sr-editor{display:flex;flex-direction:column;gap:6px;padding:6px 0}",
   ".sr-textarea{width:100%;min-height:72px;resize:vertical;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-fill-primary,transparent);border:1px solid var(--dsw-alias-border-l3,#d8dbe2);border-radius:6px;padding:8px;box-sizing:border-box}",
@@ -142,28 +153,6 @@ const CSS = [
   ".sr-dock{box-sizing:border-box;width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;gap:4px;padding:4px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
   ".sr-banner{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border,#d8dbe2);border-radius:6px;padding:4px 8px}",
 ].join("\n");
-
-// ── JSX 内联样式里重复出现的那几位（CSS 数组之外的共用位）────────────────────
-// 颜色只走 --dsw-alias-* token（文件头纪律）；同一个 token 在各组件里各抄一遍，
-// 换 token 时必然漏抄，故在此一处定义。
-
-/** 主文案色（label / 输入正文）。 */
-const LABEL_PRIMARY_COLOR = "var(--dsw-alias-label-primary, inherit)";
-
-/** 次级文案色（hint 行、档位摘要行）。 */
-const LABEL_TERTIARY_COLOR = "var(--dsw-alias-label-tertiary, #8a8f99)";
-
-/** 可编辑控件（number/text 输入框、provider 下拉）的描边。 */
-const CONTROL_BORDER = "1px solid var(--dsw-alias-border-l3, #d8dbe2)";
-
-/** 设置卡字段行的版式：标题+说明在左、控件在右，行间 9px 上间距。
- *  开关行（ToggleRow）与数字行（NumberField）逐字段同形，共用这一份。 */
-const FIELD_ROW_STYLE: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  padding: "9px 0",
-};
 
 // ── host 状态轮询（自排循环：有 pending 走 1s、空闲走 5s；无订阅或页签隐藏即停）
 // 快照引用稳定化：每一跳解析都产出新对象，若直接赋给 data，useSyncExternalStore
@@ -1185,35 +1174,6 @@ export type EntryForm = ConfigForm<Record<string, unknown>>;
  */
 type FormSnapshot = ConfigPageForm["state"];
 
-/**
- * 写入一个字段并**复读快照确认落地**。
- *
- * `ConfigForm.set` 在宿主校验拒绝时既不抛也不改快照：它走 recover 分支
- * 重载 Host 状态（installed `config-form.d.ts:83` 的 `private recover`），回
- * `false`；写入被跳过（memory 模式等）同样回 `false` 而不是抛（同文件
- * `config-form-types.d.ts`："false for refusal or skipped writes"）。本卡仍以事后
- * 复读为唯一判定点：快照里该字段仍是旧值 → 回一句 `fieldRejected`，由 commitTouched
- * 转成用户可见的失败——复读同时覆盖「拒绝」与「静默丢弃」两种形状，比只看受理位更强，
- * 故 0.1.6 那条纪律原样保留（受理位是新增信号，将来可直接改用，但不必在此次迁移里
- * 改行为）。
- */
-async function setAndVerify(
-  scope: EntryForm,
-  field: string,
-  next: unknown,
-  t: Translate,
-): Promise<string | null> {
-  await scope.set(field, next);
-  // 官方 value 在首个快照受理前是 undefined，那时读不到任何落库值（比较仍按「两侧都
-  // 没有这个字段」成立），故不需要 isRecord 再筛一遍对象性。
-  const snapshot = scope.getSnapshot().value;
-  const landed = snapshot === undefined ? undefined : snapshot[field];
-  if (JSON.stringify(landed ?? null) === JSON.stringify(next ?? null)) {
-    return null;
-  }
-  return t("fieldRejected", { field, value: JSON.stringify(landed ?? null) });
-}
-
 function cardStore(scope: EntryForm): {
   getSnapshot: () => CardSnapshot;
   subscribe: (listener: () => void) => () => void;
@@ -1247,150 +1207,10 @@ function cardStore(scope: EntryForm): {
   };
 }
 
-interface ToggleRowProps {
-  label: string;
-  hint: string;
-  /** 稳定锚点（测试/schema 门禁按字段定位控件）。 */
-  field: string;
-  checked: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-}
-
-function ToggleRow(props: ToggleRowProps): ReactNode {
-  const { label, hint, checked, disabled, onToggle } = props;
-  return createElement(
-    "div",
-    { style: FIELD_ROW_STYLE },
-    createElement(
-      "div",
-      { style: { minWidth: 0, marginRight: 12 } },
-      createElement("div", { style: { fontSize: 13, color: LABEL_PRIMARY_COLOR } }, label),
-      createElement(
-        "div",
-        {
-          style: { fontSize: 12, color: LABEL_TERTIARY_COLOR, marginTop: 2 },
-        },
-        hint,
-      ),
-    ),
-    createElement(
-      "button",
-      {
-        type: "button",
-        role: "switch",
-        "aria-checked": checked,
-        "aria-label": label,
-        disabled,
-        onClick: onToggle,
-        style: {
-          position: "relative",
-          flex: "none",
-          width: 36,
-          height: 20,
-          borderRadius: 10,
-          border: "none",
-          padding: 0,
-          cursor: disabled ? "not-allowed" : "pointer",
-          background: checked
-            ? "var(--dsw-alias-brand-primary, #2f6fed)"
-            : "var(--dsw-alias-border-l3, #d8dbe2)",
-          opacity: disabled ? 0.5 : 1,
-        },
-      },
-      createElement("span", {
-        style: {
-          position: "absolute",
-          top: 2,
-          left: checked ? 18 : 2,
-          width: 16,
-          height: 16,
-          borderRadius: 8,
-          background: "var(--dsw-alias-label-primary-foreground, #ffffff)",
-          transition: "left .12s",
-        },
-      }),
-    ),
-  );
-}
-
-interface NumberRowProps {
-  label: string;
-  hint: string;
-  /** 稳定锚点（schema-coverage 门禁按此识别绑定字段）。 */
-  field: string;
-  value: number;
-  min: number;
-  max: number;
-  disabled: boolean;
-  onCommit: (num: number) => void;
-}
-
-function NumberRow(props: NumberRowProps): ReactNode {
-  const { field, label, hint, value, min, max, disabled, onCommit } = props;
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => {
-    setDraft(String(value));
-  }, [value]);
-  // 保存条模式：有效输入只上报草稿（onCommit → touched），不直写。
-  // 入参是**这一击的新草稿**：setDraft 到下一次渲染才生效，`onChange` 里回头读闭包
-  // `draft` 只会拿到改动前的值（Enter 那条读的才是当前值）。
-  const stage = (candidate: string): void => {
-    // 清空输入框交回的是空串，而 `Number("")` 是 **0**：不挡就把「抹掉这一栏」当成
-    // 「设成 0」上报，保存后那一类自动救援整段停用。空草稿按「没填」处理。
-    if (candidate.trim() === "") {
-      return;
-    }
-    const parsed = Number(candidate);
-    if (Number.isFinite(parsed) && parsed >= min && parsed <= max) {
-      onCommit(Math.round(parsed));
-    }
-  };
-  return createElement(
-    "div",
-    { style: FIELD_ROW_STYLE },
-    createElement(
-      "div",
-      { style: { minWidth: 0, marginRight: 12 } },
-      createElement("div", { style: { fontSize: 13, color: LABEL_PRIMARY_COLOR } }, label),
-      createElement(
-        "div",
-        {
-          style: { fontSize: 12, color: LABEL_TERTIARY_COLOR, marginTop: 2 },
-        },
-        hint,
-      ),
-    ),
-    createElement("input", {
-      type: "number",
-      "data-field": field,
-      value: draft,
-      min,
-      max,
-      disabled,
-      onChange: (ev: React.ChangeEvent<HTMLInputElement>) => {
-        setDraft(ev.target.value);
-        stage(ev.target.value);
-      },
-      onKeyDown: (ev: React.KeyboardEvent<HTMLInputElement>) => {
-        if (ev.key === "Enter") {
-          ev.preventDefault();
-          stage(draft);
-        }
-      },
-      style: {
-        width: 110,
-        font: "inherit",
-        fontSize: 13,
-        color: LABEL_PRIMARY_COLOR,
-        background: "transparent",
-        border: CONTROL_BORDER,
-        borderRadius: 6,
-        padding: "4px 8px",
-      },
-    }),
-  );
-}
+/** 官方 `ConfigForm.mutate` 的一次写入 op（从官方签名派生，不本地重抄）。 */
+type SettingsPathOp = Parameters<EntryForm["mutate"]>[0][number];
+/** op 的取值位（官方 `JsonValue`）：表单草稿本就来自 schemastery 校验过的字段。 */
+type SettingsPathValue = Extract<SettingsPathOp, { op: "set" }>["value"];
 
 interface SettingsCardProps {
   /** plugins.bundle.config owner 两视图派发：summary=标题下一行摘要，page=配置表单。
@@ -1400,8 +1220,13 @@ interface SettingsCardProps {
    *  'row'）时这里当场红，本地抄件只会悄悄继续编译。 */
   view: PluginConfigViewProps["view"];
   useCard: <Out>(selector: (snap: CardSnapshot) => Out) => Out;
-  /** 单字段写入并复读确认：resolve(null)=已落地，resolve(文案)=被宿主拒绝。 */
-  set: (field: string, value: unknown) => Promise<string | null>;
+  /** 保存时固定一次的命名空间 revision（官方 `mutate` 的 expectedRevision 栅栏）。 */
+  revision: () => number | undefined;
+  /** 一次原子命名空间写入：全部字段共享同一 revision 栅栏与一次恢复读取。 */
+  mutate: (
+    ops: readonly SettingsPathOp[],
+    expectedRevision: number | undefined,
+  ) => Promise<boolean>;
   /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
   t: Translate;
 }
@@ -1413,23 +1238,19 @@ interface SettingsCardProps {
 // 档位：default（官方默认 5 次码表）/ enhanced（12 次 + QUOTA + 8s→60s，
 // settings.yaml 四家现行同款）/ always（官方无限重试 + backoff）/ off（0 次）。
 
-interface RetryProviderRow {
-  provider: string;
-  mode: string;
-  maxRetries: number;
-  hasQuota: boolean;
-}
+const RETRY_PROVIDER_SCHEMA = z.object({
+  provider: z.preprocess((value) => (typeof value === "string" ? value : ""), z.string()),
+  mode: z.preprocess((value) => (typeof value === "string" ? value : ""), z.string()),
+  maxRetries: z.preprocess((value) => (typeof value === "number" ? value : 0), z.number()),
+  hasQuota: z.preprocess((value) => value === true, z.boolean()),
+});
+
+type RetryProviderRow = z.infer<typeof RETRY_PROVIDER_SCHEMA>;
 
 /** 一行 provider 的逐字段守卫投影（坏类型落回空串/0，`hasQuota` 只认显式 true）。
- *  坏行本身由调用侧的 isRecord 挡下，不经 any 断言。 */
+ *  坏行本身由调用侧的 isRecord 挡下。 */
 function parseProviderRow(rowRaw: Record<string, unknown>): RetryProviderRow {
-  const { provider, mode, maxRetries, hasQuota } = rowRaw;
-  return {
-    provider: typeof provider === "string" ? provider : "",
-    mode: typeof mode === "string" ? mode : "",
-    maxRetries: typeof maxRetries === "number" ? maxRetries : 0,
-    hasQuota: hasQuota === true,
-  };
+  return RETRY_PROVIDER_SCHEMA.parse(rowRaw);
 }
 
 /** preset → 下拉档位文案键（顺序即下拉顺序；文案本体在 UI_MESSAGES 双语字典里）。 */
@@ -1454,7 +1275,7 @@ function presetOfRow(row: RetryProviderRow): string {
   return "default";
 }
 
-/** 单行 provider 的下拉（档位选择，先暂存不落盘）。 */
+/** 单行 provider 的档位下拉（选择先暂存，点「保存」批量落盘）。 */
 function retryRowElement(
   row: RetryProviderRow,
   pending: Record<string, string>,
@@ -1462,80 +1283,25 @@ function retryRowElement(
   onChange: (row: RetryProviderRow, next: string) => void,
   t: Translate,
 ): ReactNode {
-  const options = Object.entries(RETRY_PRESET_KEYS).map(([key, labelKey]) =>
-    createElement("option", { key, value: key }, t(labelKey)),
-  );
-  return createElement(
-    "div",
-    {
-      key: row.provider,
-      style: {
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 8,
-        padding: "6px 0",
-      },
+  const options: SelectOption[] = Object.entries(RETRY_PRESET_KEYS).map(([value, labelKey]) => ({
+    value,
+    label: t(labelKey),
+  }));
+  // 原型链防护：row.provider 来自 host 载荷，取到的名字是 "constructor"、
+  // "toString" 这类自有属性名时 `pending[...]` 会返回原型上的函数，`??` 也就
+  // 不再回落到当前档位——下拉框把函数当 value 渲染成空串。只认自有键。
+  const staged = Object.hasOwn(pending, row.provider) ? pending[row.provider] : undefined;
+  return createElement(SelectField, {
+    key: row.provider,
+    label: row.provider,
+    hint: `${row.mode} · max ${row.maxRetries} · QUOTA ${row.hasQuota ? "✓" : "✗"}`,
+    value: staged ?? presetOfRow(row),
+    options,
+    disabled,
+    onChange: (next: string): void => {
+      onChange(row, next);
     },
-    createElement(
-      "div",
-      { style: { minWidth: 0, flex: 1 } },
-      createElement("div", { style: { fontSize: 13, color: LABEL_PRIMARY_COLOR } }, row.provider),
-      createElement(
-        "div",
-        { style: { fontSize: 12, color: LABEL_TERTIARY_COLOR } },
-        `${row.mode} · max ${row.maxRetries} · QUOTA ${row.hasQuota ? "✓" : "✗"}`,
-      ),
-    ),
-    createElement(
-      "select",
-      {
-        // 原型链防护：row.provider 来自 host 载荷，取到的名字是 "constructor"、
-        // "toString" 这类自有属性名时 `pending[...]` 会返回原型上的函数，`??` 也就
-        // 不再回落到当前档位——下拉框把函数当 value 渲染成空串。只认自有键。
-        value: Object.hasOwn(pending, row.provider) ? pending[row.provider] : presetOfRow(row),
-        disabled,
-        onChange: (ev: React.ChangeEvent<HTMLSelectElement>) => {
-          onChange(row, ev.target.value);
-        },
-        style: {
-          flex: "none",
-          font: "inherit",
-          fontSize: 12,
-          color: LABEL_PRIMARY_COLOR,
-          background: "var(--dsw-alias-bg-layer-2, transparent)",
-          border: CONTROL_BORDER,
-          borderRadius: 6,
-          padding: "3px 6px",
-        },
-      },
-      ...options,
-    ),
-  );
-}
-
-/** 区块标题。`bordered` 决定要不要那条分隔线与上边距：设置卡内的分区要（把长表单
- *  切成三段），429 区块不要——它的外壳容器自己已经画了一条 borderTop，再画就是双线。
- *  声明位置在首个调用点（RetryPolicySection）之前：函数声明虽提升，
- *  eslint/no-use-before-define 仍按书写顺序判定。 */
-function settingsSectionTitle(text: string, bordered: boolean): ReactNode {
-  return createElement(
-    "div",
-    {
-      style: {
-        fontSize: 13,
-        color: LABEL_PRIMARY_COLOR,
-        ...(bordered
-          ? {
-              marginTop: 8,
-              borderTop: "1px solid var(--dsw-alias-border-l2)",
-              paddingTop: 8,
-            }
-          : {}),
-      },
-    },
-    text,
-  );
+  });
 }
 
 /** 单个 provider 的落盘（经官方 Remote 的 `sessionRescue.retryPolicy`）。返回 null=已落盘，
@@ -1620,7 +1386,7 @@ function retrySaveBar(props: {
     "button",
     {
       type: "button",
-      className: "sr-button sr-btn-solid",
+      className: "dsu-btn dsu-btnPrimary",
       "data-field": "retry-save",
       disabled: saving || dirtyCount === 0,
       onClick: onSave,
@@ -1631,31 +1397,24 @@ function retrySaveBar(props: {
     "button",
     {
       type: "button",
-      className: "sr-button",
+      className: "dsu-btn",
       "data-field": "retry-discard",
       disabled: saving || dirtyCount === 0,
       onClick: onDiscard,
     },
     t("discard"),
   );
-  const saveBarStatus =
-    saveError === null
-      ? createElement("span", { className: "sr-hint" }, dirtyCount > 0 ? t("presetDirty") : "")
-      : createElement("span", { className: "sr-error" }, saveError);
+  const statusClass = saveError === null ? "dsu-status" : "dsu-status dsu-statusError";
   return createElement(
     "div",
-    {
-      style: {
-        display: "flex",
-        gap: 8,
-        alignItems: "center",
-        padding: "8px 0 2px",
-        flexWrap: "wrap",
-      },
-    },
+    { className: "dsu-savebar" },
     saveButton,
     discardButton,
-    saveBarStatus,
+    createElement(
+      "span",
+      { className: statusClass },
+      saveError ?? (dirtyCount > 0 ? t("presetDirty") : ""),
+    ),
   );
 }
 
@@ -1736,20 +1495,8 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   };
 
   return createElement(
-    "div",
-    { style: { marginTop: 8, borderTop: "1px solid var(--dsw-alias-border-l2)", paddingTop: 8 } },
-    settingsSectionTitle(t("retrySectionTitle"), false),
-    createElement(
-      "div",
-      {
-        style: {
-          fontSize: 12,
-          color: LABEL_TERTIARY_COLOR,
-          paddingBottom: 4,
-        },
-      },
-      t("retrySectionHint"),
-    ),
+    Section,
+    { title: t("retrySectionTitle"), hint: t("retrySectionHint") },
     retryProvidersBody(state, pending, saving, changePreset, t),
     retrySaveBar({
       saving,
@@ -1784,273 +1531,244 @@ function excludesDraftToArray(draft: string): string[] {
  *  这里的 try 永远看不到失败，被宿主拒绝的值也会报"已保存"。 */
 async function commitTouched(
   props: SettingsCardProps,
-  touched: Record<string, unknown>,
+  touched: Record<string, SettingsPathValue>,
   excludesDraft: string,
   value: Record<string, unknown>,
+  revision: number | undefined,
 ): Promise<string | null> {
-  const writes: { field: string; value: unknown }[] = diffTouched(touched, value).map((key) => ({
-    field: key,
-    value: touched[key],
-  }));
+  const changed = new Set(diffTouched(touched, value));
+  const ops: SettingsPathOp[] = Object.entries(touched)
+    .filter(([field]) => changed.has(field))
+    .map(([field, next]) => ({ op: "set", path: [field], value: next }));
   if (excludesDraft !== excludesText(value)) {
-    writes.push({ field: "providerExcludes", value: excludesDraftToArray(excludesDraft) });
+    ops.push({ op: "set", path: ["providerExcludes"], value: excludesDraftToArray(excludesDraft) });
   }
-  // 并发发起即可：harness 的 scope 自带串行写队列 + revision fence
-  //（settings-scope.ts:126 mutate→enqueue），逐字段顺序 await 既无必要也触发
-  // no-await-in-loop。
-  const outcomes = await Promise.all(writes.map((item) => props.set(item.field, item.value)));
-  const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
-  if (failures.length > 0) {
-    return props.t("saveFailed", { detail: failures.join(props.t("failureJoiner")) });
-  }
-  return null;
+  // 一次原子写：全部字段共享同一个 revision 栅栏。宿主拒绝（含并发改动导致的栅栏失效）
+  // 时表单已按官方契约做过一次恢复读取，这里只负责把失败如实报给用户——不谎报保存成功，
+  // 也不逐字段重试（那会把一次被拒的批量拆成多次 last-write-wins）。
+  const accepted = await props.mutate(ops, revision);
+  return accepted ? null : props.t("saveFailed", { detail: props.t("saveRejected") });
 }
 
-/** 保存条提示文案（三态：只读 / 有改动 / 无改动 = 空串）。 */
-function saveBarHint(disabled: boolean, dirty: boolean, t: Translate): string {
-  if (disabled) {
-    return t("statusReadOnly");
-  }
-  if (dirty) {
-    return t("statusDirty");
-  }
-  return "";
+interface SectionInputs {
+  t: Translate;
+  disabled: boolean;
+  /** 渲染取值：touched 优先，快照兜底。 */
+  eff: (field: string) => unknown;
+  setField: (field: string, value: SettingsPathValue) => void;
 }
 
-interface NumLimits {
+interface SecondsSpec {
+  label: keyof UiMessages;
+  hint: keyof UiMessages;
+  field: string;
   min: number;
   max: number;
+  fallbackMs: number;
+}
+
+/** 毫秒存储字段以秒显示；写回时取整到毫秒（宿主 schema 是 natural()）。 */
+function secondsField(inputs: SectionInputs, spec: SecondsSpec): ReactNode {
+  const raw = inputs.eff(spec.field);
+  // 存储侧是毫秒整数；区间与 host schema 的 natural().min/max 同源，秒数只负责显示。
+  const parsed = z
+    .int()
+    .min(spec.min * 1000)
+    .max(spec.max * 1000)
+    .safeParse(raw);
+  return createElement(NumberField, {
+    label: inputs.t(spec.label),
+    ...splitHint(inputs.t(spec.hint)),
+    field: spec.field,
+    value: parsed.success ? parsed.data / 1000 : spec.fallbackMs / 1000,
+    min: spec.min,
+    max: spec.max,
+    step: 0.5,
+    unit: inputs.t("unitSeconds"),
+    invalidHint: inputs.t("outOfRange"),
+    disabled: inputs.disabled,
+    onChange: (next: number | undefined): void => {
+      if (next === undefined) {
+        return;
+      }
+      inputs.setField(spec.field, Math.round(next * 1000));
+    },
+  });
+}
+
+interface CountSpec {
+  label: keyof UiMessages;
+  hint: keyof UiMessages;
+  field: string;
   fallback: number;
 }
 
-/** 数字行的建元签名（label/hint 成对取文案键，第三参是稳定的字段名锚点）。 */
-type NumberRowBuilder = (
-  labelKey: keyof UiMessages,
-  hintKey: keyof UiMessages,
-  fieldName: string,
-  limits: NumLimits,
-) => ReactNode;
-
-/** 开关行的建元签名。 */
-type ToggleRowBuilder = (
-  labelKey: keyof UiMessages,
-  hintKey: keyof UiMessages,
-  fieldName: string,
-) => ReactNode;
-
-/** 两套行建元的装配：卡片只交出「现值读取口 + 草稿写入口 + 禁写位」，行的形状在这里单源。 */
-function makeSettingRows(deps: {
-  t: Translate;
-  eff: (field: string) => unknown;
-  setField: (field: string, val: unknown) => void;
-  disabled: boolean;
-}): { numberRow: NumberRowBuilder; toggleRow: ToggleRowBuilder } {
-  const { t, eff, setField, disabled } = deps;
-  const numberRow: NumberRowBuilder = (labelKey, hintKey, fieldName, limits) => {
-    const candidate = eff(fieldName);
-    const numValue = typeof candidate === "number" ? candidate : limits.fallback;
-    return createElement(NumberRow, {
-      label: t(labelKey),
-      hint: t(hintKey),
-      field: fieldName,
-      value: numValue,
-      min: limits.min,
-      max: limits.max,
-      disabled,
-      onCommit: (num) => {
-        setField(fieldName, num);
-      },
-    });
-  };
-  const toggleRow: ToggleRowBuilder = (labelKey, hintKey, fieldName) =>
-    createElement(ToggleRow, {
-      label: t(labelKey),
-      hint: t(hintKey),
-      field: fieldName,
-      checked: eff(fieldName) !== false,
-      disabled,
-      onToggle: () => {
-        setField(fieldName, eff(fieldName) === false);
-      },
-    });
-  return { numberRow, toggleRow };
+/** 次数上限字段：0–20 的整数。 */
+function countField(inputs: SectionInputs, spec: CountSpec): ReactNode {
+  const raw = inputs.eff(spec.field);
+  const parsed = z.int().min(0).max(20).safeParse(raw);
+  return createElement(NumberField, {
+    label: inputs.t(spec.label),
+    ...splitHint(inputs.t(spec.hint)),
+    field: spec.field,
+    value: parsed.success ? parsed.data : spec.fallback,
+    min: 0,
+    max: 20,
+    step: 1,
+    unit: inputs.t("unitTimes"),
+    invalidHint: inputs.t("outOfRange"),
+    disabled: inputs.disabled,
+    onChange: (next: number | undefined): void => {
+      if (next === undefined) {
+        return;
+      }
+      inputs.setField(spec.field, Math.round(next));
+    },
+  });
 }
 
-/** 卡片主体的行序（两段分区标题 + 全部字段行；顺序即卡片的视觉顺序）。
- *  行文案按 UI_MESSAGES 键取（label/hint 成对，字段名保持稳定锚点）：调用点只写
- *  键名，字典里换语言即整卡换文，不再有中英两份硬编码串散落。 */
-function rescueFormRows(props: {
-  t: Translate;
-  numberRow: NumberRowBuilder;
-  toggleRow: ToggleRowBuilder;
-}): ReactNode[] {
-  const { t, numberRow, toggleRow } = props;
-  return [
-    createElement(
-      "div",
-      {
-        style: {
-          fontSize: 12,
-          color: LABEL_TERTIARY_COLOR,
-          paddingBottom: 4,
-        },
-      },
-      t("formLead"),
-    ),
-    toggleRow("enabledLabel", "enabledHint", "enabled"),
-    numberRow("resumeDelayLabel", "resumeDelayHint", "resumeDelayMs", {
-      min: 1000,
-      max: 300_000,
-      fallback: 10_000,
+interface ToggleSpec {
+  label: keyof UiMessages;
+  hint: keyof UiMessages;
+  field: string;
+}
+
+/** 布尔字段：快照缺省按开处理（宿主 schema 的缺省值同为 true）。 */
+function toggleField(inputs: SectionInputs, spec: ToggleSpec): ReactNode {
+  return createElement(ToggleField, {
+    label: inputs.t(spec.label),
+    ...splitHint(inputs.t(spec.hint)),
+    field: spec.field,
+    checked: inputs.eff(spec.field) !== false,
+    disabled: inputs.disabled,
+    onChange: (next: boolean): void => {
+      inputs.setField(spec.field, next);
+    },
+  });
+}
+
+/** 自动续跑小节：总开关与瞬时失败路径的四个参数。 */
+function buildResumeSection(inputs: SectionInputs): ReactNode {
+  return createElement(
+    Section,
+    { title: inputs.t("resumeSection"), hint: inputs.t("formLead") },
+    toggleField(inputs, { label: "enabledLabel", hint: "enabledHint", field: "enabled" }),
+    secondsField(inputs, {
+      label: "resumeDelayLabel",
+      hint: "resumeDelayHint",
+      field: "resumeDelayMs",
+      min: 1,
+      max: 300,
+      fallbackMs: 10_000,
     }),
-    numberRow("resumeCooldownLabel", "resumeCooldownHint", "resumeCooldownMs", {
-      min: 5000,
-      max: 3_600_000,
-      fallback: 120_000,
+    secondsField(inputs, {
+      label: "resumeCooldownLabel",
+      hint: "resumeCooldownHint",
+      field: "resumeCooldownMs",
+      min: 5,
+      max: 3600,
+      fallbackMs: 120_000,
     }),
-    numberRow("maxResumesLabel", "maxResumesHint", "maxResumes", {
-      min: 0,
-      max: 20,
+    countField(inputs, {
+      label: "maxResumesLabel",
+      hint: "maxResumesHint",
+      field: "maxResumes",
       fallback: 3,
     }),
-    numberRow("chainDelayLabel", "chainDelayHint", "chainResumeDelayMs", {
-      min: 1000,
-      max: 300_000,
-      fallback: 60_000,
+    secondsField(inputs, {
+      label: "chainDelayLabel",
+      hint: "chainDelayHint",
+      field: "chainResumeDelayMs",
+      min: 1,
+      max: 300,
+      fallbackMs: 60_000,
     }),
-    settingsSectionTitle(t("maxTokensSection"), true),
-    numberRow("continueDelayLabel", "continueDelayHint", "continueDelayMs", {
-      min: 500,
-      max: 300_000,
-      fallback: 3000,
+  );
+}
+
+/** 截断续写小节。 */
+function buildContinueSection(inputs: SectionInputs): ReactNode {
+  return createElement(
+    Section,
+    { title: inputs.t("maxTokensSection") },
+    secondsField(inputs, {
+      label: "continueDelayLabel",
+      hint: "continueDelayHint",
+      field: "continueDelayMs",
+      min: 0.5,
+      max: 300,
+      fallbackMs: 3000,
     }),
-    numberRow("continueCooldownLabel", "continueCooldownHint", "continueCooldownMs", {
-      min: 5000,
-      max: 3_600_000,
-      fallback: 60_000,
+    secondsField(inputs, {
+      label: "continueCooldownLabel",
+      hint: "continueCooldownHint",
+      field: "continueCooldownMs",
+      min: 5,
+      max: 3600,
+      fallbackMs: 60_000,
     }),
-    numberRow("maxContinuesLabel", "maxContinuesHint", "maxContinues", {
-      min: 0,
-      max: 20,
+    countField(inputs, {
+      label: "maxContinuesLabel",
+      hint: "maxContinuesHint",
+      field: "maxContinues",
       fallback: 3,
     }),
-    settingsSectionTitle(t("unfinishedSection"), true),
-    toggleRow("openTodosLabel", "openTodosHint", "resumeOnOpenTodos"),
-    numberRow("unfinishedDelayLabel", "unfinishedDelayHint", "unfinishedDelayMs", {
-      min: 1000,
-      max: 300_000,
-      fallback: 5000,
+  );
+}
+
+/** 待办补跑小节。 */
+function buildUnfinishedSection(inputs: SectionInputs): ReactNode {
+  return createElement(
+    Section,
+    { title: inputs.t("unfinishedSection") },
+    toggleField(inputs, {
+      label: "openTodosLabel",
+      hint: "openTodosHint",
+      field: "resumeOnOpenTodos",
     }),
-    numberRow("unfinishedCooldownLabel", "unfinishedCooldownHint", "unfinishedCooldownMs", {
-      min: 5000,
-      max: 3_600_000,
-      fallback: 120_000,
+    secondsField(inputs, {
+      label: "unfinishedDelayLabel",
+      hint: "unfinishedDelayHint",
+      field: "unfinishedDelayMs",
+      min: 1,
+      max: 300,
+      fallbackMs: 5000,
     }),
-    numberRow("maxUnfinishedLabel", "maxUnfinishedHint", "maxUnfinished", {
-      min: 0,
-      max: 20,
+    secondsField(inputs, {
+      label: "unfinishedCooldownLabel",
+      hint: "unfinishedCooldownHint",
+      field: "unfinishedCooldownMs",
+      min: 5,
+      max: 3600,
+      fallbackMs: 120_000,
+    }),
+    countField(inputs, {
+      label: "maxUnfinishedLabel",
+      hint: "maxUnfinishedHint",
+      field: "maxUnfinished",
       fallback: 2,
     }),
-  ];
-}
-
-/** 卡片底部保存条（保存/丢弃/状态提示）：只读、保存中、无改动三处一起禁点。 */
-function rescueSaveBar(props: {
-  disabled: boolean;
-  busy: boolean;
-  dirty: boolean;
-  saveError: string | null;
-  t: Translate;
-  onSave: () => void;
-  onDiscard: () => void;
-}): ReactNode {
-  const { disabled, busy, dirty, saveError, t, onSave, onDiscard } = props;
-  const saveButton = createElement(
-    "button",
-    {
-      type: "button",
-      className: "sr-button sr-btn-solid",
-      "data-field": "save",
-      disabled: disabled || busy || !dirty,
-      onClick: onSave,
-    },
-    busy ? t("saving") : t("save"),
-  );
-  const discardButton = createElement(
-    "button",
-    {
-      type: "button",
-      className: "sr-button",
-      "data-field": "discard",
-      disabled: disabled || busy || !dirty,
-      onClick: onDiscard,
-    },
-    t("discard"),
-  );
-  const saveBarStatus =
-    saveError === null
-      ? createElement("span", { className: "sr-hint" }, saveBarHint(disabled, dirty, t))
-      : createElement("span", { className: "sr-error" }, saveError);
-  return createElement(
-    "div",
-    {
-      style: {
-        display: "flex",
-        gap: 8,
-        alignItems: "center",
-        padding: "6px 0",
-        borderTop: "1px dashed var(--dsw-alias-border-l2)",
-        flexWrap: "wrap",
-      },
-    },
-    saveButton,
-    discardButton,
-    saveBarStatus,
   );
 }
 
 /** providerExcludes 的草稿输入区（显示形态 'a, b' 与存储形态 string[] 不同构，
  *  diff 因此单独判定）。 */
-function rescueExcludesSection(props: {
-  disabled: boolean;
-  draft: string;
-  onDraft: (next: string) => void;
-  t: Translate;
-}): ReactNode {
-  const { disabled, draft, onDraft, t } = props;
+function buildExcludesSection(
+  inputs: SectionInputs & { draft: string; onDraft: (next: string) => void },
+): ReactNode {
+  const hint = splitHint(inputs.t("excludesHint"));
   return createElement(
-    "div",
-    { style: { padding: "9px 0" } },
-    createElement(
-      "div",
-      { style: { fontSize: 13, color: LABEL_PRIMARY_COLOR } },
-      t("excludesLabel"),
-    ),
-    createElement(
-      "div",
-      { style: { fontSize: 12, color: LABEL_TERTIARY_COLOR, marginTop: 2 } },
-      t("excludesHint"),
-    ),
-    createElement("input", {
-      type: "text",
-      value: draft,
-      disabled,
-      placeholder: t("excludesPlaceholder"),
-      onChange: (ev: React.ChangeEvent<HTMLInputElement>) => {
-        onDraft(ev.target.value);
-      },
-      style: {
-        width: "100%",
-        marginTop: 6,
-        font: "inherit",
-        fontSize: 13,
-        color: LABEL_PRIMARY_COLOR,
-        background: "transparent",
-        border: CONTROL_BORDER,
-        borderRadius: 6,
-        padding: "4px 8px",
-        boxSizing: "border-box",
-      },
+    Section,
+    { title: inputs.t("excludesSection") },
+    createElement(TextField, {
+      label: inputs.t("excludesFieldLabel"),
+      ...hint,
+      field: "providerExcludes",
+      value: inputs.draft,
+      placeholder: inputs.t("excludesPlaceholder"),
+      monospace: true,
+      disabled: inputs.disabled,
+      onChange: inputs.onDraft,
     }),
   );
 }
@@ -2064,7 +1782,7 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   const disabled = snap.status !== "ready" || !snap.writable;
   // 保存条状态：touched = 用户动过的字段；providerExcludes 单独存草稿串
   // （显示形态 'a, b' 与存储形态 string[] 不同构，diff 单独判定）。
-  const [touched, setTouched] = useState<Record<string, unknown>>({});
+  const [touched, setTouched] = useState<Record<string, SettingsPathValue>>({});
   // 排除名单草稿：`null` = 「这边没动过」。存成「用户输入的文本」而不是「当前显示值」，
   // 未动过的字段就恒等于快照——另一页签/另一次 apply 写同名空间时，快照换了而这边
   // 还揣着挂载那帧的旧文本，会把别人的值覆盖回去（last-write-wins），而且保存条显示
@@ -2076,8 +1794,9 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   const excludesBaseline = excludesText(value);
   const excludesDraft = excludesEdit ?? excludesBaseline;
   const excludesDirty = excludesEdit !== null && excludesEdit !== excludesBaseline;
-  const dirty = diffTouched(touched, value).length > 0 || excludesDirty;
-  const setField = (field: string, val: unknown): void => {
+  const dirtyCount = diffTouched(touched, value).length + (excludesDirty ? 1 : 0);
+  const dirty = dirtyCount > 0;
+  const setField = (field: string, val: SettingsPathValue): void => {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
   const save = async (): Promise<void> => {
@@ -2088,7 +1807,7 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
     setSaveError(null);
     let failure: string | null;
     try {
-      failure = await commitTouched(props, touched, excludesDraft, value);
+      failure = await commitTouched(props, touched, excludesDraft, value, props.revision());
     } catch (error) {
       // 写通道本身抛错（远端 reject / scope 已失效）：同样必须可见。
       failure = t("saveFailed", {
@@ -2100,7 +1819,7 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
       setSaveError(failure);
       return;
     }
-    // 快照已含新值（setAndVerify 复读确认过）→ 交回「没动过」态，草稿跟着快照走。
+    // 宿主已受理整批写入 → 交回「没动过」态，草稿跟着快照走。
     setTouched({});
     setExcludesEdit(null);
   };
@@ -2110,35 +1829,34 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
     setSaveError(null);
   };
 
-  const { numberRow, toggleRow } = makeSettingRows({ t, eff, setField, disabled });
-  const rows = rescueFormRows({ t, numberRow, toggleRow });
-
-  const saveBar = rescueSaveBar({
-    disabled,
-    busy,
+  const inputs: SectionInputs = { t, disabled, eff, setField };
+  const saveBar = createElement(SaveBar, {
     dirty,
-    saveError,
-    t,
+    busy,
+    writable: !disabled,
+    error: saveError,
+    saveLabel: t("save"),
+    savingLabel: t("saving"),
+    revertLabel: t("discard"),
+    dirtyLabel: t("dirtyCount", { count: dirtyCount }),
+    cleanLabel: t("statusClean"),
+    readOnlyLabel: t("statusReadOnly"),
     onSave: () => {
       void save();
     },
     onDiscard: discard,
-  });
-  const excludesSection = rescueExcludesSection({
-    disabled,
-    draft: excludesDraft,
-    onDraft: setExcludesEdit,
-    t,
   });
   const retrySection = createElement(RetryPolicySection, { key: "retry-policy", t });
 
   // 0.1.6：page 视图只渲染表单主体——标题/描述/卡片外壳由插件管理页统一绘制，
   // 不再自绘 RescuePluginCard（旧自绘壳属于已删除的 settings.plugin.item）。
   return createElement(
-    "div",
-    { style: { padding: "2px 0", display: "flex", flexDirection: "column", gap: 2 } },
-    ...rows,
-    excludesSection,
+    CardForm,
+    null,
+    buildResumeSection(inputs),
+    buildContinueSection(inputs),
+    buildUnfinishedSection(inputs),
+    buildExcludesSection({ ...inputs, draft: excludesDraft, onDraft: setExcludesEdit }),
     saveBar,
     retrySection,
   );
@@ -2275,7 +1993,7 @@ function apply(ctx: ClientCtx): void {
   ctx.effect(() => {
     const tag = document.createElement("style");
     tag.id = "session-rescue-css";
-    tag.textContent = CSS;
+    tag.textContent = `${CSS}\n${CARD_UI_CSS}`;
     document.head.append(tag);
     return () => {
       tag.remove();
@@ -2328,8 +2046,10 @@ function apply(ctx: ClientCtx): void {
         inject: () => ({
           t,
           hooks: { card: store },
-          // 写入 + 事后复读确认（见 setAndVerify）：错误以文案返回给卡片显示。
-          set: (field: string, value: unknown) => setAndVerify(scope, field, value, t),
+          // 批量原子写 + 保存时固定的 revision：卡片一次保存只发一次 mutation。
+          mutate: (ops: readonly SettingsPathOp[], expectedRevision: number | undefined) =>
+            scope.mutate(ops, expectedRevision),
+          revision: (): number | undefined => scope.getSnapshot().revision,
         }),
       },
       RescueSettingsCard,

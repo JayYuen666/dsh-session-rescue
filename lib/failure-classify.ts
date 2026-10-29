@@ -40,12 +40,19 @@ const PERMANENT_CODES = new Set([
   "INVALID_PREPARED_CALL",
 ]);
 
+/** 余额耗尽的三族措辞。 */
+const INSUFFICIENT_CREDITS = /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/iu;
+const BALANCE_DEPLETED = /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b/iu;
+const OUT_OF_CREDITS = /\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b/iu;
+/** 回合级限速/忙碌措辞（输入已 lower-case）。 */
+const TRANSIENT_FAILURE_TEXT = /\b(?:429|quota|rate|limit|busy)\b|\bthrottl|\btoo many\b/u;
+
 /** 裸数字 429 只在 HTTP 语境里算限速证据：`\b429\b` 会命中 `req-429`、`trace 429`、
  *  端口 `:429`、计数 `processed 429 items` 这类与限速无关的正文，而这条判据的结果是
  *  「重开一个回合」——误判即无意义续跑。所以要求它前面有 http/status/code/error 一类
  *  词，或者紧跟 `too many` / `rate` / `throttl` 这类限速措辞。 */
 const RATE_LIMIT_TEXT =
-  /^\s*429\s*$|\b(?:http|status|code|error)[\s:/]*429\b|\b429\b(?=[\s:]*(?:too many|rate|throttl))|rate[\s_.-]*limit|throttl|too many (?:request|busy)/iu;
+  /^\s*429\s*$|\b(?:http|status|code|error)[\s:/]*429(?:\W|$)|\b429[\s:]+(?:too many|rate|throttl)|rate[\s_.-]*limit|throttl|too many (?:request|busy)/iu;
 
 /** 配额窗口措辞（分钟/吞吐型额度的说法）。只在**请求级**判据里用：那里问的是
  *  「等一会儿再发同一个请求会不会更好」，配额窗口措辞答「会」；
@@ -86,9 +93,7 @@ const EMPTY_RESPONSE_TEXT = /empty[\s_.-]*respons/iu;
 /** 余额真耗尽（不可恢复）——与百度 429 的限流型 quota 区分。 */
 function isBalanceExhausted(text: string): boolean {
   return (
-    /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/iu.test(text) ||
-    /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b/iu.test(text) ||
-    /\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b/iu.test(text)
+    INSUFFICIENT_CREDITS.test(text) || BALANCE_DEPLETED.test(text) || OUT_OF_CREDITS.test(text)
   );
 }
 
@@ -335,5 +340,5 @@ export function looksRateLimitish(failure: FailureLike): boolean {
     return false;
   }
   const { text } = fieldsOf(failure);
-  return /\b(?:429|quota|rate|limit|busy)\b|\bthrottl|\btoo many\b/u.test(text.toLowerCase());
+  return TRANSIENT_FAILURE_TEXT.test(text.toLowerCase());
 }

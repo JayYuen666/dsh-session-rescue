@@ -217,10 +217,19 @@ const BUNDLE_CONFIG_SLOT = "plugins.bundle.config";
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
 const RETRY_SAVE_BUTTON_SELECTOR = '[data-field="retry-save"]';
 const RESUME_DELAY_INPUT_SELECTOR = 'input[data-field="resumeDelayMs"]';
-/** 排除名单输入框：它没有 data-field，按占位符定位（三处用例共用一枚常量）。 */
-const EXCLUDES_INPUT_SELECTOR = 'input[placeholder^="例如"]';
-/** 「启用自动续跑」开关（role=switch + 中文 label，zh 面）。 */
-const ENABLE_TOGGLE_SELECTOR = 'button[role="switch"][aria-label="启用自动续跑"]';
+/** 排除名单输入框（共享 TextField 把字段名写在 data-field 上）。 */
+const EXCLUDES_INPUT_SELECTOR = 'input[data-field="providerExcludes"]';
+/** 「启用自动续跑」开关（role=switch + 字段锚点，zh/en 面通用）。 */
+const ENABLE_TOGGLE_SELECTOR = 'button[role="switch"][data-field="enabled"]';
+/** 档位值 → 下拉里的选项序号（共享 SelectField 按 options 声明顺序渲染）。 */
+const PRESET_ORDER = ["default", "enhanced", "always", "off"] as const;
+/** 档位值 → zh 文案键（断言触发器上显示的就是当前档位）。 */
+const PRESET_LABEL_KEYS: Record<string, string> = {
+  default: "presetDefault",
+  enhanced: "presetEnhanced",
+  always: "presetAlways",
+  off: "presetOff",
+};
 
 // ── 期望值由测试作者写死（不从 src/client-entry.ts 导入，否则断言自证） ──
 /** 会话绑定缺失时卡片该看到的失败码。 */
@@ -318,9 +327,10 @@ function mountedSaveButton(): HTMLButtonElement {
   return button;
 }
 
-/** 不写盘的 set 替身（只观察快照变化之后的草稿归属）。 */
-function noopSet(): void {
-  /* 卡片只在保存时读 set 的结论，本用例不触发保存 */
+/** 不写盘的 mutate 替身（只观察快照变化之后的草稿归属）。 */
+function noopMutate(): boolean {
+  /* 卡片只在保存时读 mutate 的受理位，本用例不触发保存 */
+  return true;
 }
 
 // happy-dom 运行环境夹具。本文件有 21 个并列的顶层套件，夹具必须对**每一条用例**生效：
@@ -340,6 +350,13 @@ function resetDomEnv(): void {
   });
   Object.defineProperty(globals, "navigator", {
     value: win.navigator,
+    configurable: true,
+    writable: true,
+  });
+  // 浏览器的全局 Node 构造器：happy-dom 只挂在 window 上，而依赖它的代码（React 事件面）
+  // 读的是全局名；缺了这一位会在渲染期抛 ReferenceError。
+  Object.defineProperty(globals, "Node", {
+    value: win.Node,
     configurable: true,
     writable: true,
   });
@@ -364,6 +381,7 @@ async function teardownDomEnv(): Promise<void> {
   delete globals["window"];
   delete globals["document"];
   delete globals["navigator"];
+  delete globals["Node"];
   delete globals["IS_REACT_ACT_ENVIRONMENT"];
   vi.unstubAllGlobals();
   resetStateStore();
@@ -380,12 +398,35 @@ function reactProps<Props>(element: Element): Props {
   return (element as unknown as Record<string, Props>)[key]!;
 }
 
-/** happy-dom 的 <select> 节点收不到 React 的 __reactProps$ 标记（探针实证），
- *  但 dispatch change 事件能触达 React 19 的 onChange（onChange 读 e.target.value，
- *  不经 value 追踪器）。先写 value 再派发即可走通真实 onChange 链路。 */
-function changeSelect(el: HTMLSelectElement, value: string): void {
-  el.value = value;
-  el.dispatchEvent(new (win.Event as unknown as typeof Event)("change", { bubbles: true }));
+/** 卡片里的档位下拉（共享 SelectField 的 combobox 触发器，按渲染顺序）。 */
+function retryComboboxes(el: HTMLElement): HTMLButtonElement[] {
+  return [...el.querySelectorAll<HTMLButtonElement>('button[role="combobox"]')];
+}
+
+/** 断言第 index 行当前档位（触发器上显示选中项的文案）。 */
+function assertPreset(el: HTMLElement, index: number, preset: string): void {
+  const trigger = retryComboboxes(el)[index];
+  assert.ok(trigger, `第 ${String(index)} 行下拉存在`);
+  const labelKey = PRESET_LABEL_KEYS[preset];
+  assert.ok(labelKey !== undefined);
+  assert.equal(trigger.textContent, zhTable[labelKey], `第 ${String(index)} 行的当前档位`);
+}
+
+/** 打开第 index 行的档位下拉并点选目标档位（共享 SelectField 的两步交互）。 */
+async function pickPreset(container: HTMLElement, index: number, preset: string): Promise<void> {
+  const trigger = retryComboboxes(container)[index];
+  assert.ok(trigger, `第 ${String(index)} 行下拉存在`);
+  await act(async () => {
+    trigger.click();
+  });
+  const wrap = trigger.closest(".dsu-selectWrap");
+  assert.ok(wrap, "下拉触发器在其包裹层里");
+  const options = [...wrap.querySelectorAll<HTMLButtonElement>('button[role="option"]')];
+  const picked = options[PRESET_ORDER.indexOf(preset as (typeof PRESET_ORDER)[number])];
+  assert.ok(picked, `档位 ${preset} 的选项存在`);
+  await act(async () => {
+    picked.click();
+  });
 }
 
 function allButtons(el: HTMLElement): HTMLButtonElement[] {
@@ -738,6 +779,13 @@ interface MockClientCtx {
   listeners: Map<string, () => void>;
   registers: TestSlotReg[];
   setCalls: { field: string; value: unknown }[];
+  /** 官方 `mutate` 的调用记录（ops + 固定 revision）。 */
+  mutateCalls: { ops: readonly SettingsPathOpView[]; revision: number | undefined }[];
+  /** 覆盖 mutate 的受理位（缺省记录并受理）。 */
+  mutateImpl?: (
+    ops: readonly SettingsPathOpView[],
+    revision: number | undefined,
+  ) => Promise<boolean>;
   /** 本条目那张共享表单的替身：**官方 `ConfigForm` 五成员全必选**（getSnapshot /
    *  subscribe / mutate / set / unset），快照 6 位全齐。旧的三成员 + `getSnapshot:
    *  () => {status?: unknown}` 投影已删——那正是让 src 里的 fieldOf 再解析得以
@@ -801,6 +849,7 @@ function makeClientCtx(): MockClientCtx {
   const slots = new Map<string, () => (() => void) | undefined>();
   const registers: TestSlotReg[] = [];
   const setCalls: { field: string; value: unknown }[] = [];
+  const mutateCalls: MockClientCtx["mutateCalls"] = [];
   /** apply 向 `configForms.get()` 要过哪些条目 id（装配断言用）。 */
   const formEntryIds: string[] = [];
   const bindings = new Map<string, unknown>();
@@ -821,15 +870,22 @@ function makeClientCtx(): MockClientCtx {
         return holder.ctx.setImpl(field, value);
       }
       holder.ctx?.setCalls.push({ field, value });
-      // 桩件收下这次写入即「受理」；它不改建快照身份，所以卡片的事后复读数到的
-      // 仍是旧值——正是这条复读把「受理但没落盘」与「真落盘」区分开（0.1.6 与 0.1.7
-      // 同一条判据，见 src/client-entry.ts 的 setAndVerify）。
+      // 老的单字段写口：本卡已改用 mutate，保留它只为满足官方 ConfigForm 的类型面。
       return true;
     },
-    // 官方 `ConfigForm` 的另两位：本卡只写不清（恢复默认不在设置卡面上）、也从不走
-    // 批量原子写，但类型面要求它们在位——缺一位就编译不过，正是此次迁移要的防漂移。
+    // 官方 `ConfigForm` 的另两位：本卡只写不清（恢复默认不在设置卡面上），类型面要求
+    // 它们在位——缺一位就编译不过，正是此次迁移要的防漂移。
     unset: (): Promise<boolean> => Promise.resolve(true),
-    mutate: (): Promise<boolean> => Promise.resolve(true),
+    async mutate(
+      ops: readonly SettingsPathOpView[],
+      expectedRevision: number | undefined,
+    ): Promise<boolean> {
+      if (holder.ctx?.mutateImpl) {
+        return holder.ctx.mutateImpl(ops, expectedRevision);
+      }
+      holder.ctx?.mutateCalls.push({ ops, revision: expectedRevision });
+      return true;
+    },
   };
   const openSessionCalls: string[] = [];
   function sessionFaceOf(id: string): unknown {
@@ -872,6 +928,7 @@ function makeClientCtx(): MockClientCtx {
     listeners,
     registers,
     setCalls,
+    mutateCalls,
     scope,
     bindings,
     openSessionCalls,
@@ -1481,8 +1538,10 @@ interface SettingsPropsForTest {
   /** 框架把 hooks.card 映射成 useCard prop：快照形状即 src 的 CardSnapshot
    *  （status/writable 都是官方必选位，不再用 unknown 假装它们会缺）。 */
   useCard: (sel: (snap: CardSnapshotView) => unknown) => unknown;
-  /** 真实契约的 set 返回 promise（写后复读的结论由它带回）；测试替身可以不返回。 */
-  set: (field: string, value: unknown) => unknown;
+  /** 官方 mutate：一次原子写入，resolve 受理位。 */
+  mutate: (ops: readonly SettingsPathOpView[], revision?: number) => unknown;
+  /** 保存时固定一次的 revision。 */
+  revision: () => number | undefined;
   /** 官方 ctx.locale.bind 的结果（经 slot inject 下发）：卡片全部界面文案取自它。 */
   t: Translate;
 }
@@ -1499,37 +1558,55 @@ function settingsCardComponent(): unknown {
 /** 挂载配置表单（plugins.bundle.config 的 page 视图：表单直渲，无折叠外壳）。 */
 async function mountSettingsCard(
   value: Record<string, unknown>,
-  opts: { status?: CardSnapshotView["status"]; writable?: boolean; t?: Translate } = {},
-  setImpl?: (field: string, val: unknown) => unknown,
+  opts: {
+    status?: CardSnapshotView["status"];
+    writable?: boolean;
+    t?: Translate;
+    revision?: number | undefined;
+  } = {},
+  mutateImpl?: (ops: readonly SettingsPathOpView[]) => unknown,
   route?: (url: string) => FetchRoute,
-): Promise<{ container: HTMLElement; setCalls: { field: string; value: unknown }[] }> {
+): Promise<{
+  container: HTMLElement;
+  mutateCalls: { ops: readonly SettingsPathOpView[]; revision: number | undefined }[];
+  writes: { field: string; value: unknown }[];
+}> {
   // 先捕获组件（applyWithCtx 内部带默认 stub），再覆盖用例路由。
   const comp = settingsCardComponent() as React.ComponentType<SettingsPropsForTest>;
   stubFetch(route ?? (() => ({ ok: true, body: { ok: false, error: NO_PROVIDERS_ERROR } })));
-  const setCalls: { field: string; value: unknown }[] = [];
+  const mutateCalls: {
+    ops: readonly SettingsPathOpView[];
+    revision: number | undefined;
+  }[] = [];
+  const writes: { field: string; value: unknown }[] = [];
   rescueState.reader = readerFromFetch();
   await mount(
     React.createElement(comp, {
       view: "page",
       t: opts.t ?? tZh,
+      revision: () => ("revision" in opts ? opts.revision : 3),
       useCard: (sel) =>
         sel({
           status: opts.status ?? "ready",
           writable: opts.writable ?? true,
           value,
         }),
-      set:
-        setImpl ??
-        ((field: string, val: unknown) => {
-          setCalls.push({ field, value: val });
-        }),
+      mutate: (ops, revision) => {
+        mutateCalls.push({ ops, revision });
+        for (const op of ops) {
+          if (op.op === "set") {
+            writes.push({ field: op.path.join("."), value: op.value });
+          }
+        }
+        return mutateImpl === undefined ? true : mutateImpl(ops);
+      },
     }),
   );
   // page 视图直挂 RetryPolicySection，异步拉 providers，flush 让状态落定。
   await act(async () => {
     await flush();
   });
-  return { container: mountHost, setCalls };
+  return { container: mountHost, mutateCalls, writes };
 }
 
 describe("RescueSettingsCard 设置卡", () => {
@@ -1544,9 +1621,8 @@ describe("RescueSettingsCard 设置卡", () => {
         view: "summary",
         t: tZh,
         useCard: (sel) => sel({ status: "ready", writable: true, value: {} }),
-        set: () => {
-          /* summary 不触达 set */
-        },
+        mutate: noopMutate,
+        revision: () => 3,
       }),
     );
     const full = mountHost.textContent;
@@ -1566,7 +1642,7 @@ describe("RescueSettingsCard 设置卡", () => {
     });
     const full = container.textContent;
     assert.ok(full.includes("启用自动续跑"));
-    assert.ok(full.includes("续跑延迟 (ms)"));
+    assert.ok(full.includes("续跑延迟"));
     const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.ok(saveBtn);
     assert.equal(saveBtn.disabled, true, "无改动保存禁用");
@@ -1586,7 +1662,7 @@ describe("RescueSettingsCard 设置卡", () => {
   });
 
   it("修改 providerExcludes 草稿 → 保存 → commitTouched 落盘数组", async () => {
-    const { container, setCalls } = await mountSettingsCard({
+    const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       providerExcludes: [],
     });
@@ -1623,7 +1699,8 @@ describe("RescueSettingsCard 设置卡", () => {
       t: tZh,
       useCard: (sel) =>
         sel({ status: "ready", writable: true, value: { providerExcludes: excludes } }),
-      set: noopSet,
+      mutate: noopMutate,
+      revision: () => 3,
     });
     await mount(React.createElement(comp, props()));
     assert.equal(mountedInput(EXCLUDES_INPUT_SELECTOR).value, "", "初始草稿 = 快照");
@@ -1652,24 +1729,18 @@ describe("RescueSettingsCard 设置卡", () => {
     assert.equal(mountedSaveButton().disabled, false, "与最新快照不同 ⇒ 确有改动");
   });
 
-  it("数值行：Enter 提交有效值（onCommit → touched）→ 保存落盘 setField", async () => {
-    const { container, setCalls } = await mountSettingsCard({
+  it("数值行：以秒键入 → 保存按毫秒落盘", async () => {
+    const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       resumeDelayMs: 10_000,
     });
-    let numInput = container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR);
+    const numInput = container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR);
     assert.ok(numInput, "数值输入框存在");
-    // onChange 更新草稿并 stage（范围内即入 touched）；真实 DOM 下 state 变化自动重渲染
+    assert.equal(numInput.value, "10", "毫秒值以秒显示");
     await act(async () => {
-      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(numInput!).onChange({
-        target: { value: "15000" },
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(numInput).onChange({
+        target: { value: "15" },
       });
-    });
-    numInput = container.querySelector(RESUME_DELAY_INPUT_SELECTOR);
-    await act(async () => {
-      reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
-        numInput!,
-      ).onKeyDown({ key: "Enter", preventDefault: () => void 0 });
     });
     const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.equal(saveBtn!.disabled, false, "有改动保存可点");
@@ -1684,7 +1755,7 @@ describe("RescueSettingsCard 设置卡", () => {
   });
 
   it("开关行：点击切换（enabled → false 入 touched）", async () => {
-    const { container, setCalls } = await mountSettingsCard({ enabled: true });
+    const { container, writes: setCalls } = await mountSettingsCard({ enabled: true });
     const toggleBtn = container.querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR);
     assert.ok(toggleBtn, "switch 按钮存在");
     await act(async () => {
@@ -1737,16 +1808,8 @@ describe("RescueSettingsCard 设置卡", () => {
     assert.ok(numInput);
     await act(async () => {
       reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(numInput).onChange({
-        target: { value: "15000" },
+        target: { value: "15" },
       });
-    });
-    // Enter 步：NumberRow 的 stage() 读同 tick 闭包里的旧 draft，onChange 一次调用
-    // 不会直接入 touched（与数值行用例同款）；act 重渲染后新闭包读到 15000 才暂存。
-    const fresh = container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR);
-    await act(async () => {
-      reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
-        fresh!,
-      ).onKeyDown({ key: "Enter", preventDefault: () => void 0 });
     });
     await act(async () => {
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.click();
@@ -1787,15 +1850,12 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: false, body: null };
     });
-    const selects = [...container.querySelectorAll("select")] as HTMLSelectElement[];
-    assert.equal(selects.length, 3);
-    assert.equal(selects[0]!.value, "enhanced", "normal+12+QUOTA → enhanced");
-    assert.equal(selects[1]!.value, "default", "normal+5 → default");
-    assert.equal(selects[2]!.value, "always", "mode=always → always");
+    assert.equal(retryComboboxes(container).length, 3);
+    assertPreset(container, 0, "enhanced");
+    assertPreset(container, 1, "default");
+    assertPreset(container, 2, "always");
     // 改 openrouter 档位为 off
-    await act(async () => {
-      changeSelect(selects[1]!, "off");
-    });
+    await pickPreset(container, 1, "off");
     assert.ok(container.textContent.includes("保存（1 个改动）"), "保存条计数");
     const saveBtn = container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR);
     assert.ok(saveBtn);
@@ -1829,7 +1889,10 @@ describe("RetryPolicySection 重试策略区块", () => {
   it("清空数字栏（全选 + Delete）不上报 0：空草稿等于没填", async () => {
     // `Number("")` 是 **0**：不设这一道的话，抹掉 maxResumes 会被当成「设成 0」
     // 记成改动并落盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
-    const { container, setCalls } = await mountSettingsCard({ enabled: true, maxResumes: 3 });
+    const { container, writes: setCalls } = await mountSettingsCard({
+      enabled: true,
+      maxResumes: 3,
+    });
     const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]');
     assert.ok(input !== null, "maxResumes 是一枚数字栏");
     await act(async () => {
@@ -1866,11 +1929,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: true, body: { ok: true, csrf: "t", sessions: {} } };
     });
-    const sel0 = container.querySelector<HTMLSelectElement>("select");
-    assert.ok(sel0);
-    await act(async () => {
-      changeSelect(sel0, "off");
-    });
+    await pickPreset(container, 0, "off");
     await act(async () => {
       container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
     });
@@ -2512,16 +2571,20 @@ describe("dock 动作行与 host 写通道", () => {
 
 // ── 真实注入面：cardStore 快照稳定化 + set 的写后复读 ─────────────────────
 
+/** 官方 `ConfigForm.mutate` 的 op 视图（从被测表单类型派生，不手抄形状）。 */
+type SettingsPathOpView = Parameters<MockClientCtx["scope"]["mutate"]>[0][number];
+
 interface InjectedCardStore {
   /** 本卡渲染视模型：status/writable 在官方快照上是必选位，视图同样按必选声明。 */
   getSnapshot: () => CardSnapshotView;
   subscribe: (listener: () => void) => () => void;
 }
 
-/** 取 plugins.bundle.config 的注入面（真实 cardStore + 绑到 scope 的 setAndVerify）。 */
+/** 取 plugins.bundle.config 的注入面（真实 cardStore + 绑到 scope 的 mutate/revision）。 */
 function settingsWiring(ctx: MockClientCtx): {
   card: InjectedCardStore;
-  set: (field: string, value: unknown) => Promise<string | null>;
+  mutate: (ops: readonly SettingsPathOpView[], revision?: number) => Promise<boolean>;
+  revision: () => number | undefined;
   /** apply 经 ctx.locale.bind 拿到、再由 slot payload 下发的 translator。 */
   t: Translate;
   component: unknown;
@@ -2532,10 +2595,17 @@ function settingsWiring(ctx: MockClientCtx): {
   const reg = ctx.registers[0]!;
   const injected = reg.inject!() as {
     hooks: { card: InjectedCardStore };
-    set: (field: string, value: unknown) => Promise<string | null>;
+    mutate: (ops: readonly SettingsPathOpView[], revision?: number) => Promise<boolean>;
+    revision: () => number | undefined;
     t: Translate;
   };
-  return { card: injected.hooks.card, set: injected.set, t: injected.t, component: reg.component };
+  return {
+    card: injected.hooks.card,
+    mutate: injected.mutate,
+    revision: injected.revision,
+    t: injected.t,
+    component: reg.component,
+  };
 }
 
 /** 把 mock 的官方配置表单变成"宿主真会落盘"的形态：写入即换快照身份。
@@ -2548,15 +2618,18 @@ function reflectingScope(
   accept: boolean,
 ): void {
   let snapshot: FormSnapshot = snap({ value: { ...initial } });
-  ctx.scope.set = async (field: string, value: unknown): Promise<boolean> => {
+  ctx.scope.mutate = async (ops): Promise<boolean> => {
     if (!accept) {
       return false;
     }
+    const value: Record<string, unknown> = { ...snapshot.value };
+    for (const op of ops) {
+      if (op.op === "set") {
+        value[op.path.join(".")] = op.value;
+      }
+    }
     // 换代必须换**引用**：cardStore 的 memo 靠引用相等判「未换代」。
-    snapshot = snap({
-      value: { ...snapshot.value, [field]: value },
-      revision: (snapshot.revision ?? 0) + 1,
-    });
+    snapshot = snap({ value, revision: (snapshot.revision ?? 0) + 1 });
     return true;
   };
   ctx.scope.getSnapshot = () => snapshot;
@@ -2564,7 +2637,7 @@ function reflectingScope(
 
 /** 用真实注入面（hooks.card + set + t）挂载设置卡，而不是测试自己的 useCard 替身。 */
 async function mountInjectedSettingsCard(ctx: MockClientCtx): Promise<HTMLElement> {
-  const { card, set, t, component } = settingsWiring(ctx);
+  const { card, mutate, revision, t, component } = settingsWiring(ctx);
   const comp = component as React.ComponentType<SettingsPropsForTest>;
   stubFetch(() => ({ ok: true, body: { ok: false, error: NO_PROVIDERS_ERROR } }));
   await mount(
@@ -2572,7 +2645,8 @@ async function mountInjectedSettingsCard(ctx: MockClientCtx): Promise<HTMLElemen
       view: "page",
       t,
       useCard: (sel) => sel(card.getSnapshot()),
-      set,
+      mutate,
+      revision,
     }),
   );
   await act(async () => {
@@ -2604,7 +2678,7 @@ describe("cardStore：快照引用稳定化与投影降级", () => {
     reflectingScope(ctx, { enabled: true }, true);
     const { card } = settingsWiring(ctx);
     const first = card.getSnapshot();
-    await ctx.scope.set("enabled", false);
+    await ctx.scope.mutate([{ op: "set", path: ["enabled"], value: false }]);
     assert.notEqual(card.getSnapshot(), first, "换代 → 重算视图");
     assert.deepEqual(card.getSnapshot(), {
       status: "ready",
@@ -2630,39 +2704,92 @@ describe("cardStore：快照引用稳定化与投影降级", () => {
   });
 });
 
-describe("setAndVerify：写后复读才是唯一判定点", () => {
+describe("commitTouched：一次命名空间 mutation", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
-  it("复读一致 → null（false 这类假值也要按值比，不能按真假比）", async () => {
-    const ctx = applyWithCtx();
-    reflectingScope(ctx, { enabled: true }, true);
-    const { set } = settingsWiring(ctx);
-    assert.equal(await set("enabled", false), null, "落库成功 → 无错误");
-    assert.deepEqual(ctx.scope.getSnapshot().value, { enabled: false });
+  it("多字段 + providerExcludes → 一次 mutate，ops 齐全、revision 取保存时刻", async () => {
+    const { container, mutateCalls } = await mountSettingsCard(
+      { enabled: true, resumeDelayMs: 10_000, providerExcludes: [] },
+      { revision: 7 },
+    );
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR)!.click();
+    });
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
+        container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
+      ).onChange({ target: { value: "15" } });
+    });
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
+        container.querySelector<HTMLInputElement>(EXCLUDES_INPUT_SELECTOR)!,
+      ).onChange({ target: { value: "baidu-token-plan, xkiro" } });
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(mutateCalls.length, 1, "一次保存只发一次 mutation");
+    assert.equal(mutateCalls[0]?.revision, 7, "revision 固定为保存时读到的那一个");
+    const [{ ops }] = mutateCalls;
+    const byField = new Map(
+      ops.filter((op) => op.op === "set").map((op) => [op.path.join("."), op.value]),
+    );
+    assert.deepEqual(byField.get("enabled"), false, "开关按新值写");
+    assert.equal(byField.get("resumeDelayMs"), 15_000, "秒输入按毫秒落盘");
+    assert.deepEqual(byField.get("providerExcludes"), ["baidu-token-plan", "xkiro"]);
+    assert.equal(ops.length, 3, "三个字段同批，无重复 op");
   });
 
-  it("宿主回退旧值 → 返回可见文案（被拒不得报「已保存」）", async () => {
-    const ctx = applyWithCtx();
-    reflectingScope(ctx, { maxResumes: 3 }, false);
-    const { set } = settingsWiring(ctx);
-    assert.match((await set("maxResumes", 9)) ?? "", /未被宿主接受/u);
+  it("宿主拒绝整批 → 可见文案且草稿保留（可原地重试）", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, () => false);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR)!.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("宿主拒绝了本次保存"), "拒绝必须可见");
+    assert.equal(
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.disabled,
+      false,
+      "草稿保留 → 仍可点保存重试",
+    );
   });
 
-  it("undefined 与缺失等价；value 尚未受理（官方 undefined）时按 null 比较", async () => {
-    const ctx = applyWithCtx();
-    reflectingScope(ctx, {}, true);
-    const { set } = settingsWiring(ctx);
-    // 官方快照的 value 位是 `T | undefined`（首个快照受理前真的是 undefined），所以
-    // 这里不再伪造「value 是非对象」那种宿主送不出的形状。
-    ctx.scope.getSnapshot = () => snap({ status: "loading", value: undefined });
-    assert.equal(await set("providerExcludes", undefined), null, "两侧都是 undefined → 视为一致");
-    ctx.scope.getSnapshot = () => snap({ value: {} });
-    assert.match((await set("providerExcludes", ["a"])) ?? "", /未被宿主接受/u);
+  it("保存时读一次 revision：中途快照换代也只用保存那一刻的值", async () => {
+    let reads = 0;
+    const { container, mutateCalls } = await mountSettingsCard(
+      { enabled: true },
+      {
+        get revision() {
+          reads += 1;
+          return reads === 1 ? 3 : 99;
+        },
+      },
+    );
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR)!.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(mutateCalls.length, 1);
+    assert.equal(mutateCalls[0]?.revision, 3, "固定保存时那一次读到的 revision");
+    assert.equal(reads, 1, "保存路径只读一次 revision");
   });
 });
 
-describe("设置卡保存闭环（真实 hooks.card + setAndVerify）", () => {
+describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
@@ -2712,7 +2839,7 @@ describe("设置卡保存闭环（真实 hooks.card + setAndVerify）", () => {
     await act(async () => {
       await flush();
     });
-    assert.ok(container.textContent.includes("enabled 未被宿主接受"), "拒绝必须可见");
+    assert.ok(container.textContent.includes("宿主拒绝了本次保存"), "拒绝必须可见");
     assert.equal(
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.disabled,
       false,
@@ -2731,18 +2858,20 @@ describe("设置卡保存闭环（真实 hooks.card + setAndVerify）", () => {
         container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
       ).onChange({ target: { value: "abc" } });
     });
+    assert.equal(saveBtn().disabled, true, "非数字不进 touched");
     await act(async () => {
-      reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
         container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
-      ).onKeyDown({ key: "Tab", preventDefault: () => void 0 });
+      ).onChange({ target: { value: "" } });
     });
-    assert.equal(saveBtn().disabled, true, "非 Enter 不提交");
+    assert.equal(saveBtn().disabled, true, "空草稿不写入");
     await act(async () => {
-      reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
         container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
-      ).onKeyDown({ key: "Enter", preventDefault: () => void 0 });
+      ).onChange({ target: { value: "5000" } });
     });
-    assert.equal(saveBtn().disabled, true, "abc 不是有效数值 → 不入 touched");
+    assert.equal(saveBtn().disabled, true, "越界不进 touched");
+    assert.ok(container.textContent.includes("超出允许范围"), "越界就地提示可见");
     const before = JSON.stringify(ctx.scope.getSnapshot().value);
     // disabled 按钮收不到 click（React 19），陈旧 handler 直调命中的正是 save 的
     // `!dirty` 早退闸门——它保证任何路径下都不会发出空写入。
@@ -2760,15 +2889,6 @@ describe("设置卡保存闭环（真实 hooks.card + setAndVerify）", () => {
 
 function callsTo(url: string): number {
   return fetchCalls.filter((entry) => entry.url.startsWith(url)).length;
-}
-
-async function pickPreset(container: HTMLElement, index: number, preset: string): Promise<void> {
-  const selects = [...container.querySelectorAll("select")] as HTMLSelectElement[];
-  const picked = selects[index];
-  assert.ok(picked, `第 ${String(index)} 行下拉存在`);
-  await act(async () => {
-    changeSelect(picked, preset);
-  });
 }
 
 async function clickRetrySave(container: HTMLElement): Promise<void> {
@@ -2804,10 +2924,9 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
           }
         : { ok: true, body: { ok: true, sessions: {} } },
     );
-    const selects = [...container.querySelectorAll("select")] as HTMLSelectElement[];
-    assert.equal(selects.length, 2, "非对象行丢弃");
-    assert.equal(selects[0]!.value, "off", "maxRetries 0 → off 档");
-    assert.equal(selects[1]!.value, "off", "坏字段降级后仍是 off");
+    assert.equal(retryComboboxes(container).length, 2, "非对象行丢弃");
+    assertPreset(container, 0, "off");
+    assertPreset(container, 1, "off");
     assert.ok(container.textContent.includes("normal · max 0 · QUOTA ✗"));
   });
 
@@ -2951,12 +3070,7 @@ describe("写通道自身的抛错面（save 的 catch）", () => {
     await act(async () => {
       reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(
         container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
-      ).onChange({ target: { value: "15000" } });
-    });
-    await act(async () => {
-      reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
-        container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
-      ).onKeyDown({ key: "Enter", preventDefault: () => void 0 });
+      ).onChange({ target: { value: "15" } });
     });
     await act(async () => {
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!.click();
@@ -3022,7 +3136,7 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
     const container = await mountInjectedSettingsCard(ctx);
     const text = container.textContent;
     assert.match(text, /Enable auto-resume/u, "英文开关 label");
-    assert.match(text, /Resume delay \(ms\)/u, "英文数值行 label");
+    assert.match(text, /Resume delay/u, "英文数值行 label");
     assert.match(text, /Save/u, "英文保存按钮");
     assert.doesNotMatch(text, /[一-鿿]/u, "整卡不该混进中文");
   });

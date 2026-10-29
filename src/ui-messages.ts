@@ -74,8 +74,8 @@ export interface UiMessages {
   /** 快照未就绪时按钮的等待提示。 */
   readonly toggleWaiting: string;
   // ── 设置卡：字段与保存条 ──
-  /** 宿主拒绝落盘时的模板（`{field}`/`{value}` 插值）。 */
-  readonly fieldRejected: string;
+  /** 宿主拒绝整批写入时的原因（作保存条的明细）。 */
+  readonly saveRejected: string;
   /** 保存失败前缀（后接逐字段原因）。 */
   /** 前缀 + 失败明细。明细走 `{detail}` 占位符而不是靠尾部空白拼接：靠空白意味着任何一次
    *  本地化改写（换全角冒号、去掉尾空格）都会让下一段粘上去，而那种错在类型系统里看不出来。 */
@@ -83,11 +83,19 @@ export interface UiMessages {
   /** 多条失败原因的连接符。 */
   readonly failureJoiner: string;
   readonly statusReadOnly: string;
-  readonly statusDirty: string;
+  readonly statusClean: string;
   readonly saving: string;
   readonly discard: string;
+  /** 保存条上的改动条数（`{count}` 插值）。 */
+  readonly dirtyCount: string;
+  /** 数字输入里的单位后缀。 */
+  readonly unitSeconds: string;
+  readonly unitTimes: string;
+  /** 数字输入越界时的就地提示。 */
+  readonly outOfRange: string;
   /** 表单开头的一致性说明。 */
   readonly formLead: string;
+  readonly resumeSection: string;
   readonly enabledLabel: string;
   readonly enabledHint: string;
   readonly resumeDelayLabel: string;
@@ -114,7 +122,9 @@ export interface UiMessages {
   readonly unfinishedCooldownHint: string;
   readonly maxUnfinishedLabel: string;
   readonly maxUnfinishedHint: string;
-  readonly excludesLabel: string;
+  readonly excludesSection: string;
+  /** 排除名单字段的标签（区块标题已写「排除路由」，这里只标名单本体）。 */
+  readonly excludesFieldLabel: string;
   readonly excludesHint: string;
   readonly excludesPlaceholder: string;
   /** plugins.bundle.config 的 summary 视图（标题下一行摘要）。 */
@@ -220,43 +230,48 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     toggleTurnOff: "关闭",
     sessionToggleLabel: "自动续跑（本会话）：{state}",
     toggleWaiting: "状态同步中，稍后重试",
-    fieldRejected: "{field} 未被宿主接受（值已回退到 {value}）",
+    saveRejected: "宿主拒绝了本次保存（设置可能已在别处被改动），请核对后重试",
     saveFailed: "保存失败：{detail}",
     failureJoiner: "；",
     statusReadOnly: "当前作用域只读",
-    statusDirty: "有未保存的修改，点「保存」生效",
+    statusClean: "无未保存的修改",
     saving: "保存中…",
     discard: "撤销",
+    dirtyCount: "已修改 {count} 项",
+    unitSeconds: "秒",
+    unitTimes: "次",
+    outOfRange: "超出允许范围，未保存",
     formLead: "失败分类为内置安全逻辑，不可配置；以下仅调自动续跑参数（改动点「保存」生效）。",
+    resumeSection: "瞬时失败自动续跑",
     enabledLabel: "启用自动续跑",
     enabledHint: "关闭后仅保留手动编辑/重试/续写等 UI 能力",
-    resumeDelayLabel: "续跑延迟 (ms)",
-    resumeDelayHint: "内置重试耗尽后等待多久发送续跑消息（1000–300000）",
-    resumeCooldownLabel: "冷却时间 (ms)",
-    resumeCooldownHint: "同一会话两次自动续跑的最短间隔（5000–3600000）",
-    maxResumesLabel: "每会话上限 (次)",
+    resumeDelayLabel: "续跑延迟",
+    resumeDelayHint: "内置重试耗尽后等待多久发送续跑消息（1–300 秒）",
+    resumeCooldownLabel: "冷却时间",
+    resumeCooldownHint: "同一会话两次自动续跑的最短间隔（5–3600 秒）",
+    maxResumesLabel: "每会话上限",
     maxResumesHint: "单个会话最多自动续跑次数（0–20）",
-    chainDelayLabel: "链式重试延迟 (ms)",
-    chainDelayHint:
-      "续跑消息开出的回合再次失败时，跳过冷却按此延迟续跑（跨出限流窗口；1000–300000）",
+    chainDelayLabel: "链式重试延迟",
+    chainDelayHint: "续跑消息开出的回合再次失败时，跳过冷却按此延迟续跑（跨出限流窗口；1–300 秒）",
     maxTokensSection: "输出截断自动继续（max-tokens）",
-    continueDelayLabel: "继续延迟 (ms)",
-    continueDelayHint: "回合因输出上限截断后等待多久自动补发续写指令（500–300000）",
-    continueCooldownLabel: "继续冷却 (ms)",
-    continueCooldownHint: "同一会话两次自动继续的最短间隔（5000–3600000）",
-    maxContinuesLabel: "继续上限 (次)",
+    continueDelayLabel: "继续延迟",
+    continueDelayHint: "回合因输出上限截断后等待多久自动补发续写指令（0.5–300 秒）",
+    continueCooldownLabel: "继续冷却",
+    continueCooldownHint: "同一会话两次自动继续的最短间隔（5–3600 秒）",
+    maxContinuesLabel: "继续上限",
     maxContinuesHint: "单个会话最多自动继续次数（0–20）",
     unfinishedSection: "待办未闭合自动补跑（completed 回合）",
     openTodosLabel: "启用待办补跑",
     openTodosHint:
       "回合正常结束但本回合自己写的待办仍有未完成项时自动补跑；模型在等你回答（ask_user_question）或该回合由 goal 轮次驱动时不会注入",
-    unfinishedDelayLabel: "补跑延迟 (ms)",
-    unfinishedDelayHint: "检测到待办未闭合后等待多久发送补跑指令（1000–300000）",
-    unfinishedCooldownLabel: "补跑冷却 (ms)",
-    unfinishedCooldownHint: "同一会话两次待办补跑的最短间隔（5000–3600000）",
-    maxUnfinishedLabel: "补跑上限 (次)",
+    unfinishedDelayLabel: "补跑延迟",
+    unfinishedDelayHint: "检测到待办未闭合后等待多久发送补跑指令（1–300 秒）",
+    unfinishedCooldownLabel: "补跑冷却",
+    unfinishedCooldownHint: "同一会话两次待办补跑的最短间隔（5–3600 秒）",
+    maxUnfinishedLabel: "补跑上限",
     maxUnfinishedHint: "清单连续未闭合时最多补跑次数；清单闭合后配额自动恢复（0–20）",
-    excludesLabel: "排除路由（provider）",
+    excludesSection: "排除路由",
+    excludesFieldLabel: "Provider 名单",
     excludesHint: "逗号分隔；列出的路由永不自动续跑（如已配置专属 retryPolicy 的路由）",
     excludesPlaceholder: "例如：baidu-token-plan, other-route",
     cardSummary: "瞬时失败自动续跑 + 编辑重发/重试/续写/停止重问；429 重试策略可视化配置",
@@ -314,48 +329,55 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     toggleTurnOff: "Turn off",
     sessionToggleLabel: "Auto-resume (this session): {state}",
     toggleWaiting: "State still syncing — try again shortly",
-    fieldRejected: "{field} was not accepted by the host (value reverted to {value})",
+    saveRejected:
+      "The host rejected this save (the settings may have changed elsewhere); review and retry",
     saveFailed: "save failed: {detail}",
     failureJoiner: "; ",
     statusReadOnly: "This scope is read-only",
-    statusDirty: "Unsaved changes — press Save to apply",
+    statusClean: "No unsaved changes",
     saving: "Saving…",
     discard: "Revert",
+    dirtyCount: "{count} changed",
+    unitSeconds: "seconds",
+    unitTimes: "times",
+    outOfRange: "Out of the allowed range — not saved",
     formLead:
       "Failure classification is built-in safety logic and is not configurable; the fields below only tune auto-resume (press Save to apply).",
+    resumeSection: "Auto-resume on transient failures",
     enabledLabel: "Enable auto-resume",
     enabledHint: "When off, only the manual edit / retry / continue UI stays available",
-    resumeDelayLabel: "Resume delay (ms)",
+    resumeDelayLabel: "Resume delay",
     resumeDelayHint:
-      "How long to wait before sending the resume message once built-in retries are exhausted (1000–300000)",
-    resumeCooldownLabel: "Cooldown (ms)",
-    resumeCooldownHint: "Minimum gap between two auto-resumes in one session (5000–3600000)",
-    maxResumesLabel: "Per-session cap (times)",
+      "How long to wait before sending the resume message once built-in retries are exhausted (1–300 s)",
+    resumeCooldownLabel: "Cooldown",
+    resumeCooldownHint: "Minimum gap between two auto-resumes in one session (5–3600 s)",
+    maxResumesLabel: "Per-session cap",
     maxResumesHint: "Maximum auto-resumes in a single session (0–20)",
-    chainDelayLabel: "Chain retry delay (ms)",
+    chainDelayLabel: "Chain retry delay",
     chainDelayHint:
-      "When the turn opened by a resume message fails again, skip the cooldown and resume at this delay (step out of the rate-limit window; 1000–300000)",
+      "When the turn opened by a resume message fails again, skip the cooldown and resume at this delay (step out of the rate-limit window; 1–300 s)",
     maxTokensSection: "Auto-continue after output truncation (max-tokens)",
-    continueDelayLabel: "Continue delay (ms)",
+    continueDelayLabel: "Continue delay",
     continueDelayHint:
-      "How long to wait before auto-sending the continue instruction after a turn is truncated by the output cap (500–300000)",
-    continueCooldownLabel: "Continue cooldown (ms)",
-    continueCooldownHint: "Minimum gap between two auto-continues in one session (5000–3600000)",
-    maxContinuesLabel: "Continue cap (times)",
+      "How long to wait before auto-sending the continue instruction after a turn is truncated by the output cap (0.5–300 s)",
+    continueCooldownLabel: "Continue cooldown",
+    continueCooldownHint: "Minimum gap between two auto-continues in one session (5–3600 s)",
+    maxContinuesLabel: "Continue cap",
     maxContinuesHint: "Maximum auto-continues in a single session (0–20)",
     unfinishedSection: "Auto re-run when the todo list stays open (completed turns)",
     openTodosLabel: "Enable todo re-run",
     openTodosHint:
       "Re-run automatically when a turn ends normally but the todos it wrote itself still have open items; nothing is injected while the model waits for your answer (ask_user_question) or the turn is driven by goal rounds",
-    unfinishedDelayLabel: "Re-run delay (ms)",
+    unfinishedDelayLabel: "Re-run delay",
     unfinishedDelayHint:
-      "How long to wait before sending the re-run instruction after an open todo list is detected (1000–300000)",
-    unfinishedCooldownLabel: "Re-run cooldown (ms)",
-    unfinishedCooldownHint: "Minimum gap between two todo re-runs in one session (5000–3600000)",
-    maxUnfinishedLabel: "Re-run cap (times)",
+      "How long to wait before sending the re-run instruction after an open todo list is detected (1–300 s)",
+    unfinishedCooldownLabel: "Re-run cooldown",
+    unfinishedCooldownHint: "Minimum gap between two todo re-runs in one session (5–3600 s)",
+    maxUnfinishedLabel: "Re-run cap",
     maxUnfinishedHint:
       "Maximum re-runs while the list stays open; the budget refills once the list closes (0–20)",
-    excludesLabel: "Excluded routes (provider)",
+    excludesSection: "Excluded routes",
+    excludesFieldLabel: "Provider list",
     excludesHint:
       "Comma separated; listed routes are never auto-resumed (e.g. routes with their own retryPolicy)",
     excludesPlaceholder: "e.g. baidu-token-plan, other-route",

@@ -12,7 +12,8 @@
 //
 // 纯函数、无 React、无 I/O——可单测。组件侧只做投影与 createElement。
 
-import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { z } from "zod";
 
 /** host 状态快照的最小投影（来自官方 Remote 的 state 读面）。 */
 export interface RescueStateBody {
@@ -39,50 +40,82 @@ export interface RescueSessionState {
 /** 会话开关三态：on=开启 / off=已关闭 / unknown=快照未就绪（中性显示）。 */
 export type ToggleState = "on" | "off" | "unknown";
 
-/** 载荷里的数值守卫：只认有限数。NaN / ±Infinity 同样通不过 `typeof === "number"`，
- *  而它们的下游是渲染文案，坏值会一直漂到用户眼前才被发现。 */
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
+/** 有限数：NaN / ±Infinity 同样通不过 `typeof === "number"`，而它们的下游是渲染文案，
+ *  坏值会一直漂到用户眼前才被发现。 */
+const FINITE_NUMBER = z.number().refine(Number.isFinite, { error: "必须是有限数" });
+
+/** 只认显式 true；false/缺位一律折成 undefined，输出时自然缺席。 */
+const TRUE_ONLY = z.preprocess(
+  (value) => (value === true ? true : undefined),
+  z.literal(true).optional(),
+);
+
+/** pending 的线上形状：字段不全/类型不符 → null（防御纵深）。 */
+const PENDING_SCHEMA = z.object({
+  turn: FINITE_NUMBER,
+  kind: z.string(),
+  fireAt: FINITE_NUMBER,
+  remainingMs: FINITE_NUMBER,
+  chained: TRUE_ONLY,
+  suspended: TRUE_ONLY,
+});
+
+/** 一条会话的逐字段守卫投影：非数字落回 0，pending 只认显式 `null` 与可投影对象。 */
+const SESSION_ENTRY_SCHEMA = z.object({
+  count: z.preprocess(
+    (value) => (typeof value === "number" && Number.isFinite(value) ? value : 0),
+    z.number(),
+  ),
+  lastFireAt: z.preprocess(
+    (value) => (typeof value === "number" && Number.isFinite(value) ? value : 0),
+    z.number(),
+  ),
+  // `z.unknown()` 不等于「键可以缺席」：缺 `pending` 的行会报 nonoptional 而不是降级，
+  // 整条 `/state` 解析随之抛错。`.optional()` 让缺席回到 null 那条既有路径。
+  pending: z.unknown().optional(),
+  disabled: TRUE_ONLY,
+});
+
+/** 把 zod 的 optional 输出收成接口要求的「缺席或有值」（exactOptionalPropertyTypes）。 */
+function projectPending(pending: z.infer<typeof PENDING_SCHEMA>): RescuePending {
+  return {
+    turn: pending.turn,
+    kind: pending.kind,
+    fireAt: pending.fireAt,
+    remainingMs: pending.remainingMs,
+    ...(pending.chained === true ? { chained: true } : {}),
+    ...(pending.suspended === true ? { suspended: true } : {}),
+  };
 }
 
 /** 从原始 /state 载荷投影 pending（字段不全/类型不符 → null；防御纵深）。 */
 function parsePending(raw: unknown): RescuePending | null {
-  if (!isRecord(raw)) {
-    return null;
-  }
-  const { turn, kind, fireAt, remainingMs, chained, suspended } = raw;
-  // 有限性也要判：NaN 能通过 `typeof === "number"`，而它的下游是文案——倒计时会写出
-  // "NaN 秒"、计数会写出 "NaN 次"，那时已经离载荷很远了。JSON 里本没有 NaN，但本模块
-  // 拿的是宿主经网关交回的对象，不是解析后的 JSON 字符串。
-  if (
-    !isFiniteNumber(turn) ||
-    typeof kind !== "string" ||
-    !isFiniteNumber(fireAt) ||
-    !isFiniteNumber(remainingMs)
-  ) {
-    return null;
-  }
-  return {
-    turn,
-    kind,
-    fireAt,
-    remainingMs,
-    ...(chained === true ? { chained: true } : {}),
-    ...(suspended === true ? { suspended: true } : {}),
-  };
+  const parsed = PENDING_SCHEMA.safeParse(raw);
+  return parsed.success ? projectPending(parsed.data) : null;
 }
 
-/** 一条会话计数的逐字段守卫投影：非数字落回 0，pending 只认显式 `null` 与可投影对象。
- *  `disabled` 只在显式 true 时出现在结果里（缺位 ⇒ 与 `false` 判定同解，见 dock 读侧）。 */
+/** 一条会话计数的逐字段守卫投影（坏形状降级而非丢给断言）。 */
 function parseSessionEntry(entry: Record<string, unknown>): RescueSessionState {
-  const { count, lastFireAt, disabled, pending: pendingRaw } = entry;
+  const { count, lastFireAt, pending, disabled } = SESSION_ENTRY_SCHEMA.parse(entry);
   return {
-    count: isFiniteNumber(count) ? count : 0,
-    lastFireAt: isFiniteNumber(lastFireAt) ? lastFireAt : 0,
-    pending: pendingRaw === null ? null : parsePending(pendingRaw),
+    count,
+    lastFireAt,
+    pending: parsePending(pending),
     ...(disabled === true ? { disabled: true } : {}),
   };
 }
+
+/**
+ * /state 载荷信封：`ok` 必须是字面量 true；`sessions` 用 `z.custom` 保留原始对象，
+ * 不用 `z.record` —— 后者会按服务端给的键重建表，`"__proto__"` 那一行会命中原型 setter。
+ * 条目仍在下面逐条按 schema 投影。
+ */
+const STATE_SCHEMA = z.object({
+  ok: z.literal(true),
+  sessions: z
+    .custom<Record<string, unknown>>(isRecord, { error: "sessions 必须是对象" })
+    .optional(),
+});
 
 /** 解析 /state 载荷为本模块的快照类型：逐字段守卫投影，坏形状降级而非丢给断言。
  *  ok!==true → null。`sessions` **缺位**与**形状损坏**要分开判：
@@ -94,18 +127,16 @@ function parseSessionEntry(entry: Record<string, unknown>): RescueSessionState {
  *      「读到了，一切正常」是最难查的那类失败。
  *  wire 是本包唯一的外部输入面，读法因此住在这里而不是渲染侧。 */
 export function parseStateBody(parsed: Record<string, unknown>): RescueStateBody | null {
-  if (fieldOf(parsed, "ok") !== true) {
+  const envelope = STATE_SCHEMA.safeParse(parsed);
+  if (!envelope.success) {
     return null;
   }
-  const sessions = fieldOf(parsed, "sessions");
+  const { sessions } = envelope.data;
   if (sessions === undefined) {
     return { ok: true };
   }
-  if (!isRecord(sessions)) {
-    return null;
-  }
   // 键来自服务端 JSON：`{}` 上 `"__proto__"` 命中的是原型 setter，那一行不进表、
-  // 还把整张表的原型换掉。按条目构造就没有那个 setter。
+  // 还把整张表的原型换掉。entries 数组 + Object.fromEntries 按数据属性写入，没有那个 setter。
   const entries: [string, RescueSessionState][] = [];
   for (const sessionId of Object.keys(sessions)) {
     const entry = sessions[sessionId];

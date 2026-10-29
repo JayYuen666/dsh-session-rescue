@@ -9,6 +9,7 @@ import type {
   TypertCodec,
 } from "@deepseek-ai/dsh-typert-protocol";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { z } from "zod";
 
 const RESCUE_NAMESPACE = "sessionRescue";
 /** 宿主侧提供 Remote 挂载能力的服务名。常量而非内联字面量：它在 ctx.get 里出现过一次，
@@ -18,21 +19,46 @@ const REMOTE_SERVICE = "remote";
 const RESCUE_SERVICE_KEY = `${REMOTE_SERVICE}.${RESCUE_NAMESPACE}`;
 const PACKAGE_NAME = "@jayyuen66/dsh-session-rescue";
 
+/** strict codec 的统一出口：失败交给 zod 的 `prettifyError`，读到的是一份带字段路径的说明。 */
+function parseOrThrow<Result>(schema: z.ZodType<Result>, value: unknown): Result {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new TypeError(z.prettifyError(parsed.error));
+  }
+  return parsed.data;
+}
+
+// 空串要在这里挡掉：宿主侧那几个方法都按 sessionId 查表，空串永远查不到，
+// 返回的却是一条「找不到该会话」的业务失败，读起来像是会话没了而不是入参错了。
+const SESSION_MESSAGE = "session request requires a non-empty string sessionId";
+const SESSION_SCHEMA = z.object(
+  {
+    sessionId: z
+      .string({ error: SESSION_MESSAGE })
+      .refine((value) => value.trim() !== "", { error: SESSION_MESSAGE }),
+  },
+  { error: SESSION_MESSAGE },
+);
+
+const POLICY_MESSAGE = "policy request requires non-empty string provider and preset";
+const POLICY_SCHEMA = z.object(
+  {
+    provider: z
+      .string({ error: POLICY_MESSAGE })
+      .refine((value) => value.trim() !== "", { error: POLICY_MESSAGE }),
+    preset: z
+      .string({ error: POLICY_MESSAGE })
+      .refine((value) => value.trim() !== "", { error: POLICY_MESSAGE }),
+  },
+  { error: POLICY_MESSAGE },
+);
+
 const SESSION_CODEC: TypertCodec<{ sessionId: string }> = {
   mode: "strict",
   typeSymbol: `${PACKAGE_NAME}#session-request`,
   create: () => ({
     parse(value: unknown): { sessionId: string } {
-      // 空串要在这里挡掉：宿主侧那几个方法都按 sessionId 查表，空串永远查不到，
-      // 返回的却是一条「找不到该会话」的业务失败，读起来像是会话没了而不是入参错了。
-      if (
-        !isRecord(value) ||
-        typeof value["sessionId"] !== "string" ||
-        value["sessionId"].trim() === ""
-      ) {
-        throw new TypeError("session request requires a non-empty string sessionId");
-      }
-      return { sessionId: value["sessionId"] };
+      return parseOrThrow(SESSION_SCHEMA, value);
     },
   }),
 };
@@ -42,16 +68,7 @@ const POLICY_CODEC: TypertCodec<{ provider: string; preset: string }> = {
   typeSymbol: `${PACKAGE_NAME}#policy-request`,
   create: () => ({
     parse(value: unknown): { provider: string; preset: string } {
-      if (
-        !isRecord(value) ||
-        typeof value["provider"] !== "string" ||
-        value["provider"].trim() === "" ||
-        typeof value["preset"] !== "string" ||
-        value["preset"].trim() === ""
-      ) {
-        throw new TypeError("policy request requires non-empty string provider and preset");
-      }
-      return { provider: value["provider"], preset: value["preset"] };
+      return parseOrThrow(POLICY_SCHEMA, value);
     },
   }),
 };
