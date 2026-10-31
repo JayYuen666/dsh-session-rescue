@@ -82,9 +82,9 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`。包在公共 npm 上，安装不需要凭据，也不需要 scoped-registry 配置。
 
 - **需要 Node.js `>= 22.12`。** 本包仅 ESM；正是这个 Node 下限让 `require()` 一份 ESM 入口成为可能，`engines.node` 因此声明。
-- **需要宿主 `dsh` 在 `0.2.1-rc.3` 这条线上。** 宿主装插件时读的是 `engines.dsh`（`^0.2.1-rc.3`，即 `0.2.x` 这条线——`0.` 主版本上的 `^` 上界到 `0.3.0` 之前），而且它**单独决定**：那一支给出结论后不再读 `peerDependencies`。预发布版本参与范围比较（宿主按 `includePrerelease: true` 判），所以窗口内的 `0.2.2-alpha.2` 同样满足。`@deepseek-ai/dsh-*` 的精确 peer 是编译期纪律，不参与装载判定。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **需要宿主 `dsh` 在 `0.2.1-rc.3` / `0.2.2-alpha.2` 这条线上。** 宿主装插件时读的是 `engines.dsh`（`^0.2.1-rc.3`），而且它**单独决定**：那一支给出结论后不再读 `peerDependencies`。预发布版本参与范围比较（宿主按 `includePrerelease: true` 判）。`@deepseek-ai/dsh-*` 的 peer 写同一条窗口；精确钉版只在 `devDependencies` 里，那是编译期纪律，不参与装载判定。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里没有任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 以 `nodeLinker: hoisted` + `autoInstallPeers: false` 安装，`dependencies` 里的宿主包会被物化成一份真实目录、落在运行中宿主已装载的那份旁边——此后原生工具调用全部抛错，而构建、类型检查、覆盖率一路全绿。`host.js` 值导入的两枚宿主包（`@deepseek-ai/dsh-brand`、`@deepseek-ai/schemastery`）是必备 peer、并以同一钉版重复落在 `devDependencies`，打包器因此把它们外部化而不是内联官方函数体。
-- **随包发布**：`prepack` 重建的 `host.js` 与 `client.js`、`types/`、`cordis.patch.yml`，加上 `README*`、`LICENSE`、`CHANGELOG.md` 与 `icon.svg`。产物不提交，也刻意不压缩——裸跨包说明符必须留在产物里，外部化断言才有意义。
+- **随包发布**：`prepare` 重建的 `host.js` 与 `client.js`、`types/`、`cordis.patch.yml`，加上 `README*`、`LICENSE`、`CHANGELOG.md` 与 `icon.svg`。产物不提交，也刻意不压缩——裸跨包说明符必须留在产物里，外部化断言才有意义。
 - 装不上报 404：该版本没发出去过（先看 `dist-tags.latest`）。更常见的原因是同组库包 `@jayyuen66/dsh-plugin-shared` 还没上 registry——本包值导入它的 `lib/locale`、`lib/record`、`lib/errors`、`lib/card-apply`、`lib/card-diff` 与 `lib/lesson-bus`，缺了就是 `ERR_MODULE_NOT_FOUND`。
 
 ### <img src="https://api.iconify.design/lucide/arrow-down-to-line.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> shared 的版本下限
@@ -174,8 +174,8 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 | 口径 | 内容 |
 |---|---|
-| 不写盘、不外联 | host 半无 `node:fs`、无网络调用；输出去向只有 `console.*` 日志与那条注入消息 |
-| 内存态且有界 | 调度器最多 200 条会话记录、挂起待办 64 条、待兑 pass 64 条、每会话开关台账 200 条——超限裁最旧，`agent/disposed` 与插件卸载时释放定时器 |
+| 不写盘、不外联 | host 半无 `node:fs`、无网络调用；除下面「唯一出口」一条外，输出去向只有 `console.*` 日志与那条注入消息 |
+| 内存态且有界 | 调度器最多 200 条会话记录、挂起待办 64 条、待兑 pass 64 条；这三类超限裁最旧。每会话开关台账同为 200 条，但满额时只淘汰已无活跃 agent 的会话，淘汰不到就让 `toggle` 返回 409——不裁活会话，否则等于悄悄重新启用它的救援。`agent/disposed` 与插件卸载时释放定时器 |
 | 持久化只有两处、都经官方 settings | 本包命名空间 `session-rescue` 与 `llm-pi-ai` 的重试档位，落在 dsh 数据目录里，重启不丢 |
 | 每会话开关 | 只存活在进程内存；重启即回到全局 `enabled` |
 | 语言 | 注入正文跟随官方 locale 偏好；条目未被投影时即中文 |

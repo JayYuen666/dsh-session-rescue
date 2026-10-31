@@ -39,6 +39,8 @@ interface MockAgent {
   id: string;
   options?: { provider?: string } | null;
   status?: string;
+  /** 模型服务面：`current()` 抛错时用来钉定时器回调的异常收口。 */
+  model?: { current: () => { provider?: string } | undefined } | null | undefined;
   inbox?: { nextTurn?: unknown[]; nextStep?: unknown[] };
   session: {
     id: string;
@@ -1605,6 +1607,65 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
     assert.equal(session?.pending?.suspended, undefined, "无快照可挂");
   });
 
+  it("定时器到点判定抛错：待办被结算，下一次失败仍能重新武装", () => {
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("prefire-throw", "x"));
+    agent.model = {
+      current: () => {
+        throw new Error("model service down");
+      },
+    };
+    const logs = captureConsole();
+    try {
+      ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+      assert.equal(ctx.timers.length, 1, "排期一枚");
+      fireLatest(ctx);
+    } finally {
+      logs.restore();
+    }
+    assert.ok(
+      logs.errors.some((line) => line.includes("check threw")),
+      "判定抛错留一条可读日志",
+    );
+    agent.model = undefined;
+    ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 2, "待办已结算，新失败重新武装");
+  });
+
+  it("重连补发时判定抛错：待办被结算，不会永久占住该会话", () => {
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const agent = register(ctx, makeAgent("refire-throw", "x"));
+    agent.followup = () => {
+      throw new Error(CARRIER_DOWN_MESSAGE);
+    };
+    ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    fireLatest(ctx);
+    assert.equal(remoteOf(ctx).resume().restored, 1, "首轮发送失败 → 挂起可恢复");
+    agent.model = {
+      current: () => {
+        throw new Error("model service down");
+      },
+    };
+    const logs = captureConsole();
+    try {
+      fireLatest(ctx);
+    } finally {
+      logs.restore();
+    }
+    assert.ok(
+      logs.errors.some((line) => line.includes("check threw")),
+      "补发前判定抛错留一条可读日志",
+    );
+    agent.model = undefined;
+    agent.followup = (message: unknown) => {
+      agent.followupCalls.push(message);
+    };
+    ctx.fire(AGENT_ERROR_EVENT, errorPayload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 3, "待办已结算，新失败重新武装");
+  });
+
   it("重连恢复后 re-fire 再次失败：仍按原 fireAt 挂起等下次重连", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
@@ -2344,6 +2405,41 @@ describe("宿主交回形状的真实性", () => {
     ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     ctx.disposeEffects();
+  });
+
+  it("投影形状被拒：点名判错原因、每会话只报一次，判定仍按回退扫描给出", async () => {
+    // 「key 未落地」与「读口在位但形状不合 schema」以前折叠成同一个 undefined，
+    // 三类判定长期停在 O(n) 回退扫描却没有任何信号说明是谁造成的。
+    const ctx = createCtx();
+    let releases = 0;
+    ctx.setService("sessionProjections", {
+      register: () => ({
+        stateOf: () => ({ end: "not-an-object" }),
+        dispose: async () => {
+          releases += 1;
+        },
+      }),
+    });
+    applyPlugin(ctx);
+    await settle();
+    const agent = register(ctx, makeAgent("facts-rejected", KNOWN_PROVIDER));
+    ctx.fire(
+      AGENT_ERROR_EVENT,
+      errorPayload(agent, 1, { code: "RATE_LIMIT", message: RATE_LIMIT_MESSAGE }),
+    );
+    const first = loggedText();
+    assert.match(first, /facts-rejected: rescue facts rejected by schema/u, "点名会话与降级原因");
+    // 同一次判定里 reviewOf 与 preFireCheck 共用读口：第二次读不得再刷一行。
+    ctx.tick();
+    const second = loggedText();
+    assert.equal(
+      second.split("rescue facts rejected by schema").length - 1,
+      1,
+      "同一会话的降级只报一次",
+    );
+    assert.equal(agent.followupCalls.length, 1, "回退扫描照旧给出续跑结论");
+    ctx.disposeEffects();
+    assert.equal(releases, 1, "这一次注册照常随卸载释放");
   });
 
   it("新协议：等待后按 handle 读，已弃用的 stateOf 一次都不碰", async () => {

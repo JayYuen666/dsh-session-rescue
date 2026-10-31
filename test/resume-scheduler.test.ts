@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { ResumeScheduler } from "../lib/resume-scheduler.ts";
+import { MAX_SESSIONS, ResumeScheduler } from "../lib/resume-scheduler.ts";
 import type { OnFailureInput, RescueKind } from "../lib/resume-scheduler.ts";
 // 待办在位/剩余时间改用调度器的公开快照形状读（原先那两条按会话的出口只被用例取用）。
 import { hasPending, remainingMs } from "./scheduler-snapshot.ts";
@@ -134,6 +134,18 @@ describe("onFailure 调度决策", () => {
     const decision = scheduler.onFailure({ ...base, turn: 4 });
     assert.equal(decision.action, "skip");
     assert.equal(decision.reason, "pending");
+  });
+
+  it("会话表满且无空闲记录：拒绝新记录，不让 Map 无界增长", () => {
+    const scheduler = new ResumeScheduler({ now: makeClock().now });
+    for (let index = 0; index < MAX_SESSIONS; index += 1) {
+      const decision = scheduler.onFailure({ ...base, sessionId: `busy-${index}` });
+      assert.equal(decision.action, "schedule", `第 ${index} 个会话应被排期`);
+    }
+    const rejected = scheduler.onFailure({ ...base, sessionId: "extra" });
+    assert.equal(rejected.action, "skip");
+    assert.equal(rejected.reason, "capacity");
+    assert.equal(scheduler.stateSnapshot()["extra"], undefined, "被拒绝的会话不得建记录");
   });
 
   it("达到次数上限：skip max-resumes", () => {
@@ -313,6 +325,25 @@ describe("settle", () => {
 });
 
 describe("attachTimer", () => {
+  it("重复挂载时先释放旧 disposer（否则旧定时器泄漏到下一次触发）", () => {
+    const scheduler = new ResumeScheduler({ now: makeClock().now });
+    scheduler.onFailure(base);
+    let firstDisposed = 0;
+    assert.equal(
+      scheduler.attachTimer("s1", () => {
+        firstDisposed += 1;
+      }),
+      true,
+    );
+    assert.equal(
+      scheduler.attachTimer("s1", () => {
+        void 0;
+      }),
+      true,
+    );
+    assert.equal(firstDisposed, 1);
+  });
+
   it("有待办时挂载 disposer 成功", () => {
     const scheduler = new ResumeScheduler({ now: makeClock().now });
     scheduler.onFailure(base);
@@ -576,6 +607,19 @@ describe("MAX_SESSIONS：会话记录上限（防长驻 Map 无界膨胀）", ()
     // 活动会话仍可正常 settle
     scheduler.settle("s-active", "fired");
     assert.equal(hasPending(scheduler, "s-active"), false);
+  });
+
+  it("全忙时 noteTurnHandled 也不再新建记录：水位记不下，但 Map 不涨", () => {
+    const scheduler = new ResumeScheduler();
+    for (let i = 0; i < MAX_SESSIONS; i += 1) {
+      assert.equal(scheduler.onFailure({ ...entryBase, sessionId: `busy${i}` }).action, "schedule");
+    }
+    const before = Object.keys(scheduler.stateSnapshot()).length;
+    assert.equal(before, MAX_SESSIONS);
+    assert.equal(scheduler.noteTurnHandled("extra", 5), true);
+    assert.equal(Object.keys(scheduler.stateSnapshot()).length, before);
+    // 该会话此后同样不会被排期：容量判据拦住新建记录（与上面同一个结论面）。
+    assert.equal(scheduler.onFailure({ ...entryBase, sessionId: "extra" }).action, "skip");
   });
 
   it("淘汰只影响空闲记录：被淘汰会话再失败时重新调度（不误判 pending）", () => {

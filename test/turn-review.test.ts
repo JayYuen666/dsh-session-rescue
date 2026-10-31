@@ -89,6 +89,29 @@ describe("reviewLastTurn — todo 清单（最新快照 last-wins）", () => {
     assert.equal(result.openTodos, 0);
   });
 
+  it("todo/write 载荷不可用：倒扫跳过它，继续用上一条可用快照", () => {
+    const result = reviewLastTurn([
+      turnStart(1),
+      todoWrite([OPEN]),
+      turnEnd(1, "completed"),
+      turnStart(2),
+      todoWrite("not-an-array"),
+      turnEnd(2, "completed"),
+    ]);
+    assert.equal(result.openTodos, 1, "无效快照不得覆盖上一条可用快照");
+    assert.equal(result.todoUpdatedInTurn, false, "可用快照来自上一回合");
+  });
+
+  it("只有不可用快照 → openTodos 为 null（无从判断）", () => {
+    const result = reviewLastTurn([
+      turnStart(1),
+      todoWrite({ broken: true }),
+      turnEnd(1, "completed"),
+    ]);
+    assert.equal(result.openTodos, null);
+    assert.equal(result.todoUpdatedInTurn, false);
+  });
+
   it("最后回合之后没有新的 todo/write 时，仍用其之前最近一次快照", () => {
     const result = reviewLastTurn([
       turnStart(1),
@@ -222,6 +245,35 @@ describe("reviewLastTurn — 等待用户（必须抑制续跑）", () => {
       turnEnd(5, "completed"),
     ]);
     assert.equal(result.awaitsUser, false);
+  });
+
+  it("本轮缺 turn/start（半截日志）但调用自带 turn → 仍判在等用户", () => {
+    const result = reviewLastTurn([
+      turnStart(1),
+      toolCall(1, "c1", "bash"),
+      toolResult(1, "c1"),
+      turnEnd(1, "completed"),
+      // 轮 2 的 turn/start 在日志里丢了（崩溃恢复只带回终态），但调用自带 turn。
+      toolCall(2, "c2", "ask_user_question"),
+      toolResult(2, "c2"),
+      turnEnd(2, "completed"),
+    ]);
+    assert.equal(result.lastTurn, 2);
+    assert.equal(result.awaitsUser, true, "窗口缺失时按事件自带 turn 判归属（必须抑制续跑）");
+  });
+
+  it("本轮缺 turn/start 且调用也缺 turn → 保守判在等用户", () => {
+    const result = reviewLastTurn([
+      turnStart(1),
+      toolCall(1, "c1", "bash"),
+      toolResult(1, "c1"),
+      turnEnd(1, "completed"),
+      // 轮 2 既没有 turn/start，调用也不带 turn：没有窗口可信，只能按保守侧收口。
+      ev("tool/call", { name: "ask_user_question" }),
+      turnEnd(2, "completed"),
+    ]);
+    assert.equal(result.lastTurn, 2);
+    assert.equal(result.awaitsUser, true, "窗口缺失且无 turn 时宁可多抑制一次");
   });
 
   it("turn/end 之后才出现的调用不算入最后回合（保守 false）", () => {

@@ -6,7 +6,7 @@
 //
 // 数据源纪律（0.1.2-alpha.1 实测）：
 //   nodes/turnEnds/runningCalls ← useChat((c) => c.legacy)
-//   running/removed/lastAgentError/queue ← useSession
+//   running/removed/queue ← useSession
 // 组件合并成 view 后再调 transcript 函数。禁止从 useSession 读 nodes。
 
 import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
@@ -60,7 +60,7 @@ import {
   lastUserNode,
   userText,
 } from "../lib/transcript.ts";
-import type { CompletedUserTarget } from "../lib/transcript.ts";
+import type { CompletedUserTarget, TurnFailure } from "../lib/transcript.ts";
 // 视图形状在 lib/turn-scope.ts（transcript.ts 的 failureOfLastTurn 从那层读法往上组合，
 // 形状必须留在读法那一层才不构成两个模块互相引用），本文件的 view 装箱与 dock 决策
 // 吃的仍是同一份投影。
@@ -151,6 +151,9 @@ const CSS = [
   ".sr-error{font-size:12px;color:var(--dsw-alias-text-danger,#d33)}",
   // dock 宽度对齐会话内容列（与 ._0Z7gsa_column 同款居中约束）
   ".sr-dock{box-sizing:border-box;width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;gap:4px;padding:4px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
+  // 上面这条 display:flex 会盖掉 UA 的 [hidden]{display:none}：没有内容时容器不会隐藏，
+  // 仍以 padding 占一行高度。显式补一条，hidden 才是真的隐藏。
+  ".sr-dock[hidden]{display:none}",
   ".sr-banner{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border,#d8dbe2);border-radius:6px;padding:4px 8px}",
 ].join("\n");
 
@@ -439,7 +442,7 @@ async function postSessionAction(
 // 规则在此咬合：`require-await`（async 函数必须有 await）、`promise-function-async`
 //（返回 promise 的函数必须是 async）与 `return-await`（不许 `return await`）。
 // 因此把等待写成落地一跳再交回——语义与调用点完全一致（调用方要么 `await`（测试），
-// 要么把返回值当 promise 交给 runHostAction）。
+// 要么把返回值当 promise 交给 useHostActions 的 run）。
 export async function postCancel(sessionId: string): Promise<JsonResult> {
   const result = await postSessionAction("cancel", sessionId);
   return result;
@@ -480,6 +483,9 @@ type WorkspaceNavigation = Pick<UiWorkspace, "openSession">;
 /** 会话绑定取不到时的失败码：三条动作（重发/停止重问/fork 重发）的开手守卫同源。 */
 const SESSION_UNAVAILABLE_CODE = "session-unavailable";
 
+/** 重问已入队、但停止当前回合被拒时的失败码（已生效的那一半必须与未生效的一半分得开）。 */
+const REASK_QUEUED_CODE = "reask-queued";
+
 interface ActionFailure {
   ok: false;
   code?: string;
@@ -516,7 +522,10 @@ type Rejected = Extract<RemoteResult<never>, { ok: false }>;
 type FailureFields = Partial<Pick<RemoteFailure, "code" | "message">>;
 
 function failResult(result: Rejected): ActionFailure {
-  const error: FailureFields = result.error;
+  // `error` 在类型上是必选，但网关跨 realm 转发的裸 JSON 可能整位缺位——缺位时直接读
+  // `.code` 会在失败路径上抛 TypeError，把原本可读的宿主拒绝换成一条与原因无关的错误。
+  const raw: unknown = result.error;
+  const error: FailureFields = isRecord(raw) ? raw : {};
   return {
     ok: false,
     ...(error.code === undefined ? {} : { code: error.code }),
@@ -574,7 +583,19 @@ function createActions(
       return failResult(queued);
     }
     const stopped = await binding.session.cancel();
-    return stopped.ok ? { ok: true } : failResult(stopped);
+    if (stopped.ok) {
+      return { ok: true };
+    }
+    // cancel 被拒时，已入队的那一条仍会在当前回合结束后发出。原样透传宿主的失败，
+    // 用户读到的是「这次操作没成」，再点一次就把同一段文本发两遍；所以把已经生效
+    // 的那半说在前面，宿主的理由附在后面。
+    const failure = failResult(stopped);
+    const prefix = t("reaskQueuedCancelFailed");
+    return {
+      ok: false,
+      code: REASK_QUEUED_CODE,
+      message: failure.message === undefined ? prefix : `${prefix}（${failure.message}）`,
+    };
   }
 
   // fork 分支重发：从 forkAtSeq（上一轮 turn/end）切出子会话 → 导航过去 → 发送。
@@ -607,8 +628,13 @@ function createActions(
       };
     }
     // 导航是可选服务：`ctx.get` 读出不建立依赖（缺 workspace UI 的装配里，本客户端
-    // 插件仍要能加载——fork 与发送是主功能，切过去只是顺带）。
-    workspaceOf()?.openSession(childId);
+    // 插件仍要能加载——fork 与发送是主功能，切过去只是顺带）。它抛错也不能把已经建好
+    // 的子会话连同这次发送一起丢掉。
+    try {
+      workspaceOf()?.openSession(childId);
+    } catch {
+      // 切不过去只是少一次导航；fork 与发送照常继续。
+    }
     try {
       return await sessions.using(childId, { source: SESSION_RESCUE_SOURCE }, async (reference) => {
         const result = await reference.binding.session.prompt([textPart(text)], "queue");
@@ -653,14 +679,12 @@ function useTranscriptView(props: DockProps): TranscriptView {
   const legacy = props.useChat((snap) => snap.legacy);
   const running = props.useSession((snap) => snap.running);
   const removed = props.useSession((snap) => snap.removed);
-  const lastAgentError = props.useSession((snap) => snap.lastAgentError);
   return {
     nodes: legacy.nodes,
     turnEnds: legacy.turnEnds,
     runningCalls: legacy.runningCalls,
     running,
     removed,
-    lastAgentError,
   };
 }
 
@@ -787,9 +811,10 @@ function RescueEditor(props: EditorProps): ReactNode {
   return editorRow;
 }
 
-/** 倒计时横幅（pending 为 null 则不渲染）。 */
+/** 倒计时横幅（pending 为 null 则不渲染）；busy = 取消/开关写通道在途。 */
 function bannerElement(
   pending: RescuePending | null,
+  busy: boolean,
   onCancel: () => void,
   t: Translate,
 ): ReactNode | null {
@@ -807,7 +832,7 @@ function bannerElement(
     createElement("span", null, bannerText),
     createElement(
       "button",
-      { type: "button", className: "sr-button", onClick: onCancel },
+      { type: "button", className: "sr-button", disabled: busy, onClick: onCancel },
       t("cancel"),
     ),
   );
@@ -840,6 +865,10 @@ interface DockActionsProps {
   isHostPending: boolean;
   busy: boolean;
   error: string | null;
+  /** 本轮失败原因行（code/message 都缺时为 null，不出行）。 */
+  reason: string | null;
+  /** 本轮跑过工具/命令：重试会重做副作用，按钮 title 需说明。 */
+  hasTools: boolean;
   onEdit: () => void;
   onRetry: () => void;
   onContinue: () => void;
@@ -849,7 +878,25 @@ interface DockActionsProps {
 /** 重试按钮的 title / 文本：两态各一条文案，提成模块级函数是为了不把 t() 嵌进
  *  createElement 的参数位（unicorn/max-nested-calls 上限 3）。 */
 function retryButtonTitle(unit: DockActionsProps): string {
-  return unit.isHostPending ? unit.t("hostRetryPendingTitle") : unit.t("retryTitle");
+  if (unit.isHostPending) {
+    return unit.t("hostRetryPendingTitle");
+  }
+  return unit.hasTools
+    ? `${unit.t("retryTitle")}（${unit.t("retrySideEffectTitle")}）`
+    : unit.t("retryTitle");
+}
+
+/** 本轮失败原因行：code 与 message 都在就拼「code: message」，只有其一就单显，
+ *  都缺（例如中断轮，轮内没有错误文本）就不出行。 */
+function failureReasonText(failure: TurnFailure | null, t: Translate): string | null {
+  if (failure === null) {
+    return null;
+  }
+  const detail =
+    failure.code !== null && failure.message !== null
+      ? `${failure.code}: ${failure.message}`
+      : (failure.message ?? failure.code);
+  return detail === null ? null : t("failureReason", { detail });
 }
 
 function retryButtonText(unit: DockActionsProps): string {
@@ -898,6 +945,7 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
     retryButton,
     continueButton,
     unit.error === null ? null : createElement("span", { className: "sr-error" }, unit.error),
+    unit.reason === null ? null : createElement("span", { className: "sr-hint" }, unit.reason),
   );
 }
 
@@ -911,7 +959,7 @@ function toggleStatusTexts(t: Translate): Record<ToggleState, string> {
   return { on: t("toggleStateOn"), off: t("toggleStateOff"), unknown: t("toggleNeutral") };
 }
 function toggleActionTexts(t: Translate): Record<ToggleState, string> {
-  return { on: t("toggleTurnOff"), off: t("toggleStateOn"), unknown: t("toggleNeutral") };
+  return { on: t("toggleTurnOff"), off: t("toggleTurnOn"), unknown: t("toggleNeutral") };
 }
 function toggleWaitingTitles(t: Translate): Record<ToggleState, string> {
   // on/off 没有等待提示（空 title 即不显气泡），只有快照未就绪才提示稍后再试。
@@ -923,8 +971,14 @@ function toggleLabel(t: Translate, toggle: ToggleState, action: boolean): string
 }
 
 /** 每会话开关行（三态：on=开启 / off=已关闭 / unknown=快照未就绪）。
- *  unknown 时按钮禁用、文案取中性 "—"，避免把「还没同步到」显示成「已关闭」。 */
-function toggleRowElement(toggle: ToggleState, onToggle: () => void, t: Translate): ReactNode {
+ *  unknown 时按钮禁用、文案取中性 "—"，避免把「还没同步到」显示成「已关闭」；
+ *  busy = 写通道在途，toggle 是翻转语义，第二次点击会把刚设好的状态再翻回去。 */
+function toggleRowElement(
+  toggle: ToggleState,
+  busy: boolean,
+  onToggle: () => void,
+  t: Translate,
+): ReactNode {
   // 三处取文案先落成变量：嵌进 createElement 参数位会超 max-nested-calls 上限。
   const label = t("sessionToggleLabel", { state: toggleLabel(t, toggle, false) });
   const actionLabel = toggleLabel(t, toggle, true);
@@ -938,7 +992,7 @@ function toggleRowElement(toggle: ToggleState, onToggle: () => void, t: Translat
       {
         type: "button",
         className: "sr-button",
-        disabled: toggle === "unknown",
+        disabled: toggle === "unknown" || busy,
         title: waitingTitle,
         onClick: onToggle,
       },
@@ -979,6 +1033,43 @@ async function runAction(
   }
 }
 
+/**
+ * host 写通道（取消 / 每会话开关）的在途与失败面。
+ *
+ * postCancel/postToggle 返回 {ok:false}（宿主拒绝、网关不可达、传输中断）时
+ * **什么都没发生**——倒计时照跑、待办照发，所以结果必须消费掉并显式报错。
+ * 两条通道共用一个在途标志：开关是翻转语义，往返期间再点一次会把刚设好的状态翻
+ * 回去，而两次都回 {ok:true}，UI 上看不出异常。闸门就是按钮的 disabled——离线的
+ * 第二次点击不会触发 onClick，所以这里不再另设一层进程序号。
+ */
+function useHostActions(
+  sessionId: SessionId,
+  t: Translate,
+): {
+  busy: boolean;
+  error: string | null;
+  run: (action: (sessionId: string) => Promise<JsonResult>, label: string) => Promise<void>;
+} {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (
+    action: (sessionId: string) => Promise<JsonResult>,
+    label: string,
+  ): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await action(sessionId);
+      if (!result.ok) {
+        setError(t("hostActionFailed", { label }));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, error, run };
+}
+
 /** dock：倒计时横幅 / 停止重问 / 编辑重试续写 / 每会话开关。
  *  排队行不在这里：官方 `dsh-client-ui-conversation` 自己就往同一道
  *  `conversation.input.dock` 注册了 QueueDock（id="queue"，逐行编辑/删除/插话都有），
@@ -993,22 +1084,7 @@ function RescueDockView(props: DockProps): ReactNode {
   const [dockEditing, setDockEditing] = useState(false);
   const [dockBusy, setDockBusy] = useState(false);
   const [dockError, setDockError] = useState<string | null>(null);
-  // 取消/开关两条 host 写通道的失败面：postCancel/postToggle 返回
-  // {ok:false}（宿主拒绝、网关不可达、传输中断）时**什么都没发生**——倒计时
-  // 照跑、待办照发。把它当成功（`void postCancel(...)`）会让用户按了取消却仍被
-  // 自动注入。这里必须把结果消费掉并显式报错。
-  const [hostActionError, setHostActionError] = useState<string | null>(null);
-
-  const runHostAction = async (
-    action: (sessionId: string) => Promise<JsonResult>,
-    label: string,
-  ): Promise<void> => {
-    setHostActionError(null);
-    const result = await action(sessionId);
-    if (!result.ok) {
-      setHostActionError(t("hostActionFailed", { label }));
-    }
-  };
+  const host = useHostActions(sessionId, t);
 
   const target = lastCompletedUserTarget(view);
   const failure = failureOfLastTurn(view);
@@ -1033,7 +1109,7 @@ function RescueDockView(props: DockProps): ReactNode {
       // 本地状态那两位：它们渲染在 dock 容器里，漏算就会让容器藏起自己正在显示的内容
       // （编辑态在中途转成运行中时 `canEdit` 变假；写通道失败时 pending 可能已不在）。
       editing: dockEditing && target !== null,
-      hostActionFailed: hostActionError !== null,
+      hostActionFailed: host.error !== null,
     },
     rescue,
     sessionId,
@@ -1052,8 +1128,9 @@ function RescueDockView(props: DockProps): ReactNode {
 
   const banner = bannerElement(
     pending,
+    host.busy,
     () => {
-      void runHostAction(postCancel, t("cancel"));
+      void host.run(postCancel, t("cancel"));
     },
     t,
   );
@@ -1100,6 +1177,8 @@ function RescueDockView(props: DockProps): ReactNode {
         isHostPending,
         busy: dockBusy,
         error: dockError,
+        reason: failureReasonText(failure, t),
+        hasTools: failure?.hasTools === true,
         t,
         onEdit: () => {
           setDockError(null);
@@ -1116,8 +1195,9 @@ function RescueDockView(props: DockProps): ReactNode {
     children.push(
       toggleRowElement(
         toggle,
+        host.busy,
         () => {
-          void runHostAction(postToggle, t("switchAction"));
+          void host.run(postToggle, t("switchAction"));
         },
         t,
       ),
@@ -1125,9 +1205,9 @@ function RescueDockView(props: DockProps): ReactNode {
   }
 
   // host 写通道失败面（取消/开关）：紧随其操作行显示，不静默吞掉。
-  if (hostActionError !== null) {
+  if (host.error !== null) {
     children.push(
-      createElement("div", { key: "host-action-error", className: "sr-error" }, hostActionError),
+      createElement("div", { key: "host-action-error", className: "sr-error" }, host.error),
     );
   }
 
@@ -1331,6 +1411,23 @@ const applyPreset = async (
   }
 };
 
+/** 逐项串行执行档位落盘。host 的 retryPolicy 是「读 revision → 带该 revision 写」的一对，
+ *  并行发会在后到的那次撞 settings-revision-conflict；规则禁了 reduce / .then / 循环内
+ *  await，串行只能这样逐项递归（层数 = provider 数，很小）。 */
+async function applyPresetsInOrder(
+  entries: readonly (readonly [string, string])[],
+  index: number,
+  t: Translate,
+  done: (string | null)[] = [],
+): Promise<(string | null)[]> {
+  const entry = entries[index];
+  if (entry === undefined) {
+    return done;
+  }
+  done.push(await applyPreset(t, entry[0], entry[1]));
+  return applyPresetsInOrder(entries, index + 1, t, done);
+}
+
 /** 重试面板的加载状态（判别联合：`ok:true` 必带 providers 数组，load() 的两个 setState
  *  都遵守），因此读侧不再需要 `state.providers ?? []` 的降级——那条 `??` 右支在 ok===true
  *  时结构上不可能命中，是可证明的死分支。 */
@@ -1463,9 +1560,10 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     setSaving(true);
     setSaveError(null);
     const entries = Object.entries(pending);
-    const outcomes = await Promise.all(
-      entries.map(([provider, preset]) => applyPreset(t, provider, preset)),
-    );
+    // 串行发：host 的 retryPolicy 是「读 revision → 带该 revision 写」的一对，并行时
+    // 后到的那次会以 settings-revision-conflict 失败，而那不是用户选的档位有问题。
+    // 用 promise 链而不是循环里 await（规则禁了 reduce 与 await-in-loop）。
+    const outcomes = await applyPresetsInOrder(entries, 0, t);
     setSaving(false);
     const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
     if (failures.length > 0) {
@@ -1578,7 +1676,7 @@ function secondsField(inputs: SectionInputs, spec: SecondsSpec): ReactNode {
     .safeParse(raw);
   return createElement(NumberField, {
     label: inputs.t(spec.label),
-    ...splitHint(inputs.t(spec.hint)),
+    ...splitHint(inputs.t(spec.hint, { min: spec.min, max: spec.max })),
     field: spec.field,
     value: parsed.success ? parsed.data / 1000 : spec.fallbackMs / 1000,
     min: spec.min,
@@ -1603,17 +1701,19 @@ interface CountSpec {
   fallback: number;
 }
 
-/** 次数上限字段：0–20 的整数。 */
+/** 次数上限字段：区间与提示文案同源，改上限时只改这两枚常量。 */
+const COUNT_MIN = 0;
+const COUNT_MAX = 20;
 function countField(inputs: SectionInputs, spec: CountSpec): ReactNode {
   const raw = inputs.eff(spec.field);
-  const parsed = z.int().min(0).max(20).safeParse(raw);
+  const parsed = z.int().min(COUNT_MIN).max(COUNT_MAX).safeParse(raw);
   return createElement(NumberField, {
     label: inputs.t(spec.label),
-    ...splitHint(inputs.t(spec.hint)),
+    ...splitHint(inputs.t(spec.hint, { min: COUNT_MIN, max: COUNT_MAX })),
     field: spec.field,
     value: parsed.success ? parsed.data : spec.fallback,
-    min: 0,
-    max: 20,
+    min: COUNT_MIN,
+    max: COUNT_MAX,
     step: 1,
     unit: inputs.t("unitTimes"),
     invalidHint: inputs.t("outOfRange"),

@@ -348,7 +348,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     // 不调任何参：会话的第一次 fire 永远不在冷却里（调度器的判据是
     // `lastFireAt > 0 && now - lastFireAt < cooldownMs`，新记录的 lastFireAt 是 0），
     // 旧替身那句 `unfinishedCooldownMs: 0` 本来就是空操作——而且 0 在 0.1.7 过不了
-    // Config 校验（`.min(5000)`，实测 `invalid config: $.unfinishedCooldownMs ...`）。
+    // config 校验（`.min(5000)`，实测 `invalid config: $.unfinishedCooldownMs ...`）。
     const inst = await mount();
     live = inst.ctx;
     assertLoaded(inst);

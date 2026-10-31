@@ -64,6 +64,13 @@ function profileManifestPath(): string {
     : override;
 }
 
+/** 本包的包名（`package.json.name`）；清单与注册 key 两处都用它当唯一真源。 */
+function ownPackageName(): string {
+  const own = readJson(path.join(PKG_DIR, "package.json"))["name"];
+  assert.equal(typeof own, "string", "本包 package.json 没有 name");
+  return typeof own === "string" ? own : "";
+}
+
 /** profile 的 `dsh.profile.bundles` 清单；没装 profile 的环境（CI、消费者克隆）回 null。
  *  清单存在但结构损坏（缺 dsh/profile 段、bundles 非数组、混入非字符串项）是**另一回事**：
  *  逐层显式断言并点名缺的是哪一段——回落成空表会把环境问题误报成「本包不在清单里」。 */
@@ -89,9 +96,16 @@ function profileBundleListOrNull(): string[] | null {
   );
   const bundles = items as string[];
   // 同名 profile 未必属于本工作面：`--from-default-profile web` 也会造一个只装官方基座的
-  // web profile。清单里一个 @jayyuen66 包都没有时按「没装 profile」处理——机器侧针只钉
-  // 在真装着本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
-  if (!bundles.some((name) => name.startsWith("@jayyuen66/"))) {
+  // web profile。清单里一个本族包都没有时按「没装 profile」处理——机器侧针只钉在真装着
+  // 本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
+  // 作用域从本包 package.json 的 name 推：写死 `@jayyuen66/` 会在改名/换 scope 后静默失效。
+  const own = ownPackageName();
+  const scopeEnd = own.indexOf("/");
+  const belongs =
+    scopeEnd === -1
+      ? bundles.includes(own)
+      : bundles.some((name) => name.startsWith(`${own.slice(0, scopeEnd)}/`));
+  if (!belongs) {
     return null;
   }
   return bundles;
@@ -104,9 +118,7 @@ function profileBundleListOrNull(): string[] | null {
  * profile 只存在在这台开发机上，装了才加一道机器侧针（清单里确有这一条）。
  */
 export function profileBundleName(): string {
-  const own = readJson(path.join(PKG_DIR, "package.json"))["name"];
-  assert.equal(typeof own, "string", "本包 package.json 没有 name");
-  const name = typeof own === "string" ? own : "";
+  const name = ownPackageName();
   const listed = profileBundleListOrNull();
   if (listed !== null) {
     assert.ok(
@@ -179,7 +191,8 @@ function constLiteral(text: string, name: string): string {
 /** 求文本中 `at` 所在对象字面量的跨度（前后向花括号配平、深度归零即边界）。
  *  刻意不识别字符串里的花括号：注册 desc 的对象体没有含 `{`/`}` 的字符串，
  *  若将来出现，跨度算错会让 key 读不到而判红（fail-loud），不会误报成别处的 key。 */
-function enclosingObjectSpan(text: string, at: number): [number, number] {
+/** 从 `at` 往回找包住它的 `{`，返回该括号的下标；找不到时回 0。 */
+function objectStartAt(text: string, at: number): number {
   let start = at;
   let depth = 0;
   while (start > 0) {
@@ -188,45 +201,115 @@ function enclosingObjectSpan(text: string, at: number): [number, number] {
       depth += 1;
     } else if (char === "{") {
       if (depth === 0) {
-        break;
+        return start - 1;
       }
       depth -= 1;
     }
     start -= 1;
   }
+  return 0;
+}
+
+/** 从 `at` 往后找配对的 `}`，返回它之后一位；不闭合时回文本末尾。 */
+function objectEndAt(text: string, at: number): number {
   let end = at;
-  depth = 0;
+  let depth = 0;
   while (end < text.length) {
     const char = text[end] ?? "";
     if (char === "{") {
       depth += 1;
     } else if (char === "}") {
       if (depth === 0) {
-        return [start, end + 1];
+        return end + 1;
       }
       depth -= 1;
     }
     end += 1;
   }
-  return [start, end];
+  return text.length;
+}
+
+/** `at` 所在的对象字面量跨度（含两侧花括号）；找不到时退回从 0 到文本末尾。
+ *  若将来出现，跨度算错会让 key 读不到而判红（fail-loud），不会误报成别处的 key。 */
+function enclosingObjectSpan(text: string, at: number): [number, number] {
+  return [objectStartAt(text, at), objectEndAt(text, at)];
+}
+
+/** 读 `i` 处的 `key: <字面量|标识符>`；不是顶层 key 或没有冒号时交回 undefined。 */
+function keyValueAt(span: string, i: number): { literal: string; ident: string } | null {
+  if (!span.startsWith("key", i) || /[\w$]/u.test(span[i - 1] ?? "")) {
+    return null;
+  }
+  let cursor = i + 3;
+  while (/\s/u.test(span[cursor] ?? "")) {
+    cursor += 1;
+  }
+  if (span[cursor] !== ":") {
+    return null;
+  }
+  cursor += 1;
+  while (/\s/u.test(span[cursor] ?? "")) {
+    cursor += 1;
+  }
+  const opener = span[cursor] ?? "";
+  if (opener === '"' || opener === "'") {
+    let end = cursor + 1;
+    let literal = "";
+    while (end < span.length && span[end] !== opener) {
+      if (span[end] === "\\") {
+        end += 1;
+      }
+      literal += span[end] ?? "";
+      end += 1;
+    }
+    return { literal, ident: "" };
+  }
+  return { literal: "", ident: /^[A-Za-z_$][\w$]*/u.exec(span.slice(cursor))?.[0] ?? "" };
+}
+
+/** 在对象字面量文本里取**顶层**（深度 1）的 key 值；字符串与嵌套对象不参与。
+ *  嵌套对象先出现 `key:` 时，全局正则会把它当成槽位 key。 */
+function topLevelSlotKey(span: string): { literal: string; ident: string } {
+  let depth = 0;
+  let quote = "";
+  let found: { literal: string; ident: string } | undefined;
+  for (let i = 0; i < span.length && found === undefined; i += 1) {
+    const char = span[i] ?? "";
+    if (quote !== "") {
+      if (char === "\\") {
+        i += 1;
+      } else if (char === quote) {
+        quote = "";
+      }
+    } else if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+    } else if (depth === 1) {
+      found = keyValueAt(span, i) ?? undefined;
+    }
+  }
+  return found ?? { literal: "", ident: "" };
 }
 
 /** 取产物里 `plugins.bundle.config` 那次 register 的 key（字面量或常量标识符都解析）。
  *  搜索范围限定在本次 register 的对象字面量内：产物里别处也有裸 `key:`（槽位键、
- *  React list key），全局抓会拿错；只往后看 500 字符又会在 key 写到 name 前面时漏看。 */
+ *  React list key），全局抓会拿错；名字相同的注册必须唯一，否则定位本身就不成立。 */
 function registeredSlotKey(text: string): string {
   const marker = text.indexOf('name: "plugins.bundle.config"');
   assert.notEqual(marker, -1, "产物里没有 plugins.bundle.config 的注册");
+  assert.equal(
+    text.indexOf('name: "plugins.bundle.config"', marker + 1),
+    -1,
+    "产物里有不止一处 plugins.bundle.config 注册：槽位 key 的定位不唯一",
+  );
   const [start, end] = enclosingObjectSpan(text, marker);
-  const groups =
-    /(?<![\w$])key:\s*(?:"(?<literal>[^"]*)"|(?<ident>[A-Za-z_$][\w$]*))/u.exec(
-      text.slice(start, end),
-    )?.groups ?? {};
-  const literal = groups["literal"] ?? "";
+  const { literal, ident } = topLevelSlotKey(text.slice(start, end));
   if (literal !== "") {
     return literal;
   }
-  const ident = groups["ident"] ?? "";
   assert.notEqual(ident, "", "产物里读不到 slot 注册 desc 的 key（既不是字面量也不是标识符）");
   return constLiteral(text, ident);
 }

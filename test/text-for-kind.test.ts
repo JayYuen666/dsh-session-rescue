@@ -123,7 +123,13 @@ describe("hostMessages 语言选取与双语字典", () => {
     );
     assert.match(
       fillTemplate(MESSAGES.en.unfinishedLessonDetail, { count: 3 }),
-      /still has 3 open items/u,
+      /still had open items \(open count: 3\)/u,
+    );
+    // 负例（改前会红）：旧模板把 `items` 硬连在数字后面，count=1 时写出 "1 open items"，
+    // 而这条 detail 会持久化进 lesson-loop。现在数字只在括号里的计数字段出现。
+    assert.doesNotMatch(
+      fillTemplate(MESSAGES.en.unfinishedLessonDetail, { count: 1 }),
+      /\b1 open items\b/u,
     );
   });
 });

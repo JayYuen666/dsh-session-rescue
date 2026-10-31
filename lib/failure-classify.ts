@@ -44,7 +44,8 @@ const PERMANENT_CODES = new Set([
 const INSUFFICIENT_CREDITS = /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/iu;
 const BALANCE_DEPLETED = /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b/iu;
 const OUT_OF_CREDITS = /\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b/iu;
-/** 回合级限速/忙碌措辞（输入已 lower-case）。 */
+/** 观察性兜底的宽措辞（**只给 `looksRateLimitish` 用**，不参与 classifyFailure 的阶梯）。
+ *  输入已 lower-case。 */
 const TRANSIENT_FAILURE_TEXT = /\b(?:429|quota|rate|limit|busy)\b|\bthrottl|\btoo many\b/u;
 
 /** 裸数字 429 只在 HTTP 语境里算限速证据：`\b429\b` 会命中 `req-429`、`trace 429`、
@@ -71,12 +72,13 @@ const QUOTA_WINDOW_TEXT =
  * 严格限定 finish_reason 形态：PI_AI_ERROR 还兜底其它 adapter 异常，那些保守不猜。
  *
  * 「严格」体现在值上而不是只认字面：只匹配那些**适配器认不出来**的取值。已知的确定性
- * 结束理由（`end_turn` / `stop` / `max_tokens` / `tool_use` / `content_filter` 等）出现在
- * 一条 error 里只说明失败与结束理由无关，把它们当「上游异常、重试即成功」是把普通错误
- * 洗成可重试，会让同一份坏请求被反复重发。
+ * 结束理由（`end_turn` / `stop` / `tool_use` / `tool_calls` / `function_call` /
+ * `max_tokens` / `length` / `content_filter` / `safety` / `recitation` / `complete`）
+ * 出现在一条 error 里只说明失败与结束理由无关，把它们当「上游异常、重试即成功」是把
+ * 普通错误洗成可重试，会让同一份坏请求被反复重发。
  */
 const UNRECOGNIZED_FINISH_REASON =
-  /finish[\s_-]*reason[:\s]*["']?(?!end[_-]?turn|stop|tool[_-]?use|max[_-]?tokens|content[_-]?filter|complete)[\w.-]+/iu;
+  /finish[\s_-]*reason[:\s]*["']?(?!end[_-]?turn|stop|tool[_-]?use|tool[_-]?calls|function[_-]?call|max[_-]?tokens|length\b|content[_-]?filter|safety|recitation|complete)[\w.-]+/iu;
 
 /**
  * 网关把「上游什么也没返回」作为 error stopReason 的原文送回来，典型 message：
@@ -295,15 +297,18 @@ export function isRequestRetryWorthy(failure: FailureLike): boolean {
   if (status === 429) {
     return true;
   }
-  // 余额耗尽证据对**任何** code 都成立，且排在瞬时状态码之前，与回合级同一判序：
+  // 显式限速码先于账单措辞（与 verdictOf 同序）：provider 自称 RATE_LIMIT 时，随附的
+  // 余额文案就不是证据——`{code:"RATE_LIMIT", message:"Insufficient quota"}` 在回合级
+  // 判瞬时，请求级也必须可重发，否则同一份载荷按调用路径得到相反答案。
+  if (code === "RATE_LIMIT") {
+    return true;
+  }
+  // 其余 code 的余额耗尽证据排在瞬时状态码之前，与回合级同一判序：
   // `{status:408, message:"Insufficient quota, please top up"}` 在回合级被判永久，
   // 请求级若因「408 看着像瞬时」就放行，两条链路会对同一份载荷给出相反答案——
   // 属性层专钉这一条。
   if (isBalanceExhausted(text)) {
     return false;
-  }
-  if (code === "RATE_LIMIT") {
-    return true;
   }
   if (RATE_LIMIT_TEXT.test(text)) {
     return true;
@@ -340,5 +345,10 @@ export function looksRateLimitish(failure: FailureLike): boolean {
     return false;
   }
   const { text } = fieldsOf(failure);
+  // 余额耗尽已被 classifyFailure 判永久且理由明确（不是「匹配器不认识的限流」）：
+  // 再报一条「疑似限流」只会把告警变成噪声，还往 lesson 总线写一条假教训。
+  if (isBalanceExhausted(text)) {
+    return false;
+  }
   return TRANSIENT_FAILURE_TEXT.test(text.toLowerCase());
 }

@@ -32,7 +32,6 @@ function mkView(overrides: Partial<TranscriptView> = {}): TranscriptView {
     runningCalls: [],
     running: false,
     removed: false,
-    lastAgentError: null,
     ...overrides,
   };
 }
@@ -154,7 +153,7 @@ describe("lastCompletedUserTarget（编辑重发目标）", () => {
     assert.equal(lastCompletedUserTarget(view), null);
   });
 
-  it("第二轮消息：turn/turnEndSeq/forkAtSeq 正确", () => {
+  it("第二轮消息：正文、自身 seq 与 fork 边界", () => {
     const view = mkView({
       nodes: [user(1, "first"), assistant(3, 1), user(7, "second"), assistant(9, 2)],
       turnEnds: new Map([
@@ -165,8 +164,6 @@ describe("lastCompletedUserTarget（编辑重发目标）", () => {
     assert.deepEqual(lastCompletedUserTarget(view), {
       text: "second",
       seq: 7,
-      turn: 2,
-      turnEndSeq: 12,
       forkAtSeq: 5,
     });
   });
@@ -176,8 +173,6 @@ describe("lastCompletedUserTarget（编辑重发目标）", () => {
     assert.deepEqual(lastCompletedUserTarget(view), {
       text: "first",
       seq: 2,
-      turn: 1,
-      turnEndSeq: 9,
       forkAtSeq: null,
     });
   });
@@ -217,6 +212,24 @@ describe("本轮 seq 窗口（边界判据经唯一读者 turnHasToolActivity �
     const inside = mkView({ nodes: [toolResult(6)], turnEnds });
     assert.equal(turnHasToolActivity(atBoundary, 2), false);
     assert.equal(turnHasToolActivity(inside, 2), true);
+  });
+
+  it("中间轮缺失时下界不可信：缺口里的活动不算进本轮", () => {
+    // turn 2 的记录缺失（中断/取消没写 turn-end）：不能拿 turn 1 的 end 当 turn 3 的下界。
+    const gapped = new Map([
+      [1, 5],
+      [3, 20],
+    ]);
+    const view = mkView({ nodes: [toolResult(8)], turnEnds: gapped });
+    assert.equal(turnHasToolActivity(view, 3), false);
+    // 对照：轮次连续时同一 seq 落进本轮窗口。
+    const contiguous = new Map([
+      [1, 5],
+      [2, 12],
+      [3, 20],
+    ]);
+    const inside = mkView({ nodes: [toolResult(15)], turnEnds: contiguous });
+    assert.equal(turnHasToolActivity(inside, 3), true);
   });
 });
 
@@ -326,7 +339,7 @@ describe("failureOfLastTurn", () => {
     assert.equal(failureOfLastTurn(view), null);
   });
 
-  it("turn-error：kind/code/message/hasTools", () => {
+  it("turn-error：kind/turn/message/code/hasTools 一次给全", () => {
     const view = mkView({
       nodes: [user(1, "a"), toolResult(3), turnError(5, 1, "HTTP 429", "QUOTA")],
       turnEnds: new Map([[1, 5]]),
@@ -334,7 +347,6 @@ describe("failureOfLastTurn", () => {
     assert.deepEqual(failureOfLastTurn(view), {
       kind: TURN_ERROR_KIND,
       turn: 1,
-      turnEndSeq: 5,
       message: "HTTP 429",
       code: "QUOTA",
       hasTools: true,
@@ -352,15 +364,16 @@ describe("failureOfLastTurn", () => {
     assert.equal(failure.hasTools, false);
   });
 
-  it("interrupted：message 取 lastAgentError", () => {
+  it("interrupted：轮内没有错误文本，message/code 都归 null", () => {
+    // 中断节点只带 interrupted: true。会话级 lastAgentError 不随轮次清空，
+    // 借它当本轮原因会把别的轮/别的重试的错误挂到这一轮上，所以这里不给值。
     const view = mkView({
       nodes: [user(1, "a"), assistant(3, 1, { interrupted: true })],
       turnEnds: new Map([[1, 5]]),
-      lastAgentError: "crashed",
     });
     const failure = failureOfLastTurn(view);
     assert.equal(failure?.kind, "interrupted");
-    assert.equal(failure.message, "crashed");
+    assert.equal(failure.message, null);
     assert.equal(failure.code, null);
   });
 
@@ -385,7 +398,7 @@ describe("failureOfLastTurn", () => {
 });
 
 describe("failureOfLastTurn 的轮次择优 / lastUserNode", () => {
-  it("取最大轮号那一条轮，并带出它自己的 end seq；无轮则无失败", () => {
+  it("取最大轮号那一条轮；无轮则无失败", () => {
     const view = mkView({
       nodes: [turnError(9, 3, "boom", "SERVER")],
       turnEnds: new Map([
@@ -394,7 +407,6 @@ describe("failureOfLastTurn 的轮次择优 / lastUserNode", () => {
       ]),
     });
     assert.equal(failureOfLastTurn(view)?.turn, 3, "3 是最大轮号");
-    assert.equal(failureOfLastTurn(view)?.turnEndSeq, 9);
     assert.equal(failureOfLastTurn(mkView()), null, "无轮 → null");
   });
 
@@ -403,13 +415,37 @@ describe("failureOfLastTurn 的轮次择优 / lastUserNode", () => {
     assert.equal(lastUserNode(view)?.seq, 7);
     assert.equal(lastUserNode(mkView()), null);
   });
+
+  it("lastUserNode 跳过续跑注入与 goal / schedule 的 user 消息", () => {
+    const injected = asNode({
+      kind: "user",
+      seq: 9,
+      time: 0,
+      content: [{ type: "text", text: "continue the turn" }],
+      source: { kind: "plugin:session-rescue" },
+    });
+    const view = mkView({ nodes: [user(1, "real"), injected] });
+    assert.equal(lastUserNode(view)?.seq, 1, "内部注入不能成为编辑重发的目标");
+    // goal / schedule 驱动同样不是人类输入。
+    for (const kind of ["goal", "schedule"]) {
+      const node = asNode({
+        kind: "user",
+        seq: 9,
+        time: 0,
+        content: [{ type: "text", text: kind }],
+        source: { kind },
+      });
+      const goalView = mkView({ nodes: [user(1, "real"), node] });
+      assert.equal(lastUserNode(goalView)?.seq, 1, kind);
+    }
+  });
 });
 
 describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支", () => {
-  // 三处择优（lastCompletedUserTarget 的两处、failureOfLastTurn 的取最大轮号）都要在
-  // "后面的键更小"时才走到 `turnId < turn` / `end > forkAtSeq` / `turnId > turn`
+  // 两处择优（lastCompletedUserTarget 的 fork 边界、failureOfLastTurn 的取最大轮号）
+  // 都要在"后面的键更小"时才走到 `end < last.seq && end > forkAtSeq` / `turnId > turn`
   // 的否定侧——只测升序 Map 等于漏测一半。
-  it("lastCompletedUserTarget：取「结束最靠后但轮号最小」的候选轮", () => {
+  it("lastCompletedUserTarget：有一条晚于该消息的轮尾就算已完成轮", () => {
     const view = mkView({
       nodes: [user(10, "hi")],
       turnEnds: new Map([
@@ -417,20 +453,12 @@ describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支
         [3, 30],
       ]),
     });
-    const target = lastCompletedUserTarget(view);
-    assert.equal(target?.turn, 3, "更小的轮号胜出");
-    assert.equal(target.turnEndSeq, 30);
-  });
-
-  it("lastCompletedUserTarget：升序轮表下后来的更大轮号不覆盖已选", () => {
-    const view = mkView({
+    assert.equal(lastCompletedUserTarget(view)?.seq, 10, "非升序轮表里也要认到那条晚于消息的轮尾");
+    const none = mkView({
       nodes: [user(10, "hi")],
-      turnEnds: new Map([
-        [3, 30],
-        [5, 50],
-      ]),
+      turnEnds: new Map([[3, 8]]),
     });
-    assert.equal(lastCompletedUserTarget(view)?.turn, 3);
+    assert.equal(lastCompletedUserTarget(none), null, "轮尾全部早于该消息 ⇒ 这条还没走完一轮");
   });
 
   it("lastCompletedUserTarget：fork 边界取最后一个早于该消息的轮尾", () => {
@@ -444,8 +472,7 @@ describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支
       ]),
     });
     const target = lastCompletedUserTarget(view);
-    assert.equal(target?.turn, 4);
-    assert.equal(target.forkAtSeq, 8, "6 晚于 8 之前的最大值不覆盖");
+    assert.equal(target?.forkAtSeq, 8, "6 晚于 8 之前的最大值不覆盖");
   });
 
   it("failureOfLastTurn：非升序轮表按 turnId 取最大轮", () => {

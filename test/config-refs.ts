@@ -132,9 +132,11 @@ export function patchEntryId(): string {
   ).name;
   // 取「紧跟着本包 name」的那一条，而不是文件里第一个裸 `- id:`：patch 里插入的条目不止
   // 本包一个时（将来把别的插件一起拼进来），第一个 id 会静默变成别人的，而三处对齐的
-  // 断言仍会全绿——它们比的都是同一个错值。
+  // 断言仍会全绿——它们比的都是同一个错值。tempered 量词挡住下一条裸 `- id:`，
+  // 避免 `[\s\S]*?` 跨过别的条目去够后面的 name。
+  const escaped = pkgName.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
   const pattern = new RegExp(
-    `^\\s*-\\s+id:\\s*(?<id>\\S+)\\s*$[\\s\\S]*?^\\s*name:\\s*["']?${pkgName.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`)}["']?\\s*$`,
+    `^\\s*-\\s+id:\\s*(?<id>\\S+)\\s*$(?:(?!^[ \\t]*-[ \\t]+id:)[\\s\\S])*?^\\s*name:\\s*["']?${escaped}["']?\\s*$`,
     "mu",
   );
   const match = pattern.exec(yml);

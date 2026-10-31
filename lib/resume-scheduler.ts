@@ -12,6 +12,12 @@
 
 export type RescueKind = "resume" | "continue" | "unfinished";
 
+/** 跨版本脏快照的 kind 可能是空串（见 `PendingRecord` 的注释）：快照读面、结算与
+ *  恢复路径共用这一条回落，别在三处各写一遍。 */
+export function rescueKindOf(kind: RescueKind | ""): RescueKind {
+  return kind || "resume";
+}
+
 /** 调度决策：判别联合——`skip` 必带 reason、`schedule` 必带 fireAt/delayMs/chained。
  *  状态机自己发出的每条决策都填满字段，所以「全可选的单一 interface」那种写法会逼
  *  调用方补出 `decision.reason ?? "unknown"`、`decision.delayMs ?? 0` 这类永远走不到
@@ -111,7 +117,7 @@ function releaseTimer(rec: SessionRecord): void {
 /** 会话记录上限：长驻进程防 Map 无界膨胀（每条记录很小，但会话数会一直涨）。
  *  超限时淘汰最旧的"空闲"记录（无 pending、无挂载定时器——有定时器的记录
  *  绝不淘汰，否则定时器泄漏）。与 quality-gate(50)/ctx-observe(200) 同一纪律。 */
-const MAX_SESSIONS = 200;
+export const MAX_SESSIONS = 200;
 
 export class ResumeScheduler {
   private readonly sessions = new Map<string, SessionRecord>();
@@ -137,6 +143,16 @@ export class ResumeScheduler {
     };
     this.sessions.set(sessionId, rec);
     return rec;
+  }
+
+  /** 还能不能为新会话建记录：满了先试淘汰空闲记录，仍满则拒绝。
+   *  返回 false 时调用方必须跳过，而不是继续 `rec()` —— 那正是 Map 无界膨胀的入口。 */
+  private hasCapacity(): boolean {
+    if (this.sessions.size < MAX_SESSIONS) {
+      return true;
+    }
+    this.evictIdleSessions();
+    return this.sessions.size < MAX_SESSIONS;
   }
 
   /** 新建记录前腾位：删最旧的**空闲**记录（无 pending、无定时器、且不在挂起中）
@@ -173,6 +189,9 @@ export class ResumeScheduler {
     } = input;
     if (typeof sessionId !== "string" || sessionId === "") {
       return { action: "skip", reason: "invalid-session" };
+    }
+    if (!this.sessions.has(sessionId) && !this.hasCapacity()) {
+      return { action: "skip", reason: "capacity" };
     }
     const rec = this.rec(sessionId);
     if (rec.pending !== null) {
@@ -218,6 +237,10 @@ export class ResumeScheduler {
       releaseDisposer(dispose);
       return false;
     }
+    // 覆盖前先释放旧的那一枚：同一会话重复挂载（或 host 重排期后再挂）时，
+    // 直接赋值会把上一枚 disposer 的引用丢掉，而它的定时器还挂在宿主计时器表里——
+    // 表现只是「进程退出慢一点」，等到它真触发还会按陈旧 fireAt 多发一次注入。
+    releaseTimer(rec);
     rec.disposeTimer = typeof dispose === "function" ? dispose : null;
     return true;
   }
@@ -251,7 +274,7 @@ export class ResumeScheduler {
     if (rec.pending === null) {
       return false;
     }
-    const kind = rec.pending.kind || "resume";
+    const kind = rescueKindOf(rec.pending.kind);
     rec.pending = null;
     rec.disposeTimer = null;
     if (outcome === "fired") {
@@ -326,7 +349,7 @@ export class ResumeScheduler {
             ? null
             : {
                 turn: rec.pending.turn,
-                kind: rec.pending.kind || "resume",
+                kind: rescueKindOf(rec.pending.kind),
                 fireAt: rec.pending.fireAt,
                 remainingMs: Math.max(0, rec.pending.fireAt - nowTime),
                 chained: rec.pending.chained === true,
@@ -345,10 +368,6 @@ export class ResumeScheduler {
     this.sessions.clear();
   }
 
-  /**
-   * 单会话挂起：follower 发送抛错（连接/传输类）时把该会话待办取出、释放
-   * 定时器，返回 pending 快照供 host 等待重连后恢复。无待办返回 null。
-   */
   /** 记录「本会话这一轮的终态已处理过」。返回 false = 这一轮并不比上次处理的更新，
    *  即**旧轮重放**：真宿主在 `turn/start` 或 `turn/end` 落盘失败的支线上照样会走一次
    *  `agent/status → idle`（packages/core/agent-loop/src/agent.ts:307-309 与 :388-389，
@@ -356,6 +375,14 @@ export class ResumeScheduler {
    *  没有这道水位就会拿上一轮的旧终态再走一遍：`onSuccess` 把配额复位成「那一轮真跑
    *  成功了」，`max-tokens` 还会为一条已经续写过的截断再排一次注入。 */
   public noteTurnHandled(sessionId: string, turn: number): boolean {
+    // 与 schedule 同一道容量闸门：满且淘汰不出空闲记录时**不新建**。没有这一条时，
+    // 每一条走到回合终态的会话都会经 `rec()` 插入一条记录，200 条全忙的长驻实例里
+    // Map 只增不减——注释声明的「防无界膨胀」只在排期那一侧成立。
+    // 该会话这一轮仍按「新回合」交回 true：它的水位与配额记不下，但它此后同样不会被
+    // 排期（schedule 的容量判据会跳过），少了这枚记录不改变注入判据。
+    if (!this.sessions.has(sessionId) && !this.hasCapacity()) {
+      return true;
+    }
     const rec = this.rec(sessionId);
     if (turn <= rec.lastHandledTurn) {
       return false;
@@ -364,6 +391,10 @@ export class ResumeScheduler {
     return true;
   }
 
+  /**
+   * 单会话挂起：follower 发送抛错（连接/传输类）时把该会话待办取出、释放
+   * 定时器，返回 pending 快照供 host 等待重连后恢复。无待办返回 null。
+   */
   public suspendSession(sessionId: string): PendingRecord | null {
     const rec = this.sessions.get(sessionId);
     if (rec === undefined) {

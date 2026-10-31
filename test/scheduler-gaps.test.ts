@@ -71,10 +71,12 @@ describe("restorePending / remainingMs（重连恢复面）", () => {
     scheduler.onFailure(base);
     const pending = scheduler.suspendSession("s1");
     assert.ok(pending !== null);
-    // 恢复前又调度了一次（竞态）：新 pending 存在 → 拒绝恢复
-    scheduler.onFailure({ ...base, turn: 4 });
+    // 先恢复一次让记录重新持有待办，再恢复同一枚快照：必须被拒，不能把已武装的那一份覆盖掉。
+    // 这条判据就是重连时「已有待办 ⇒ 挂起快照作废」的调度器侧契约（host 侧对应
+    // resumeAfterReconnect 里 restorePending 返回 false 的那一支）。
+    assert.equal(scheduler.restorePending("s1", pending), true);
     assert.equal(scheduler.restorePending("s1", pending), false);
-    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.turn, 4, "原待办不被覆盖");
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.turn, 3, "已武装的待办不被覆盖");
   });
 
   it("restorePending 成功：恢复原 fireAt，remainingMs 反映剩余时间", () => {

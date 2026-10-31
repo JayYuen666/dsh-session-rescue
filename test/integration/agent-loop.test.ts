@@ -101,61 +101,72 @@ async function boot(
     successText: options.successText ?? "recovered answer",
   });
   const ctx = new Context();
-  // settings 用记账替身（真 SettingsForms 要 loader+profileContext，属另一层的装配面）；
-  // 其余宿主服务全是真身。
-  ctx.provide("settings", {
-    describe: () => [],
-    mutate: async (): Promise<void> => undefined,
-    configure: () => (): void => {
-      void 0;
-    },
-  });
-  await ctx.plugin(TimerPlugin);
-  await mountAgentLoopTestDependencies(ctx);
-  await ctx.plugin(DeepSeekAdapter, {
-    baseURL: server.baseURL,
-    ...(options.withAdapterPolicy === false
-      ? {}
-      : {
-          // 适配器自带重试压到零次：这几条装配要测的是回合级续跑/续写，
-          // 不是请求级退避（请求级另有不配策略的那一条）。
-          retryPolicy: {
-            mode: "normal",
-            maxRetries: 0,
-            backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
-          },
-        }),
-  });
-  await ctx.plugin(AgentLoop, { agents: [] });
-  await ctx.plugin(
-    plugin as never,
-    {
-      resumeDelayMs: 1000,
-      resumeCooldownMs: 5000,
-      continueDelayMs: 500,
-      continueCooldownMs: 5000,
-      unfinishedDelayMs: 1000,
-      unfinishedCooldownMs: 5000,
-      ...options.config,
-    } as never,
-  );
-  const agent = await ctx.agentLoop.create(brandString<SessionId>(`rescue-${sequence.join("-")}`), {
-    provider: "deepseek-official",
-    model: "mock-model",
-  });
-  const failures: ObservedError[] = [];
-  ctx.on("agent/error", (payload: { turn?: number; step?: number; error?: unknown }) => {
-    const { error } = payload;
-    const face = error as { name?: unknown; message?: unknown; failure?: unknown } | null;
-    failures.push({
-      turn: payload.turn,
-      step: payload.step,
-      name: typeof face?.name === "string" ? face.name : undefined,
-      message: typeof face?.message === "string" ? face.message : undefined,
-      failure: observedFailure(face?.failure),
+  try {
+    // settings 用记账替身（真 SettingsForms 要 loader+profileContext，属另一层的装配面）；
+    // 其余宿主服务全是真身。
+    ctx.provide("settings", {
+      describe: () => [],
+      mutate: async (): Promise<void> => undefined,
+      configure: () => (): void => {
+        void 0;
+      },
     });
-  });
-  return { ctx, agent, server, failures };
+    await ctx.plugin(TimerPlugin);
+    await mountAgentLoopTestDependencies(ctx);
+    await ctx.plugin(DeepSeekAdapter, {
+      baseURL: server.baseURL,
+      ...(options.withAdapterPolicy === false
+        ? {}
+        : {
+            // 适配器自带重试压到零次：这几条装配要测的是回合级续跑/续写，
+            // 不是请求级退避（请求级另有不配策略的那一条）。
+            retryPolicy: {
+              mode: "normal",
+              maxRetries: 0,
+              backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+            },
+          }),
+    });
+    await ctx.plugin(AgentLoop, { agents: [] });
+    await ctx.plugin(
+      plugin as never,
+      {
+        resumeDelayMs: 1000,
+        resumeCooldownMs: 5000,
+        continueDelayMs: 500,
+        continueCooldownMs: 5000,
+        unfinishedDelayMs: 1000,
+        unfinishedCooldownMs: 5000,
+        ...options.config,
+      } as never,
+    );
+    const agent = await ctx.agentLoop.create(
+      brandString<SessionId>(`rescue-${sequence.join("-")}`),
+      {
+        provider: "deepseek-official",
+        model: "mock-model",
+      },
+    );
+    const failures: ObservedError[] = [];
+    ctx.on("agent/error", (payload: { turn?: number; step?: number; error?: unknown }) => {
+      const { error } = payload;
+      const face = error as { name?: unknown; message?: unknown; failure?: unknown } | null;
+      failures.push({
+        turn: payload.turn,
+        step: payload.step,
+        name: typeof face?.name === "string" ? face.name : undefined,
+        message: typeof face?.message === "string" ? face.message : undefined,
+        failure: observedFailure(face?.failure),
+      });
+    });
+    return { ctx, agent, server, failures };
+  } catch (error) {
+    // 装配中途失败时 rig 还没赋值，afterEach 拿不到 server/ctx：在这里就地释放，
+    // 否则端口与调度器会带进同进程的后续用例。
+    await ctx.fiber.dispose().catch(() => null);
+    await server.close().catch(() => null);
+    throw error;
+  }
 }
 
 /** 在插件之前挂一个 `agent/request-error` 观察者：cordis 首个注册者最外层。

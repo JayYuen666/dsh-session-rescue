@@ -1,4 +1,5 @@
 import { describe, it, beforeEach } from "vitest";
+import { logged } from "./setup-logs.ts";
 import assert from "node:assert/strict";
 import plugin, { RESCUE_REMOTE_NAMESPACE, SessionRescueRemoteService } from "../host.ts";
 import { Context } from "@deepseek-ai/cordis";
@@ -538,7 +539,7 @@ function replaceAllEvents(agent: { session: { evs?: unknown[] } }, events: unkno
 }
 
 describe("settings 隐式注册（0.1.7：命名空间 = profile 条目 id）", () => {
-  it("Config schema 逐字段默认 = 0.1.6 交给 settings.register 的那份内置底座", () => {
+  it("config schema 逐字段默认 = 0.1.6 交给 settings.register 的那份内置底座", () => {
     // 0.1.7 删了 settings.register(ns, schema, { base })：命名空间 = profile 条目 id，
     // 默认值改由 schema 自己带（cordis 装载期按同一份 schema 填默认、再把 volatile 字段
     // 包成引用交进 apply）。所以"底座"这层断言原样搬到这里，逐字段对齐——已批准的
@@ -2598,24 +2599,29 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.equal(scans.value, 0, "veto 判定也只读投影");
   });
 
-  it("stateOf 交出坏形状（key 未落地/宿主漂移）→ 回退扫描，判定不变", () => {
+  it("stateOf 交出坏形状（key 未落地/宿主漂移）→ 回退扫描，判定不变", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
     const scans = countScans(agent);
     const projections = attach(ctx);
+    // 读口要等 register 的微任务落地才发布；不 await 的话 events 仍是 undefined，
+    // 走的是「本来就没投影」那条回退，坏形状这条支一次都没跑到。
+    await settle();
     projections.foldOverride.value = () => ({});
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "坏状态不改变判定，只是退回扫描读法");
     assert.ok(scans.value > 0, "回退路径确实读了全量日志");
+    assert.ok(projections.reads.length > 0, "确实经 stateOf 读过一次投影");
   });
 
-  it("end 对不上它的 start（折叠窗口只到半截日志）→ 复盘回退扫描", () => {
+  it("end 对不上它的 start（折叠窗口只到半截日志）→ 复盘回退扫描", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
     const scans = countScans(agent);
     const projections = attach(ctx);
+    await settle();
     projections.foldOverride.value = (evs) => {
       const state = foldEvents(evs);
       return { ...state, end: { ...state.end, aligned: false } };
@@ -2625,11 +2631,12 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     assert.ok(scans.value > 0);
   });
 
-  it("opener 被窗口淘汰 → opener 判定回退扫描，链式例外照常生效", () => {
+  it("opener 被窗口淘汰 → opener 判定回退扫描，链式例外照常生效", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(2, "user"));
     const projections = attach(ctx);
+    await settle();
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     ctx.tick();
     openRescueTurn(agent, 3);
@@ -2765,5 +2772,67 @@ describe("官方 Typert Remote 读面", () => {
     assert.equal(failed["status"], 500);
     const malformed = await remote.retryPolicy(null as never);
     assert.equal(malformed["status"], 400);
+  });
+});
+
+function capacityWarnCount(): number {
+  return logged().filter((row) => row.text.includes("scheduler at capacity")).length;
+}
+
+describe("调度器容量饱和的可观测性（capacity skip 升级 warn）", () => {
+  let ctx: MockCtx;
+  const MAX_SESSIONS = 200;
+  beforeEach(() => {
+    ctx = createMockCtx();
+    applyPlugin(ctx);
+  });
+
+  it("200 条 pending 占满调度器 → 新会话 skip(capacity) 升级 warn（去重）→ 释放一条后回落再武装", () => {
+    // 饱和的正确形态：200 个会话在延迟窗口内同时失败（fire 不 tick）→ 200 条 pending
+    // + 已武装定时器 → 全部不可淘汰。挂起路径不饱和：挂起快照自身有上限，裁剪最旧时
+    // releaseSuspended 把记录落回空闲（实测，见 pushSuspended）。
+    for (let index = 0; index < MAX_SESSIONS; index += 1) {
+      const sessionId = `s-${String(index)}`;
+      const agent = makeAgent(sessionId, "tokenrouter");
+      register(ctx, agent);
+      ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    }
+    const stateCount = Object.keys(
+      (remoteOf(ctx).state() as { sessions: Record<string, unknown> }).sessions,
+    ).length;
+    assert.equal(stateCount, 200, "前置：200 条 pending 记录全部在册");
+
+    const baseline = capacityWarnCount();
+
+    // 新会话瞬时失败：capacity skip → 第一次 warn。
+    const overflow = makeAgent("overflow", "tokenrouter");
+    register(ctx, overflow);
+    ctx.fire(AGENT_ERROR_EVENT, payload(overflow, 1, { code: "RATE_LIMIT", message: "x" }));
+    const afterFirst = capacityWarnCount();
+    assert.equal(afterFirst, baseline + 1, "饱和 skip 必须升 warn");
+
+    // 再来一条：去重位生效，不刷第二条。
+    const overflow2 = makeAgent("overflow-2", "tokenrouter");
+    register(ctx, overflow2);
+    ctx.fire(AGENT_ERROR_EVENT, payload(overflow2, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(capacityWarnCount(), afterFirst, "饱和期间 warn 必须去重");
+
+    // 释放一条：s-0 的定时器到点且 followup 成功（不挂起）→ 该记录回到可淘汰态。
+    ctx.timers[0]!.fn();
+    assert.ok(
+      logged().some((row) => row.text.includes("s-0: auto-resume message sent")),
+      "前置：s-0 的注入成功送出",
+    );
+
+    // 回落再武装：新会话淘汰空闲的 s-0 后 schedule 成功 → 去重位清零；
+    // 此刻 200 条又满（199 pending + 新会话）→ 再 skip → warn 重新出现。
+    const overflow3 = makeAgent("overflow-3", "tokenrouter");
+    register(ctx, overflow3);
+    ctx.fire(AGENT_ERROR_EVENT, payload(overflow3, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(capacityWarnCount(), afterFirst, "回落本身不应告警");
+    const overflow4 = makeAgent("overflow-4", "tokenrouter");
+    register(ctx, overflow4);
+    ctx.fire(AGENT_ERROR_EVENT, payload(overflow4, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(capacityWarnCount(), afterFirst + 1, "回落后 warn 必须重新武装");
   });
 });

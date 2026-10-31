@@ -10,8 +10,11 @@ export default definePluginConfig({
   // 登记项本身要满足什么形式（是否收通配、能否带点、前缀如何与实际标题匹配），判据在共享包
   // 基线与它自己的用例里（dsh-plugin-shared/config/oxlint.base.ts、test/config-oxlint.test.ts）；
   // 这里不重复描述那些口径——写在消费方会与基线脱钩，而被写下的那句话不会被任何门检验。
+  //
+  // 不收 "Config"：它是个普通英文词，不是技术名，登记了等于给「Config 转成小写更好读」这类
+  // 标题开一张长期免检票。真要以它开头就把标题写成小写开头（见 loader-boot.test.ts 的
+  // 「config 校验」），那样不需要任何豁免。
   titlePrefixes: [
-    "Config",
     "MAX_SESSIONS",
     "QUOTA",
     "RescueDockView",

@@ -131,6 +131,9 @@ describe("客户端读面（官方 Typert Remote）", () => {
   it("边界码器只收字符串字段，且丢掉未声明字段", () => {
     const session = strictOf("cancel");
     assert.deepEqual(session.create().parse({ sessionId: "s1", extra: 1 }), { sessionId: "s1" });
+    // 两侧空白必须先洗掉再交给宿主：只判空不 trim 时 " s1 " 会带着空白去查表，
+    // 宿主回的是「找不到该会话」，看起来像会话没了。
+    assert.deepEqual(session.create().parse({ sessionId: " s1 " }), { sessionId: "s1" });
     for (const bad of [null, [], {}, { sessionId: 42 }, { sessionId: "" }, { sessionId: "   " }]) {
       assert.throws(() => session.create().parse(bad), /non-empty string sessionId/u);
     }
@@ -138,6 +141,10 @@ describe("客户端读面（官方 Typert Remote）", () => {
 
     const policy = strictOf("retryPolicy");
     assert.deepEqual(policy.create().parse({ provider: "p", preset: "normal", extra: true }), {
+      provider: "p",
+      preset: "normal",
+    });
+    assert.deepEqual(policy.create().parse({ provider: " p ", preset: " normal " }), {
       provider: "p",
       preset: "normal",
     });

@@ -193,6 +193,14 @@ function tick(ctx: MockCtx): void {
 
 describe("用户中止的回合不消耗续跑/继续配额", () => {
   let ctx: MockCtx;
+
+  /** 取 agent/status 处理器；apply 没注册时直接红，避免 `?.()` 让用例恒绿。 */
+  function idleHandler(context: MockCtx): (payload: unknown) => void {
+    const handler = context.handlers["agent/status"];
+    assert.ok(handler, "apply 必须注册 agent/status 处理器，否则本用例恒绿");
+    return handler;
+  }
+
   beforeEach(() => {
     ctx = createCtx();
   });
@@ -209,7 +217,7 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
     assert.deepEqual(countsOf(ctx), { s1: 1 });
     // 用户 abort turn 2 → idle：既不调度新待办，也不重置已有 count
     agent.session.evs?.push(turnEnd(2, "aborted"));
-    ctx.handlers["agent/status"]?.({ agent, status: "idle" });
+    idleHandler(ctx)({ agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "aborted idle 不得新增定时器");
     assert.deepEqual(countsOf(ctx), { s1: 1 }, "aborted 不得重置也不得消耗");
   });
@@ -224,7 +232,7 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
     });
     tick(ctx);
     agent.session.evs?.push(turnEnd(2, "interrupted"));
-    ctx.handlers["agent/status"]?.({ agent, status: "idle" });
+    idleHandler(ctx)({ agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     assert.deepEqual(countsOf(ctx), { s1: 1 });
   });

@@ -1,5 +1,4 @@
 /** build-host.mjs 的声明（供 test/build-host.test.ts 等 TS 侧类型化导入）。
- *  `buildHost` 之外还转导出 `singleEntryChunk`（真源在 build-utils.mjs）：
- *  运行期就是这么导出的，声明面照抄，否则从 TS 侧 import 它会被判「没有这个成员」。 */
+ *  运行期只导出 buildHost 一个可调用成员：单 chunk 断言住在 shared，本脚本不再转导出
+ *  （此前那条转导出没有消费者，且声明指向一个不存在的 build-utils.mjs）。 */
 export function buildHost(): Promise<string>;
-export { singleEntryChunk } from "./build-utils.mjs";

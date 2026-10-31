@@ -5,5 +5,5 @@
     "checkJs": true,
     "noEmit": true
   },
-  "include": ["build-client.mjs", "build-host.mjs", "build-types.mjs"]
+  "include": ["build-*.mjs"]
 }

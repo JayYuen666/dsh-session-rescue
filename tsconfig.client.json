@@ -1,4 +1,4 @@
 {
   "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.client.base.json",
-  "include": ["src/**/*.ts", "lib/transcript.ts"]
+  "include": ["src/**/*.ts", "lib/transcript.ts", "lib/turn-scope.ts", "lib/dock-state.ts"]
 }

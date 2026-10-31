@@ -15,9 +15,12 @@
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { z } from "zod";
 
-/** host 状态快照的最小投影（来自官方 Remote 的 state 读面）。 */
+/** host 状态快照的最小投影（来自官方 Remote 的 state 读面）。
+ *  `ok` 写死 `true`：host 侧只产出成功形状，失败走 Remote 的 rejection 通道
+ *  （见 `STATE_SCHEMA` 的 `z.literal(true)` 与 `parseStateBody` 的唯一出口）。
+ *  写宽成 `boolean` 会让下游多出一个「ok:false 该怎么办」的不可测分支。 */
 export interface RescueStateBody {
-  ok: boolean;
+  ok: true;
   sessions?: Record<string, RescueSessionState>;
 }
 

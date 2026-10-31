@@ -142,7 +142,11 @@ describe("回合事实投影 ≡ 同步扫描（随机日志）", () => {
         // 形状漂移（多一位/少一位/类型换掉）必须在这里红：host 侧 asFacts 拒收就等于
         // 三类判定整批回退全量扫描——功能不坏，但 O(1) 读的说法就没了。
         const reparsed = asFacts(structuredClone(state));
-        assert.deepEqual(reparsed, state, "折叠态必须能被自己的 schema 原样接住");
+        assert.deepEqual(
+          reparsed.status === "facts" ? reparsed.facts : reparsed,
+          state,
+          "折叠态必须能被自己的 schema 原样接住",
+        );
       }),
       { numRuns: 800 },
     );

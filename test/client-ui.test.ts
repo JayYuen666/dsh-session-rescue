@@ -137,6 +137,8 @@ interface FetchRoute {
   badJson?: boolean;
   /** 传输层直接以该值 reject（非 Error 的 reject 是真实存在的形态）。 */
   rejectWith?: unknown;
+  /** 让响应挂到这枚 promise 落定为止：写通道「在途」那一态的唯一可复跑画法。 */
+  wait?: Promise<unknown>;
 }
 
 /** 按 URL 路由的 fetch 桩（返回 Promise 化的普通对象，不引用 DOM 类型）。 */
@@ -149,6 +151,9 @@ function stubFetch(router: (url: string) => FetchRoute): void {
       init: init ?? {},
     });
     const route = router(urlText);
+    if (route.wait !== undefined) {
+      await route.wait;
+    }
     if (route.rejectWith !== undefined) {
       const settled = Promise.withResolvers<unknown>();
       settled.reject(route.rejectWith);
@@ -432,6 +437,11 @@ async function pickPreset(container: HTMLElement, index: number, preset: string)
 function allButtons(el: HTMLElement): HTMLButtonElement[] {
   return [...el.querySelectorAll("button")] as HTMLButtonElement[];
 }
+
+/** 重试按钮的中文标签（用例里多处取用，收成一处）。 */
+const RETRY_LABEL = "重试";
+/** 终态失败节点的种类键（三处夹具共用）。 */
+const TURN_ERROR_KIND = "turn-error";
 
 function buttonByText(el: HTMLElement, text: string): HTMLButtonElement | null {
   return allButtons(el).find((btn) => btn.textContent.trim() === text) ?? null;
@@ -819,6 +829,8 @@ interface MockClientCtx {
   };
   /** apply 经 `ctx.get("uiWorkspace")` 拿到的导航替身被调过哪些目标（fork 后应切过去）。 */
   openSessionCalls: string[];
+  /** 让导航替身抛错：导航是可选服务，它失败不能带走已经 fork 的子会话与这次发送。 */
+  openSessionThrows: boolean;
   /** 0.1.7 的配置表单服务（installed dsh-client-ui-settings/lib/types/client/
    *  config-form.d.ts:95-96 的 Context 增强）：取代已从宿主消失的 `settingsScope`。
    *  `get` 的入参是 **profile 条目 id**（同文件 :142），这里记下来供装配断言。 */
@@ -932,6 +944,7 @@ function makeClientCtx(): MockClientCtx {
     scope,
     bindings,
     openSessionCalls,
+    openSessionThrows: false,
     effect(factory) {
       const disposer = factory();
       if (typeof disposer === "function") {
@@ -949,6 +962,9 @@ function makeClientCtx(): MockClientCtx {
       name === "uiWorkspace"
         ? {
             openSession: (target: string) => {
+              if (ctx.openSessionThrows) {
+                throw new Error("navigation unavailable");
+              }
               openSessionCalls.push(target);
             },
           }
@@ -1120,15 +1136,31 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
     });
   });
 
-  it("stopAndReask：prompt 失败短路；cancel 失败透传", async () => {
+  it("sendSameSession：失败体整位缺 error 也不抛（按无 code/message 透传）", async () => {
+    const ctx = applyWithCtx();
+    ctx.bindings.set("s1", {
+      // 网关转发的是裸 JSON：`{ok:false}` 不带 error 也能到得了这一层。
+      prompt: async () => ({ ok: false }),
+      cancel: async () => ({ ok: true }),
+      updateQueue: async () => ({ ok: true }),
+    });
+    ctx.slots.get(DOCK_SLOT)?.();
+    const { actions } = ctx.registers[0]!.inject!() as {
+      actions: { sendSameSession: (sessionId: string, text: string) => Promise<unknown> };
+    };
+    assert.deepEqual(await actions.sendSameSession("s1", "t"), { ok: false });
+  });
+
+  it("stopAndReask：prompt 失败短路；cancel 失败报「重问已入队」", async () => {
     const ctx = applyWithCtx();
     let promptOk = false;
+    let cancelError: unknown = { message: "cancel no" };
     const session = {
       // 官方 `RemoteResult` 的失败支必带 `error`（`{ok:false, error: RemoteFailure}`，
       // dsh-typert-protocol/lib/types/types.d.ts:67-73）：桩件要交就交完整形状，
       // 空 `error` 正是生产侧「有失败、无 code/message」那一支的合法表达。
       prompt: async () => (promptOk ? { ok: true } : { ok: false, error: {} }),
-      cancel: async () => ({ ok: false, error: { message: "cancel no" } }),
+      cancel: async () => ({ ok: false, error: cancelError }),
       updateQueue: async () => ({ ok: true }),
     };
     ctx.bindings.set("s1", session);
@@ -1139,9 +1171,19 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
     promptOk = false;
     assert.deepEqual(await actions.stopAndReask("s1", "t"), { ok: false });
     promptOk = true;
+    // 入队的那一条仍会发出：整串透传宿主错误等于对用户说「什么都没发生」，
+    // 再点一次就同文本发两遍，所以先报「已入队」，宿主的理由附在后面。
     assert.deepEqual(await actions.stopAndReask("s1", "t"), {
       ok: false,
-      message: "cancel no",
+      code: "reask-queued",
+      message: "重问已入队，当前回合结束后会发出；停止本轮未生效（cancel no）",
+    });
+    // 宿主没给理由时只剩前半句，不带空括号。
+    cancelError = {};
+    assert.deepEqual(await actions.stopAndReask("s1", "t"), {
+      ok: false,
+      code: "reask-queued",
+      message: "重问已入队，当前回合结束后会发出；停止本轮未生效",
     });
   });
 
@@ -1200,6 +1242,30 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
     // `ctx.uiWorkspace.openSession(target)`），旧实现叫 `sessions.open(childId)` 在真宿主上
     // 是 undefined 成员 → TypeError → 整条 fork 分支被 catch 成一次失败。
     assert.deepEqual(ctx.openSessionCalls, ["child-s1"], "fork 后应把视图切到子会话");
+  });
+
+  it("forkAndSend：导航抛错不影响已经建好的子会话与这次发送", async () => {
+    const ctx = applyWithCtx();
+    ctx.openSessionThrows = true;
+    const prompts: string[] = [];
+    ctx.bindings.set("child-s1", {
+      prompt: async (content: { type: string; text: string }[]) => {
+        prompts.push(content[0]?.text ?? "");
+        return { ok: true };
+      },
+      cancel: async () => ({ ok: true }),
+      updateQueue: async () => ({ ok: true }),
+    });
+    ctx.slots.get(DOCK_SLOT)?.();
+    const { actions } = ctx.registers[0]!.inject!() as {
+      actions: {
+        forkAndSend: (sessionId: string, turn: number | null, text: string) => Promise<unknown>;
+      };
+    };
+    // 导航是可选服务：切不过去只是少一次导航，fork 与发送是主功能。
+    assert.deepEqual(await actions.forkAndSend("s1", 5, "still sent"), { ok: true });
+    assert.deepEqual(prompts, ["still sent"]);
+    assert.deepEqual(ctx.openSessionCalls, [], "抛错的导航没有记录目标");
   });
 });
 
@@ -1419,19 +1485,40 @@ describe("RescueDockView 渲染决策", () => {
     const base = {
       nodes: [
         { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
-        { kind: "turn-error", seq: 2, turn: 1, message: "boom", code: "X" },
+        { kind: TURN_ERROR_KIND, seq: 2, turn: 1, message: "boom", code: "X" },
       ],
       turnEnds: new Map([[1, 3]]),
     };
     const { container, rerender } = await mountDock(base, null);
     assert.ok(buttonByText(container, "编辑"), "canEditDock");
-    assert.ok(buttonByText(container, "重试"), "canRetryDock 渲染重试按钮");
+    const retry = buttonByText(container, RETRY_LABEL);
+    assert.ok(retry, "canRetryDock 渲染重试按钮");
+    // 失败原因是本轮自己的两个字段拼出来的，不再借会话级快照。
+    assert.match(container.textContent, /本轮失败原因：X: boom/u, "原因行");
+    assert.equal(retry.title, "在本会话重发重试指令", "本轮没跑过工具 ⇒ 标题不带副作用提示");
     // host 重试进行中（同类失败回合有 model-retry 节点）→ 避让
     await rerender({
       ...base,
       nodes: [...base.nodes, { kind: "model-retry", seq: 3, turn: 1, retryState: "started" }],
     });
     assert.ok(buttonContaining(container, "重试等待中"), "isHostPending 文案");
+  });
+
+  it("重试按钮：本轮跑过工具/命令时标题带副作用提示", async () => {
+    const { container } = await mountDock(
+      {
+        nodes: [
+          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
+          { kind: "tool-result", seq: 2, turn: 1 },
+          { kind: TURN_ERROR_KIND, seq: 3, turn: 1, message: "boom", code: "X" },
+        ],
+        turnEnds: new Map([[1, 4]]),
+      },
+      null,
+    );
+    const retry = buttonByText(container, RETRY_LABEL);
+    assert.ok(retry, "canRetryDock");
+    assert.match(retry.title, /本轮已执行过工具或命令，重试会重做这些副作用/u, "副作用提示");
   });
 
   it("max-tokens 回合：显示继续输出按钮", async () => {
@@ -1445,7 +1532,25 @@ describe("RescueDockView 渲染决策", () => {
       },
       null,
     );
-    assert.ok(buttonByText(container, "继续输出"), "canContinueDock");
+    const continueBtn = buttonByText(container, "继续输出");
+    assert.ok(continueBtn, "canContinueDock");
+    // 该类的 code 固定、message 为空：原因行只带 code。
+    assert.match(container.textContent, /本轮失败原因：turn-max-tokens/u, "只有 code 的原因行");
+  });
+
+  it("interrupted 回合：轮内没有原因文本，不出原因行", async () => {
+    const { container } = await mountDock(
+      {
+        nodes: [
+          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
+          { kind: "assistant", seq: 2, turn: 1, content: [], interrupted: true },
+        ],
+        turnEnds: new Map([[1, 3]]),
+      },
+      null,
+    );
+    assert.ok(buttonByText(container, "编辑"), "编辑入口仍开");
+    assert.doesNotMatch(container.textContent, /本轮失败原因/u, "没有轮内原因就不出行");
   });
 
   it("running + 有最后用户消息：停止重问行；重试/编辑隐藏", async () => {
@@ -1480,6 +1585,78 @@ describe("RescueDockView 渲染决策", () => {
     // rescue 快照未就绪（null）→ 无开关行
     const { container: v2 } = await mountDock({}, null);
     assert.ok(!v2.textContent.includes("自动续跑（本会话）"), "unknown 态不显示开关行");
+  });
+
+  it("开关写通道在途：按钮禁用，第二次点击不再发请求", async () => {
+    // 开关是翻转语义：往返中再点一次会把刚设好的状态翻回去，而两次都回 {ok:true}，
+    // 用户在 UI 上看不出任何异常。判据是「在途期间只可能有一次请求」。
+    const gate = Promise.withResolvers<undefined>();
+    const body: RescueStateBody = {
+      ok: true,
+      sessions: { s1: { count: 0, lastFireAt: 0, pending: null, disabled: false } },
+    };
+    const { container } = await mountDock({}, body, {
+      route: (url) =>
+        url === STATE_URL
+          ? { ok: true, body }
+          : { ok: true, body: { ok: true }, wait: gate.promise },
+    });
+    const toggleBtn = buttonByText(container, "关闭");
+    assert.ok(toggleBtn, "on 态按钮为关闭");
+    await act(async () => {
+      toggleBtn.click();
+    });
+    assert.equal(toggleBtn.disabled, true, "写通道在途时开关按钮禁用");
+    await act(async () => {
+      toggleBtn.click();
+    });
+    assert.equal(
+      fetchCalls.filter((call) => call.url.startsWith(TOGGLE_URL)).length,
+      1,
+      "第二次点击不再发请求",
+    );
+    gate.resolve(undefined);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(toggleBtn.disabled, false, "落定后恢复可点");
+  });
+
+  it("取消写通道在途：横幅按钮禁用且横幅开关行一起禁用", async () => {
+    const gate = Promise.withResolvers<undefined>();
+    const body: RescueStateBody = {
+      ok: true,
+      sessions: {
+        s1: {
+          count: 1,
+          lastFireAt: 0,
+          pending: { turn: 2, kind: "resume", fireAt: 0, remainingMs: 5000 },
+          disabled: false,
+        },
+      },
+    };
+    const { container } = await mountDock({}, body, {
+      route: (url) =>
+        url === STATE_URL
+          ? { ok: true, body }
+          : { ok: true, body: { ok: true }, wait: gate.promise },
+    });
+    const cancelBtn = buttonByText(container, "取消");
+    assert.ok(cancelBtn, "横幅带取消按钮");
+    await act(async () => {
+      cancelBtn.click();
+    });
+    assert.equal(cancelBtn.disabled, true, "取消在途时禁用");
+    assert.equal(buttonByText(container, "关闭")?.disabled, true, "同一次在途也禁用开关");
+    await act(async () => {
+      cancelBtn.click();
+    });
+    assert.equal(fetchCalls.filter((call) => call.url.startsWith(CANCEL_URL)).length, 1);
+    gate.resolve(undefined);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(cancelBtn.disabled, false, "落定后恢复可点");
   });
 
   it("编辑重发：打开编辑器 → Escape 关闭；⌘Enter 发送", async () => {
@@ -2351,7 +2528,7 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
 // ── dock 动作行与 host 写通道（取消 / 开关）的失败面 ──────────────────────
 
 const turnErrorNodes: DockNode[] = [
-  { kind: "turn-error", seq: 2, turn: 1, message: "boom", code: "X" },
+  { kind: TURN_ERROR_KIND, seq: 2, turn: 1, message: "boom", code: "X" },
 ];
 
 describe("dock 动作行与 host 写通道", () => {
@@ -2373,11 +2550,11 @@ describe("dock 动作行与 host 写通道", () => {
       return gate.promise;
     };
     await act(async () => {
-      buttonByText(container, "重试")!.click();
+      buttonByText(container, RETRY_LABEL)!.click();
     });
     // 与编辑器同理：disabled 按钮收不到 click，重入闸门由 handler 直调命中。
     await act(async () => {
-      reactProps<{ onClick: () => void }>(buttonByText(container, "重试")!).onClick();
+      reactProps<{ onClick: () => void }>(buttonByText(container, RETRY_LABEL)!).onClick();
     });
     assert.equal(runs, 1, "runAction 的 busy 闸门挡住第二次");
     gate.release({ ok: true });
@@ -2390,7 +2567,7 @@ describe("dock 动作行与 host 写通道", () => {
       message: "会话不可用",
     });
     await act(async () => {
-      buttonByText(container, "重试")!.click();
+      buttonByText(container, RETRY_LABEL)!.click();
     });
     await act(async () => {
       await flush();
@@ -2401,7 +2578,7 @@ describe("dock 动作行与 host 写通道", () => {
       throw new Error("dock-blast");
     };
     await act(async () => {
-      buttonByText(container, "重试")!.click();
+      buttonByText(container, RETRY_LABEL)!.click();
     });
     await act(async () => {
       await flush();
@@ -2411,7 +2588,7 @@ describe("dock 动作行与 host 写通道", () => {
     const bareDock = makeGate();
     stub.actions.sendSameSession = (): Promise<unknown> => bareDock.promise;
     await act(async () => {
-      buttonByText(container, "重试")!.click();
+      buttonByText(container, RETRY_LABEL)!.click();
     });
     bareDock.reject("dock-bare");
     await act(async () => {

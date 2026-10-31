@@ -35,7 +35,10 @@ const SESSION_SCHEMA = z.object(
   {
     sessionId: z
       .string({ error: SESSION_MESSAGE })
-      .refine((value) => value.trim() !== "", { error: SESSION_MESSAGE }),
+      // trim 后再判空：只判空不 trim 时 " s1 " 会通过校验，原值带着空白直接进宿主查表，
+      // 结果是「找不到该会话」的业务失败——读起来像会话没了，实际是入参没洗。
+      .trim()
+      .min(1, { error: SESSION_MESSAGE }),
   },
   { error: SESSION_MESSAGE },
 );
@@ -43,12 +46,8 @@ const SESSION_SCHEMA = z.object(
 const POLICY_MESSAGE = "policy request requires non-empty string provider and preset";
 const POLICY_SCHEMA = z.object(
   {
-    provider: z
-      .string({ error: POLICY_MESSAGE })
-      .refine((value) => value.trim() !== "", { error: POLICY_MESSAGE }),
-    preset: z
-      .string({ error: POLICY_MESSAGE })
-      .refine((value) => value.trim() !== "", { error: POLICY_MESSAGE }),
+    provider: z.string({ error: POLICY_MESSAGE }).trim().min(1, { error: POLICY_MESSAGE }),
+    preset: z.string({ error: POLICY_MESSAGE }).trim().min(1, { error: POLICY_MESSAGE }),
   },
   { error: POLICY_MESSAGE },
 );

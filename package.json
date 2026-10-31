@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-session-rescue",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Session rescue for dsh web: auto-resume on transient model failures, max-tokens continuation and unclosed-todo catch-up (host), plus edit-resend / retry / queue-withdraw / stop-and-reask / settings card (client).",
   "keywords": [
     "cordis",
@@ -14,7 +14,10 @@
     "url": "https://github.com/JayYuen666/dsh-session-rescue/issues"
   },
   "license": "MIT",
-  "author": "JayYuen",
+  "author": {
+    "name": "JayYuen",
+    "url": "https://github.com/JayYuen666"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/JayYuen666/dsh-session-rescue.git"
@@ -58,9 +61,10 @@
     "test": "vitest run --coverage",
     "test:integration": "vitest run -c vitest.integration.config.ts",
     "test:property": "vitest run -c vitest.property.config.ts",
+    "test:e2e": "vitest run -c vitest.e2e.config.ts",
+    "test:platform": "vitest run -c vitest.platform.config.ts",
     "test:watch": "vitest",
-    "check": "npm run --loglevel=warn typecheck && npm run --loglevel=warn lint && npm run --loglevel=warn build:client && npm run --loglevel=warn build && npm run --loglevel=warn build:types && npm run --loglevel=warn test && npm run --loglevel=warn test:integration && npm run --loglevel=warn test:property && npm run --loglevel=warn fmt:check",
-    "prepack": "npm run --loglevel=warn build:client && npm run --loglevel=warn build && npm run --loglevel=warn build:types",
+    "check": "npm run --loglevel=warn typecheck && npm run --loglevel=warn lint && npm run --loglevel=warn build:client && npm run --loglevel=warn build && npm run --loglevel=warn build:types && npm run --loglevel=warn test && npm run --loglevel=warn test:integration && npm run --loglevel=warn test:property && npm run --loglevel=warn test:e2e && npm run --loglevel=warn test:platform && npm run --loglevel=warn fmt:check",
     "fmt:check": "oxfmt --check .",
     "prepare": "npm run --loglevel=warn build:client && npm run --loglevel=warn build && npm run --loglevel=warn build:types"
   },
@@ -70,6 +74,8 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.6-alpha.1",
+    "@deepseek-ai/cordis-plugin-group": "1.0.6-alpha.1",
+    "@deepseek-ai/cordis-plugin-include": "1.0.11-alpha.1",
     "@deepseek-ai/cordis-plugin-loader": "1.0.7-alpha.1",
     "@deepseek-ai/cordis-plugin-timer": "1.1.8-alpha.1",
     "@deepseek-ai/dsh-agent": "0.2.2-alpha.2",
@@ -80,6 +86,7 @@
     "@deepseek-ai/dsh-api-remotes": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-api-session-controller": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-api-workspace-controller": "0.2.2-alpha.2",
+    "@deepseek-ai/dsh-app-boot": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-attachment": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-brand": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-client-file-upload": "0.2.2-alpha.2",
@@ -96,6 +103,7 @@
     "@deepseek-ai/dsh-client-ui-settings": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-client-ui-workspace": "0.2.2-alpha.2",
+    "@deepseek-ai/dsh-config-editor": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-credentials": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-file-reference": "0.2.2-alpha.2",
     "@deepseek-ai/dsh-fs": "0.2.2-alpha.2",
@@ -154,7 +162,7 @@
     "@deepseek-ai/dsh": "^0.2.1-rc.3",
     "@deepseek-ai/dsh-brand": "^0.2.1-rc.3",
     "@deepseek-ai/dsh-typert-protocol": "^0.2.1-rc.3",
-    "@deepseek-ai/schemastery": "3.18.6-alpha.1"
+    "@deepseek-ai/schemastery": "^3.18.6-alpha.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh": {

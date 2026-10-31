@@ -15,15 +15,31 @@ import {
 } from "@jayyuen66/dsh-plugin-shared/lib/build-client";
 import { invokedDirectly, writeArtifact } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
-// 单 chunk 断言现在只有 shared 一份；此处转导出，导入方不必改路径。
-export { singleEntryChunk } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
-
 const root = import.meta.dirname;
 
 // 外置清单 = 既有 react 家族 + zod（宿主 `PLATFORM_MODULES` 里本卡值导入的第三方运行时）。
 // 不复用 shared 的默认清单、也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
 // 新导出在它发布之前不存在。zod 内联会打进每份 client.js，并让同一页面出现两份 zod 身份。
 const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
+
+/**
+ * 取出 `src/client-entry.ts` 里 `const BUNDLE_PKG = "…"` 的取值。
+ *
+ * 先剥注释再匹配，是因为行首锚点挡不住块注释：`/^\s*const/m` 会逐行匹配，一段被
+ * `/* … *\/` 包起来的旧声明照样满足行首锚点，于是判据采信的是注释里的历史值。
+ * 行注释同理（`// const BUNDLE_PKG = "…"` 在锚点下不命中，但剥掉更省得推理）。
+ *
+ * @param {string} source - client-entry.ts 的原始正文
+ * @returns {string | undefined} 声明值；没有该声明时为 undefined
+ */
+export function bundlePkgFromSource(source) {
+  const stripped = source.replaceAll(/\/\*[\s\S]*?\*\//gu, "").replaceAll(/^\s*\/\/.*$/gmu, "");
+  // 命名捕获组的取值用**解构**取：`noPropertyAccessFromIndexSignature` 下 `groups.literal`
+  // 过不了 tsc（索引签名只允许方括号），而方括号写法又撞 oxlint 的 dot-notation。
+  const { groups: { literal } = {} } =
+    /^\s*const\s+BUNDLE_PKG\s*=\s*"(?<literal>[^"\\]*)"/mu.exec(stripped) ?? {};
+  return literal;
+}
 
 /** 生成 client.js 的完整文本（含 ModuleLoader 外壳）。 */
 export async function buildClient() {
@@ -38,11 +54,10 @@ export async function buildClient() {
       // 匹配模块表键，对不上就是整张卡静默不渲染，而改名在别的环节没有症状。
       // 判据落在**源码声明**上，不落产物：外壳 id 与内联代码里的其它包名常量各自带着同
       // 一个字面量，「产物包含包名」的子串判据在 BUNDLE_PKG 单独漂移时依然通过，等于没有
-      // 判据。行首锚点是判据的一部分：没有它时，注释里写的同形片段或字符串里的示例只要
-      // 排在真声明之前，就会被 exec 命中而静默返回一个错的值——正好绕过这里要防的漂移。
+      // 判据。取值与注释剥离都在 bundlePkgFromSource 里，取值逻辑单独有负例用例
+      // （test/build-client.test.ts），不在构建回调里现写。
       const source = await readSource(path.join("src", "client-entry.ts"));
-      const declared = /^\s*const\s+BUNDLE_PKG\s*=\s*"[^"\\]*"/mu.exec(source);
-      const value = declared?.[0].split('"').at(1);
+      const value = bundlePkgFromSource(source);
       // 刻意 fail loud：声明被改名、改成模板串或删掉时，判据无从执行，构建必须停而不是放行。
       if (value === undefined || value === "") {
         throw new Error(
@@ -68,7 +83,7 @@ if (invokedDirectly(import.meta.filename)) {
   try {
     await main();
   } catch (error) {
-    console.error(error);
+    console.error("[build-client.mjs] 构建失败，既有 client.js 未被改动：", error);
     process.exitCode = 1;
   }
 }

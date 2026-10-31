@@ -132,7 +132,13 @@ async function expand(shape: PatternShape): Promise<string[]> {
   if (shape.kind === "exact") {
     return existsSync(path.join(pkgDir, shape.file)) ? [shape.file] : [];
   }
-  const names = await readdir(path.join(pkgDir, shape.dir), { recursive: shape.dir !== "." });
+  const dir = path.join(pkgDir, shape.dir);
+  // 目录不存在时按空集合处理：`types/` 在 .gitignore 里，fresh clone 没跑 build:types 时
+  // 不存在；让 readdir 抛 ENOENT 会把整份用例一起红在与成因无关的栈上。
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+    return [];
+  }
+  const names = await readdir(dir, { recursive: shape.dir !== "." });
   return names
     .map((name) => name.split(path.sep).join("/"))
     .filter((name) => shape.extension === "" || name.endsWith(shape.extension))

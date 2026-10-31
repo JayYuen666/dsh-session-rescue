@@ -35,6 +35,10 @@ export interface TranscriptNode {
   message?: string;
   code?: string;
   content?: readonly ContentBlock[];
+  /** 消息来源（官方 `UserMessageNode.source`）。本包只用它区分人类输入与 goal / schedule /
+   *  其他插件注入的 user 消息：那些注入在转录里同为 `kind: "user"`，若当成人类输入，
+   *  编辑重发会把内部指令原样再发一遍。 */
+  source?: unknown;
   interrupted?: boolean;
   /** 重试生命周期，同样取官方字面量联合（`ModelRetryNode` 的
    *  `'scheduled' | 'started' | 'cancelled'`）。写成 `string` 时
@@ -62,19 +66,23 @@ export interface TranscriptView {
   readonly runningCalls: readonly RunningCall[];
   running: boolean;
   removed: boolean;
-  lastAgentError: string | null;
 }
 
 /** 给定轮开始前的边界 seq（上一轮 end；第一轮为 0）。
+ *  下界只在**连续**时可信：取到边界的必须是紧邻的上一轮。中间轮缺失（中断/取消没写
+ *  turn-end、恢复会话只带回部分轮次）时，更早轮的 end 会把缺口里的活动算进这一轮，
+ *  于是返回 undefined，由调用方退回「只认运行中工具调用」的判据。
  *  不 export：本模块内只有 `turnHasToolActivity` 读它，窗口判据由那条读法的用例钉住。 */
-function turnStartSeq(view: TranscriptView, turn: number): number {
+function turnStartSeq(view: TranscriptView, turn: number): number | undefined {
   let start = 0;
+  let boundaryTurn: number | undefined;
   for (const [turnId, end] of view.turnEnds) {
-    if (turnId < turn && end > start) {
+    if (turnId < turn && end >= start) {
       start = end;
+      boundaryTurn = turnId;
     }
   }
-  return start;
+  return turn > 1 && boundaryTurn !== turn - 1 ? undefined : start;
 }
 
 /** 该轮是否跑过工具/命令：重跑会重复副作用，自动续跑文案需避免重做。 */
@@ -87,7 +95,7 @@ export function turnHasToolActivity(view: TranscriptView, turn: number): boolean
   if (end !== undefined) {
     const start = turnStartSeq(view, turn);
     // start >= end 说明 turnEnds 里出现了乱序条目：窗口空或倒挂，同样没有可信边界。
-    if (start < end) {
+    if (start !== undefined && start < end) {
       for (const node of view.nodes) {
         if (
           (node.kind === "tool-result" || node.kind === "command") &&

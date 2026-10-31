@@ -18,7 +18,7 @@ const PKG_PREFIX = "[session-rescue]";
  *  带上 debug：`log-templates.test.ts` 的源码扫描认这一级，接管面不跟上的话，
  *  一条 console.debug 会被骨架清单要求登记、却在运行时逃过账本两条断言。 */
 export type LogLevel = "info" | "warn" | "error" | "log" | "debug";
-const LEVELS: readonly LogLevel[] = ["info", "warn", "error", "log", "debug"];
+export const LEVELS: readonly LogLevel[] = ["info", "warn", "error", "log", "debug"];
 
 /** 一次接管到的调用：拼平的首参 + 其余实参（堆栈通常就藏在其余实参里）。 */
 export interface LogRecord {

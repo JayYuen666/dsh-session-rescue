@@ -219,7 +219,18 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     );
     // 反例：已知的确定性结束理由出现在 error 里，不该被当成「上游异常、重试即成功」。
     // 把它们洗成可重试，会让同一份坏请求被反复重发。
-    for (const known of ["end_turn", "stop", "tool_use", "max_tokens", "content_filter"]) {
+    for (const known of [
+      "end_turn",
+      "stop",
+      "tool_use",
+      "tool_calls",
+      "function_call",
+      "max_tokens",
+      "length",
+      "content_filter",
+      "SAFETY",
+      "RECITATION",
+    ]) {
       assert.equal(
         classifyFailure({ code: "PI_AI_ERROR", message: `Provider finish_reason: ${known}` })
           .transient,
@@ -272,6 +283,12 @@ describe("请求级判据 isRequestRetryWorthy（与回合级同源）", () => {
     // 而重发对余额耗尽没有任何意义，只会多烧几轮。
     assert.equal(isRequestRetryWorthy({ code: "", message: BALANCE_TEXT, status: 500 }), false);
     assert.equal(isRequestRetryWorthy({ code: "", message: "out of credits", status: 503 }), false);
+  });
+
+  it("显式限速码先于账单措辞（与回合级同序）", () => {
+    // `{code:"RATE_LIMIT", message:"Insufficient quota"}` 在回合级按 code 判瞬时；
+    // 请求级不能因为余额文案判成不重发——同一份载荷两条链路必须同答案。
+    assert.equal(isRequestRetryWorthy({ code: "RATE_LIMIT", message: BALANCE_TEXT }), true);
   });
 
   it("QUOTA + 429 无限流证据 ⇒ 不重发（真宿主对余额/配额到期的交回形）", () => {
@@ -354,6 +371,10 @@ describe("QUOTA@429 的两种形（回合级也必须分得开）", () => {
 describe("looksRateLimitish（观察性日志用）", () => {
   it("疑似限流措辞命中", () => {
     assert.equal(looksRateLimitish({ code: "QUOTA", message: "quota_exceeded" }), true);
+    // 余额耗尽的措辞不是「疑似限流」：它已被分类器判永久且理由明确，再报一条只会
+    // 变成噪声，并往 lesson 总线写一条假教训。
+    assert.equal(looksRateLimitish({ code: "QUOTA", message: BALANCE_TEXT }), false);
+    assert.equal(looksRateLimitish({ message: "balance exhausted" }), false);
     assert.equal(looksRateLimitish({ message: "all fine" }), false);
   });
 

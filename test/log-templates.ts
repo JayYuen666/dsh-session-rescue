@@ -8,9 +8,12 @@
 // 这份清单与源码的同步由 test/log-templates.test.ts 当场核对：它从 host.ts 与 lib/ 下现扫
 // 一遍 console.* 的首个模板字面量，与清单逐条比对，清单陈旧或手改都会判红。
 export const LOG_SKELETONS: readonly string[] = [
+  "[session-rescue] ⟨slot⟩: rescue facts rejected by schema (⟨slot⟩) — falling back to event scans",
+  "[session-rescue] ⟨slot⟩: auto-⟨slot⟩ check threw (⟨slot⟩)",
   "[session-rescue] lessonLoop report failed: ⟨slot⟩",
   "[session-rescue] lessonLoop pass failed: ⟨slot⟩",
   "[session-rescue] ⟨slot⟩: provider Retry-After ⟨slot⟩ms exceeds ⟨slot⟩ms cap — delegating to llm-retry",
+  "[session-rescue] scheduler at capacity: new sessions will NOT be auto-rescued — all session records are suspended/pending until they free up",
   "[session-rescue] ⟨slot⟩: auto-⟨slot⟩ skipped (⟨slot⟩)",
   "[session-rescue] ⟨slot⟩: chained failure at turn ⟨slot⟩ (rescue-opened turn) — bypassing cooldown, re-scheduling in ⟨slot⟩ms",
   "[session-rescue] ⟨slot⟩: ⟨slot⟩ trigger at turn ⟨slot⟩ — auto-⟨slot⟩ in ⟨slot⟩ms",
@@ -30,6 +33,7 @@ export const LOG_SKELETONS: readonly string[] = [
   "[session-rescue] ⟨slot⟩: turn ⟨slot⟩ is schedule-driven — continue suppressed",
   "[session-rescue] retry-policy mutate failed (⟨slot⟩/⟨slot⟩):",
   "[session-rescue] sessionProjections register failed, falling back to log scan: ⟨slot⟩",
+  "[session-rescue] sessionProjections handle dispose failed (registration already released): ⟨slot⟩",
 ];
 
 /**

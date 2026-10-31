@@ -3,7 +3,7 @@
  *
  * 输入：一个普通 "view" 对象，由 client 组件从两个已验证的数据源合并而来：
  *   nodes / turnEnds / runningCalls   ← useChat((c) => c.legacy)
- *   running / removed / lastAgentError ← useSession((s) => ...)
+ *   running / removed ← useSession((s) => ...)
  * installed 的 `SessionSnapshot`（dsh-api-session-controller 的
  * client/contract/snapshot.d.ts:58）没有 nodes 字段；chat-recovery 因从 useSession
  * 读 nodes 而损坏 —— 禁止复制它的数据源假设。
@@ -33,20 +33,19 @@ import type { TranscriptNode, TranscriptView } from "./turn-scope.ts";
  *  块词汇，非 text 块在类型面上不再可辨。 */
 export type { ContentBlock } from "@deepseek-ai/dsh-llm";
 
-/** 编辑重发目标：最后一条已完成轮的用户消息。 */
+/** 编辑重发目标：最后一条已完成轮的用户消息。
+ *  只带调用方真正要的三位：正文、这条消息自己的 seq、fork 的切分边界。 */
 export interface CompletedUserTarget {
   text: string;
   seq: number;
-  turn: number;
-  turnEndSeq: number;
   forkAtSeq: number | null;
 }
 
-/** 最后完成轮的终态失败信息。 */
+/** 最后完成轮的终态失败信息：`turn` 供宿主重试避让，`message`/`code` 供原因行展示，
+ *  `hasTools` 供重试按钮的副作用提示。 */
 export interface TurnFailure {
   kind: "turn-error" | "max-tokens" | "interrupted";
   turn: number;
-  turnEndSeq: number;
   message: string | null;
   code: string | null;
   hasTools: boolean;
@@ -70,14 +69,35 @@ export function userText(content: readonly ContentBlock[] | undefined): string |
   return text.trim() === "" ? null : text;
 }
 
+/** 这条 user 节点是否来自人类输入。官方 `MessageSourceMap` 里人类输入的 kind 是 `"user"`；
+ *  goal / schedule / 本插件的续跑注入都带各自的 kind，不能当成「编辑重发」的文本。
+ *  合成投影与旧日志可能没有 source：那种形态按人类输入处理，保持既有行为。 */
+function isHumanUserSource(source: unknown): boolean {
+  if (typeof source !== "object" || source === null) {
+    return true;
+  }
+  const { kind } = source as { kind?: unknown };
+  return kind === undefined || kind === "user";
+}
+
 export function lastUserNode(view: TranscriptView): TranscriptNode | null {
   let last: TranscriptNode | null = null;
   for (const node of view.nodes) {
-    if (node.kind === "user") {
+    if (node.kind === "user" && isHumanUserSource(node.source)) {
       last = node;
     }
   }
   return last;
+}
+
+/** 这条消息之后是否确有轮次收尾：没有任何 turn/end 时它还不算「已完成轮」的输入。 */
+function hasTurnEndAfter(view: TranscriptView, seq: number): boolean {
+  for (const end of view.turnEnds.values()) {
+    if (end > seq) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** 编辑重发目标：最后一条用户消息，要求会话非 running/removed 且该轮已结束。
@@ -90,15 +110,7 @@ export function lastCompletedUserTarget(view: TranscriptView): CompletedUserTarg
   if (last === null) {
     return null;
   }
-  let turn = -1;
-  let turnEndSeq = -1;
-  for (const [turnId, end] of view.turnEnds) {
-    if (end > last.seq && (turn === -1 || turnId < turn)) {
-      turn = turnId;
-      turnEndSeq = end;
-    }
-  }
-  if (turn === -1) {
+  if (!hasTurnEndAfter(view, last.seq)) {
     return null;
   }
   const text = userText(last.content);
@@ -111,7 +123,7 @@ export function lastCompletedUserTarget(view: TranscriptView): CompletedUserTarg
       forkAtSeq = end;
     }
   }
-  return { text, seq: last.seq, turn, turnEndSeq, forkAtSeq };
+  return { text, seq: last.seq, forkAtSeq };
 }
 
 /** host 内置重试（llm/retry）是否仍持有该轮：scheduled/started 期间客户端必须避让。 */
@@ -136,8 +148,10 @@ function classifyFailureOfTurn(
   if (maxTokensInTurn(view, turn)) {
     return { kind: "max-tokens", message: null, code: "turn-max-tokens" };
   }
+  // 中断轮没有轮内错误文本（官方节点只带 interrupted: true）。会话级 lastAgentError
+  // 不随轮次推进清空，借它当本轮原因会把别的轮/别的重试的错误挂到这一轮上。
   if (interruptedAssistantInTurn(view, turn) !== null) {
-    return { kind: "interrupted", message: view.lastAgentError, code: null };
+    return { kind: "interrupted", message: null, code: null };
   }
   return null;
 }
@@ -153,18 +167,16 @@ export function failureOfLastTurn(view: TranscriptView): TurnFailure | null {
     return null;
   }
   let turn = -1;
-  let end = 0;
-  for (const [turnId, endId] of view.turnEnds) {
+  for (const turnId of view.turnEnds.keys()) {
     if (turnId > turn) {
       turn = turnId;
-      end = endId;
     }
   }
   if (turn === -1) {
     return null;
   }
   // 先定「是不是失败、是哪一类」，再一次性填充公共字段：三个分支原本各自复制一份
-  // {turn, turnEndSeq, hasTools} 并各调一次 turnHasToolActivity，加字段时要改三处、
+  // {turn, hasTools} 并各调一次 turnHasToolActivity，加字段时要改三处、
   // 而 hasTools 对同一个 turn 也白扫三遍（它与失败类别无关，只取决于该轮有没有工具活动）。
   const head: Pick<TurnFailure, "kind" | "message" | "code"> | null = classifyFailureOfTurn(
     view,
@@ -176,7 +188,6 @@ export function failureOfLastTurn(view: TranscriptView): TurnFailure | null {
   return {
     ...head,
     turn,
-    turnEndSeq: end,
     hasTools: turnHasToolActivity(view, turn),
   };
 }

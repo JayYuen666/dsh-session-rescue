@@ -3,6 +3,51 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 0.1.6
+
+一轮跨面审查修复：调度器加容量闸门、投影读面改三态、失败分类与编辑重发判据收口，
+测试补 e2e 与 platform 两层；宿主开发线抬升，发布链同步加固。
+
+### Changed
+
+- **宿主开发线抬到 `0.2.2-alpha.2`**：devDependencies 与 catalog/overrides 同值；`engines.dsh` 与
+  `@deepseek-ai/dsh*` peer 写支持窗口 `^0.2.1-rc.3`。
+- **客户端用例的 React 基线回到 `^19.3.0` / `^19.3.1`**：0.1.2 曾把 devDependencies 落回
+  `18.3.1` 并注明「宿主锁的是 React 18.3.1」，这一版按 `@types/react` 的 catalog 口径与客户端
+  代码使用的 API 面统一回 19。宿主运行期提供的仍是 18.x（`packages/client/*` 声明 `^18.2.0`），
+  客户端代码因此**不得**使用 React 19 独有 API——这条约束不变，只是验收环境与类型面回到同一 major。
+- **`prepack` 并入 `prepare`**：两段脚本内容逐字相同，而 pnpm 12 的 `pack` 与 `publish` 都会在
+  `prepare` **之前**先跑 `prepack`（实测 `pnpm pack` 与 `pnpm publish --dry-run --no-git-checks`
+  的回执里两段都出现），同一条发布因此把整套构建跑两遍。删掉 `prepack`——`prepare` 在两条路上
+  都会被跑，产物照样在打包前就位。
+- **投影挂载的两处收口**：`handle.dispose()` 的拒绝不再变成 `unhandledRejection`（它只说明注册
+  已随宿主卸载被撤销，不是需要重启插件的错误，改为一条 `[session-rescue]` 警告）；`publish`
+  抛错时先释放这次注册再抛——否则调用方把这次挂载当成「没装上」，注册却已经成功，泄漏一个常驻 effect。
+- **文案**：英文 `unfinishedLessonDetail` 不再把复数名词硬连在 `{count}` 后（`count=1` 时是语法
+  错误，而这条 detail 会持久化进 lesson-loop），改为 `… still had open items (open count: {count})`；
+  中文 `unfinishedText` 与英文对齐成「从清单中未完成的**第一项**继续执行」。
+- **调度器容量闸门**（`lib/resume-scheduler.ts`）：新增 `hasCapacity()`，200 条满且无可淘汰空闲记录时不再新建排期（skip 理由 `capacity`）；`host.ts` 对 capacity skip 升 warn 并去重，任一次 schedule 成功后回落再武装，堵会话表无界膨胀。
+- **投影读面三态化**（`lib/turn-facts.ts`）：`asFacts` 由二值改三态（absent / rejected / facts），`host.ts` 对 rejected 每会话报一次 stderr——投影降级的原因不再与「投影缺席」混叠。
+- **失败分类判序与白名单**（`lib/failure-classify.ts`）：请求级重发把 `RATE_LIMIT` 提到余额措辞之前（与回合级同序，属性层钉死）；`UNRECOGNIZED_FINISH_REASON` 白名单扩 `tool_calls` / `function_call` / `length` / `safety` / `recitation`；余额耗尽不再报「疑似限流」。
+- **客户端写通道**（`src/client-entry.ts`）：取消/开关在途时按钮 disabled；重试档位改逐项串行落盘（并行写入会撞 settings-revision-conflict）；stopAndReask 的 cancel 被拒改报「重问已入队」。
+- **包元数据**：author 改对象形；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；devDependencies 新增 `@deepseek-ai/dsh-app-boot` / `@deepseek-ai/dsh-config-editor`；catalog 的 shared 抬到 0.2.2。
+- **文档**：两份 README 与 `docs/DETAIL(.zh).md` 重写配额清零语义、`providerExcludes` 精确匹配、重启清冷却、开关台账满额 409、429 窄化；ci.yml 的 actionlint 改按文件豁免。
+
+### Fixed
+
+- **定时器重复挂载泄漏**（`lib/resume-scheduler.ts`）：`attachTimer` 覆盖前先 `releaseTimer`。
+- **preFireCheck 抛错卡死补发**（`host.ts`）：新增 `preFireCheckSafely`，判据抛错时 `settle("skipped")` 并报 error——否则该会话的 `rec.pending` 永久非空，再也排不进、记录不可淘汰。
+- **跨版本脏 kind 回落**（`lib/resume-scheduler.ts`、`host.ts`）：新增导出 `rescueKindOf`（空串回落 `resume`），`resumeAfterReconnect` 先归一再发文案，脏快照不再让 `textForKind` 在循环里抛错、带走后续所有会话的补发。
+- **可调用投影 handle 误判**（`lib/projection-reader.ts`）：`isProjectionHandle` 收 `typeof === "function"` 且判序提前，新宿主可调用+可等待的 handle 不再被当旧 disposer 接走（旧症：读口恒 undefined 且无日志）。
+- **编辑重发目标过滤**（`lib/transcript.ts`、`lib/turn-scope.ts`、`lib/turn-review.ts`）：`lastUserNode` 按 `source.kind` 过滤非人类 user 节点，goal/schedule/插件注入不再被当编辑重发文本；中断轮不再借会话级 `lastAgentError` 冒充本轮原因；`turnStartSeq` 边界不连续时返回 undefined；todos 快照改倒扫 last-wins。
+- **客户端展示**（`src/client-entry.ts`、`src/remote.ts`）：fork 导航 `openSession` 包 try/catch；补 `.sr-dock[hidden]{display:none}`（flex 盖掉 UA hidden）；三入参校验改 `.trim().min(1)`。
+- **构建脚本**（`build-client.mjs`、`build-host.mjs`、`build-types.mjs`）：`BUNDLE_PKG` 采集先剥注释，块注释里的旧值不再被采信；host 产物判据改「恰好一条」；类型清单 JSON 解析报错带路径、0 份声明即抛错；删除幻影声明 `build-utils.d.mts`。
+
+### Added
+
+- **测试两层**：`test/e2e/rescue-loop.e2e.test.ts`（真 AgentLoop + 官方 mock LLM 的多回合/跨会话全旅程）与 `test/platform/scheduler.platform.test.ts`（非单调时钟、容量饱和、0 是合法时钟），check 链相应新增 `test:e2e`、`test:platform` 两腿；另新增 `test/integration/settings-real.test.ts`（真 app-boot + config-editor 钉 volatile 投影与 CAS）与 `test/projection-reader.test.ts`。
+- **事件字段单源**：新增 `lib/event-fields.ts`（投影折叠与回退扫描的事件读取判据）。
+
 ## 0.1.5
 
 这一版把失败归因改到「本次请求实际走的线路」，投影挂载改成兼容新旧宿主协议的时序，
@@ -24,6 +69,11 @@
   `exports` 增加 `./locale/en.json` 与 `./locale/zh.json` 两条显式子路径（install-probe 不解引用
   通配键），`files` 收进 locale 与 docs。
 - **正则常量提取**：失败分类里的余额耗尽与限速措辞提取为命名常量，行为不变。
+- **cordis 家族与 schemastery 抬版**：`@deepseek-ai/cordis` `4.0.5` → `4.0.6-alpha.1`、
+  `cordis-plugin-include` `1.0.10` → `1.0.11-alpha.1`、`cordis-plugin-loader` `1.0.6` →
+  `1.0.7-alpha.1`、`cordis-plugin-timer` `1.1.7` → `1.1.8-alpha.1`、`@deepseek-ai/schemastery`
+  `3.18.5` → `3.18.6-alpha.1`（overrides、devDependencies 与 `peerDependencies` 里那一条同值）；
+  宿主族 devDependencies 同步抬到 `0.2.2-alpha.2`，peer 的 dsh 三枚仍留 `^0.2.1-rc.3` 窗口。
 
 ## 0.1.4
 
@@ -80,6 +130,8 @@
   客户端 bundle 又把 react 外部化，测试层跑在 19 上等于用产品从不运行的那个 major 验收 UI。整套
   客户端用例（含真实 happy-dom + react-dom 挂载）在 18.3.1 上重跑通过。`@types/react*` 仍随 catalog
   取 19.3.0——类型面比运行时新，故客户端代码不得使用 React 19 独有 API 与语法糖。
+  （更正：该回落未保留，0.1.5 已把 devDependencies 写回 `^19.3.0`/`^19.3.1`，见该版第一条 Changed；
+  「客户端代码不得使用 React 19 独有 API」这条约束仍然有效。）
 - `engines.dsh` 从 `>=0.2.1-alpha.2` 改为与 peer 同一份范围（随宿主线升到 `^0.2.1-rc.2`）。宿主装插件时校验的是
   peer，`0.` 主版本上的 `^` 带上界（<0.3.0），而 `>=` 没有——旧写法等于对外宣称兼容 0.3/1.x，
   宿主却会当场拒装。门禁断言随之从「同值」改成「同一份范围」。

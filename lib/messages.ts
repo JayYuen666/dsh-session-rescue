@@ -30,7 +30,7 @@ export const MESSAGES: MessagesCatalog<SessionRescueMessages> = {
       "[自动续跑] 上一步因模型侧瞬时失败（限流/服务端/超时等）在自动重试后仍未成功，原任务尚未完成。请直接从中断处继续执行原任务：不要重新做已完成的工作、不要重复确认、也不要输出本条提示。",
     continueText: "请从截断处继续输出，不要重复已输出的内容。",
     unfinishedText:
-      "[自动续跑] 上一步正常结束，但你刚更新的任务清单里仍有未完成的项。请从清单中未完成的那一项继续执行：不要重做已完成的工作、不要重复确认、也不要输出本条提示。",
+      "[自动续跑] 上一步正常结束，但你刚更新的任务清单里仍有未完成的项。请从清单中未完成的第一项继续执行：不要重做已完成的工作、不要重复确认、也不要输出本条提示。",
     unfinishedLessonDetail: "回合 completed 但本回合更新的任务清单仍有 {count} 项未完成",
     maxTokensLessonDetail: "回合以 max-tokens 截断收尾，输出未完整送达",
   },
@@ -46,10 +46,11 @@ export const MESSAGES: MessagesCatalog<SessionRescueMessages> = {
       "[auto-resume] The previous step ended normally, but the task list you just updated still has open " +
       "items. Continue executing from the first open item: do not redo finished work, do not re-confirm, " +
       "and do not echo this message.",
+    // 不把复数名词硬连在 {count} 后面：count=1 时 "1 open items" 是语法错误，而这条 detail
+    // 会被持久化进 lesson-loop（不是一次性的日志）。把数字放进括号里的计数字段，任何
+    // count 都读得通，中英两语的占位符集合也保持一致。
     unfinishedLessonDetail:
-      "Turn completed while the task list updated in this turn still has {count} open items",
-    // 原标题 “the output never arrived complete” 有两处别扭：arrive complete 这个搭配不自然，
-    // 且「从未完整到达」容易被读成「从未到达」。改写成直接说明发生了什么。
+      "Turn completed while the task list updated in this turn still had open items (open count: {count})",
     maxTokensLessonDetail:
       "Turn ended truncated at max tokens; the output stopped before it was finished",
   },

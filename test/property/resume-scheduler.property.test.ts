@@ -33,6 +33,8 @@ interface Model {
   lastFireAt: Map<string, Record<RescueKind, number>>;
   /** 每个 kind 的累计次数。 */
   counts: Map<string, Record<RescueKind, number>>;
+  /** 每个 kind 由 restore 补发后新增的次数：restorePending 不校验配额，上界要把它加回来。 */
+  restored: Map<string, Record<RescueKind, number>>;
   /** 当前待办（按会话）。 */
   pending: Map<string, PendingRecord>;
   /** 已处理过的最大回合号。 */
@@ -78,8 +80,8 @@ type Cmd =
 /** 一批指令里真实走过的路径计数：不变量只在特定形态下才有内容，这里负责证明那些
  *  形态确实出现过（否则「越界时不许淘汰忙记录」会退化成一句永真话）。 */
 interface Stats {
-  /** 新建记录那一步表仍在上限之上的次数（越界判据的前提）。 */
-  oversizeSteps: number;
+  /** 表满且全忙时新会话被拒（capacity）的次数：硬上限判据确实被走到过。 */
+  capacitySkips: number;
   /** 观测到的记录淘汰次数（淘汰判据的前提）。 */
   evictions: number;
 }
@@ -111,18 +113,13 @@ function sessionKey(id: number): string {
   return `s${String(id)}`;
 }
 
-/** 只有 `failure`/`noteTurn` 会经 `rec()` 新建记录（其余入口都只读已有记录）。
- *  返回这条指令**可能**新建的会话键，非新建指令返回 null。 */
-function createTargetKey(cmd: Cmd): string | null {
-  return cmd.op === "failure" || cmd.op === "noteTurn" ? sessionKey(cmd.session) : null;
-}
-
 /** 建一次跑批：调度器的时钟闭包取的是模型上的活值，故在一次装配里接到位。 */
 function makeRun(stats: Stats): Run {
   const model: Model = {
     now: 1_000_000,
     lastFireAt: new Map(),
     counts: new Map(),
+    restored: new Map(),
     pending: new Map(),
     handled: new Map(),
   };
@@ -137,36 +134,13 @@ function makeRun(stats: Stats): Run {
   };
 }
 
-/** 这条记录此刻是否**不空闲**：有待办、有在挂的定时器、或欠着一次补发。 */
-function isBusyRecord(run: Run, pendingKeys: Set<string>, key: string): boolean {
-  return pendingKeys.has(key) || run.live.live.has(key) || run.suspendedFlag.get(key) === true;
-}
-
 /** 记录数有界：**除非**这一步真新建了一条记录、而当时没有可淘汰的对象。上限是
  *  「新建前腾位」的容量，不是硬天花板：表满且全忙时只能越界；已经越界之后腾出的空闲位
  *  也不回填压缩（没有新建就没有腾位的时机），所以这一支只在发生新建的那一步判，
  *  且刚插上的那条本身除外（`rec()` 先建后填，它此刻必然还空闲）。
  *  带待办的会话绝不能被淘汰：被丢掉后 `restorePending()` 会重建一枚 counts 全 0
  *  的新记录，等于把 maxResumes 这道防失控闸门静默复位。 */
-function checkEviction(
-  run: Run,
-  snapshot: Record<string, SessionSnapshot>,
-  pendingKeys: Set<string>,
-  targetKey: string | null,
-): void {
-  const keys = Object.keys(snapshot);
-  const createdNow = targetKey !== null && !run.prevKeys.has(targetKey);
-  if (createdNow && keys.length > MAX_SESSIONS) {
-    run.stats.oversizeSteps += 1;
-    for (const key of keys) {
-      if (key !== targetKey) {
-        assert.ok(
-          isBusyRecord(run, pendingKeys, key),
-          `新建后仍越界（${String(keys.length)}）却有空闲记录 ${key} ⇒ 腾位漏了`,
-        );
-      }
-    }
-  }
+function checkEviction(run: Run, snapshot: Record<string, SessionSnapshot>): void {
   for (const key of run.model.pending.keys()) {
     assert.ok(Object.hasOwn(snapshot, key), `带待办的会话 ${key} 被淘汰了`);
   }
@@ -194,8 +168,11 @@ function checkEntry(run: Run, key: string, entry: SessionSnapshot): void {
   }
 
   for (const kind of KINDS) {
+    // restorePending 是「此前已批准、因连接问题挂起」的那条待办，不重新校验配额；
+    // 上界要加上这一路补发，否则测试自己注入的合法状态会被判成越界。
+    const restored = run.model.restored.get(key)?.[kind] ?? 0;
     assert.ok(
-      entry.counts[kind] <= MAX_QUOTA_SEEN,
+      entry.counts[kind] <= MAX_QUOTA_SEEN + restored,
       `${key}/${kind} 计数 ${String(entry.counts[kind])} 超过上限`,
     );
   }
@@ -240,8 +217,8 @@ function noteEvictions(run: Run, currentKeys: Set<string>): void {
   }
 }
 
-/** 每一步之后都必须成立的一组不变量。`targetKey` = 这条指令可能新建的会话键。 */
-function checkInvariants(run: Run, targetKey: string | null): void {
+/** 每一步之后都必须成立的一组不变量。 */
+function checkInvariants(run: Run): void {
   const snapshot = run.scheduler.stateSnapshot();
   const currentKeys = new Set(Object.keys(snapshot));
   noteEvictions(run, currentKeys);
@@ -251,7 +228,7 @@ function checkInvariants(run: Run, targetKey: string | null): void {
       pendingKeys.add(key);
     }
   }
-  checkEviction(run, snapshot, pendingKeys, targetKey);
+  checkEviction(run, snapshot);
   for (const [key, entry] of Object.entries(snapshot)) {
     checkEntry(run, key, entry);
   }
@@ -272,8 +249,13 @@ function applyFailure(run: Run, cmd: Extract<Cmd, { op: "failure" }>): void {
     chainDelayMs: cmd.chainDelayMs,
   });
   if (decision.action === "skip") {
+    if (decision.reason === "capacity") {
+      run.stats.capacitySkips += 1;
+    }
     assert.ok(
-      ["pending", "max-resumes", "cooldown", "invalid-session"].includes(decision.reason),
+      ["pending", "max-resumes", "cooldown", "invalid-session", "capacity"].includes(
+        decision.reason,
+      ),
       `未预期的 skip 理由：${decision.reason}`,
     );
     return;
@@ -318,9 +300,19 @@ function applyAttach(run: Run, cmd: Extract<Cmd, { op: "attach" }>): void {
   const attached = run.scheduler.attachTimer(key, disposer);
   run.live.created += 1;
   if (attached) {
+    // 同一会话已有在挂定时器时，实现必须先释放旧的那一枚：直接覆盖会让旧 disposer
+    // 的引用丢失，而它的定时器还留在宿主计时器表里（泄漏，且到点还会多发一次注入）。
+    const replaced = run.live.live.get(key);
+    if (replaced !== undefined) {
+      assert.equal(replaced.calls, 1, `${key}：重复挂载时旧定时器的 disposer 未被调用`);
+    }
     run.live.live.set(key, box);
     // 挂上定时器的前提是这条会话仍有待办。
     assert.ok(run.model.pending.has(key), `${key}：无待办却挂上了定时器`);
+  } else {
+    // 拒绝挂载时实现必须同步释放刚建的 disposer；否则宿主定时器表里会留下一条
+    // 没有待办对应的定时器。
+    assert.equal(box.calls, 1, `${key}：attachTimer 拒绝挂载时没有释放刚建的 disposer`);
   }
 }
 
@@ -345,6 +337,15 @@ function applySettle(run: Run, cmd: Extract<Cmd, { op: "settle" }>): void {
   run.model.lastFireAt.set(key, last);
 }
 
+/** 收掉待办前确认挂着的 disposer 真被调用过：只从 live 表删掉不等于释放。 */
+function assertBoxReleased(run: Run, key: string): void {
+  const box = run.live.live.get(key);
+  if (box !== undefined) {
+    assert.equal(box.calls, 1, `${key}：待办收掉时挂着的定时器没有释放（泄漏）`);
+  }
+  run.live.live.delete(key);
+}
+
 function applyCancel(run: Run, cmd: Extract<Cmd, { op: "cancel" }>): void {
   const key = sessionKey(cmd.session);
   const had = run.model.pending.has(key);
@@ -352,7 +353,7 @@ function applyCancel(run: Run, cmd: Extract<Cmd, { op: "cancel" }>): void {
   assert.equal(result.cancelled, had, `${key}：cancel 结果与待办在位性不符`);
   if (had) {
     run.model.pending.delete(key);
-    run.live.live.delete(key);
+    assertBoxReleased(run, key);
   }
 }
 
@@ -403,8 +404,16 @@ function applySuspend(run: Run, cmd: Extract<Cmd, { op: "suspend" }>): void {
   assert.equal(snap.fireAt, pending.fireAt, "挂起必须保原 fireAt");
   run.suspended.set(key, pending);
   run.model.pending.delete(key);
-  run.live.live.delete(key);
+  assertBoxReleased(run, key);
   run.suspendedFlag.set(key, true);
+}
+
+/** 记一次 restore 补发；配额上界按它放宽（restorePending 不重新校验配额）。 */
+function bumpRestored(run: Run, key: string, pending: PendingRecord): void {
+  const kind = pending.kind === "" ? "resume" : pending.kind;
+  const row = run.model.restored.get(key) ?? zeroCounts();
+  row[kind] += 1;
+  run.model.restored.set(key, row);
 }
 
 /** 恢复一条挂起快照；本序列里没有快照时，唯一该判的是「不得凭空造记录」。 */
@@ -419,6 +428,7 @@ function applyRestore(run: Run, cmd: Extract<Cmd, { op: "restore" }>): void {
     if (run.scheduler.restorePending(key, planted)) {
       assert.ok(hadRecord, "restore 为未知会话凭空造出了一条记录");
       run.model.pending.set(key, planted);
+      bumpRestored(run, key, planted);
     }
     return;
   }
@@ -426,6 +436,7 @@ function applyRestore(run: Run, cmd: Extract<Cmd, { op: "restore" }>): void {
   assert.equal(restored, !run.model.pending.has(key), `${key}：restore 结果与待办在位性不符`);
   if (restored) {
     run.model.pending.set(key, pending);
+    bumpRestored(run, key, pending);
     run.suspended.delete(key);
     run.suspendedFlag.set(key, false);
   }
@@ -571,14 +582,14 @@ describe("调度器的状态机不变量（随机指令序列）", () => {
       maxLength: 400,
       size: "max",
     });
-    const reached: Stats = { oversizeSteps: 0, evictions: 0 };
+    const reached: Stats = { capacitySkips: 0, evictions: 0 };
     const warmup = warmPastCapacity();
     fc.assert(
       fc.property(scriptArbitrary, (cmds) => {
         const run = makeRun(reached);
         for (const cmd of [...warmup, ...cmds]) {
           dispatchCmd(run, cmd);
-          checkInvariants(run, createTargetKey(cmd));
+          checkInvariants(run);
         }
 
         // 收尾：disposeAll 之后既没有记录也没有未释放的定时器。
@@ -593,8 +604,8 @@ describe("调度器的状态机不变量（随机指令序列）", () => {
     );
     assert.ok(reached.evictions > 0, "整批没发生过一次淘汰 ⇒ 淘汰判据只是空转");
     assert.ok(
-      reached.oversizeSteps > 0,
-      "整批没碰到过一次「新建时表已满且全忙」 ⇒ 越界判据只是空转",
+      reached.capacitySkips > 0,
+      "整批没碰到过一次「新建时表已满且全忙」 ⇒ 硬上限判据只是空转",
     );
   });
 });

@@ -12,7 +12,7 @@ import { buildDeclarations } from "@jayyuen66/dsh-plugin-shared/lib/build-types"
 import { invokedDirectly } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
 // 声明门禁（test/publish-manifest.test.ts）按同一口径列 types/ 与判说明符，此处转导出，
-// 测试里不必改路径。
+// 测试里不必改路径。类型面不在这里手抄：build-types.d.mts 从同一处 shared 取。
 export {
   canonicalizeDeclarationSpecifiers,
   listDeclarations,
@@ -32,9 +32,29 @@ const require = createRequire(import.meta.url);
  */
 function tscEntry() {
   const manifestPath = require.resolve("typescript/package.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  const binTable = manifest?.bin;
-  const bin = typeof binTable === "object" && binTable !== null ? binTable.tsc : binTable;
+  const manifestText = readFileSync(manifestPath, "utf8");
+  /** @type {unknown} */
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch (error) {
+    // 裸 JSON.parse 的 SyntaxError 只说「哪一列」，不说是哪个文件；而这一步失败时
+    // 唯一的线索就是这个路径，所以在这里带上它再抛。
+    throw new Error(
+      `typescript 的 package.json 不是合法 JSON（${manifestPath}）：${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  // `in` 收窄替代行内 JSDoc 转型：`unknown` 在 `"bin" in manifest` 之后被收窄成带该键的
+  // 对象，取出来的值仍是 `unknown`，下一层同样用 `in` 收窄。这样不需要在表达式里塞注释。
+  const binTable =
+    typeof manifest === "object" && manifest !== null && "bin" in manifest
+      ? manifest.bin
+      : undefined;
+  const bin =
+    typeof binTable === "object" && binTable !== null && "tsc" in binTable
+      ? binTable.tsc
+      : binTable;
   if (typeof bin !== "string" || bin.length === 0) {
     throw new Error(`typescript 的 package.json 没有可用的 bin.tsc：${manifestPath}`);
   }
@@ -48,6 +68,13 @@ export async function buildTypes() {
 
 async function main() {
   const files = await buildTypes();
+  // 0 份声明是失败，不是「安静的成功」：tsconfig.types.json 的 include 空掉、tsc 提前退出、
+  // shared 的清单口径回归，都会让这一步交出空数组，而 types/ 整目录进发布包。
+  if (files.length === 0) {
+    throw new Error(
+      "build-types：tsc 没有产出任何声明（检查 tsconfig.types.json 的 include 与 tsc 退出状态）",
+    );
+  }
   console.info("types/ written:", files.length, "files");
 }
 
@@ -55,7 +82,7 @@ if (invokedDirectly(import.meta.filename)) {
   try {
     await main();
   } catch (error) {
-    console.error(error);
+    console.error("[build-types.mjs] 构建失败，既有 types/ 未被改动：", error);
     process.exitCode = 1;
   }
 }

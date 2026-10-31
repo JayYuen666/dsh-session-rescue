@@ -75,13 +75,14 @@ import {
   looksRateLimitish,
 } from "./lib/failure-classify.ts";
 import type { LlmFailureLike } from "./lib/failure-classify.ts";
-import { ResumeScheduler } from "./lib/resume-scheduler.ts";
+import { rescueKindOf, ResumeScheduler } from "./lib/resume-scheduler.ts";
 import type { PendingRecord, RescueKind, TimerDisposer } from "./lib/resume-scheduler.ts";
 import { reviewLastTurn } from "./lib/turn-review.ts";
 import type { TurnReview } from "./lib/turn-review.ts";
 // 回合事实投影：投影单元 + 读侧换算 + 回退扫描（见 lib/turn-facts.ts）。
 import {
   asFacts,
+  FACTS_ABSENT,
   hasNewerTurn,
   reviewFromFacts,
   scanNewerTurn,
@@ -619,10 +620,22 @@ type FactsReader = (session: SessionEventsLike) => unknown;
 /**
  * 三处判定的统一投影读：注册表缺席/迟到、key 未落地、或回填形状不符 ⇒ undefined
  * ⇒ 调用方回退扫描。`apply()` 只在注册表到位时才装读口，故这里不再判第二次在位。
+ *
+ * 「没落地」与「被 schema 拒」不是一件事：后者说明读口在位但交回的东西不合形状
+ * （持久缓存坏值、宿主漂移），三类判定会长期停在回退扫描上。以前两侧折叠成同一个
+ * undefined，生产里无从分辨降级由谁造成，所以现在把判错原因报到 stderr——每个会话
+ * 只报一次（降级是持续状态，不该每次判定都刷屏），并随 agent/disposed 释放。
  */
 function factsOf(runtime: ApplyRuntime, session: SessionEventsLike): RescueFacts | undefined {
   const read: FactsReader | undefined = runtime.facts.value;
-  return read === undefined ? undefined : asFacts(read(session));
+  const parsed = read === undefined ? FACTS_ABSENT : asFacts(read(session));
+  if (parsed.status === "rejected" && !runtime.factsRejections.has(session.id)) {
+    runtime.factsRejections.add(session.id);
+    console.error(
+      `[session-rescue] ${session.id}: rescue facts rejected by schema (${parsed.reason}) — falling back to event scans`,
+    );
+  }
+  return parsed.status === "facts" ? parsed.facts : undefined;
 }
 
 /**
@@ -852,9 +865,14 @@ interface ApplyRuntime {
    *  失败归因与 pass 兑换读它，不读 `options`（初始化线路），也不再读 `current()`
    *  （后者可能已含下一步待切换的选择）。会话销毁时清。 */
   requestProviders: Map<string, string>;
+  /** 已就「投影形状被拒」报过一次的会话（`agent/disposed` 时随会话释放）。 */
+  factsRejections: Set<string>;
   /** 在途的请求级退避 sleep 释放器集合：这些定时器不属于 scheduler，
    *  disposeAll() 管不到它们，插件卸载必须逐个回收，否则卸载后还会唤醒注入。 */
   backoffs: Set<() => void>;
+  /** 调度器容量饱和的告警去重位：饱和期间新会话的每次 onFailure 都会 skip(capacity)，
+   *  逐条 warn 会刷屏；只报一次，回落（任一次 schedule 成功）后重新武装。 */
+  capacityWarned: { value: boolean };
   msgSeq: { value: number };
   suspendedSnapshots: { value: SuspendedItem[] };
   /** 待兑 lesson-loop pass 的瞬时失败台账（有界，见 rememberTransientFailure）。
@@ -952,6 +970,30 @@ function findAgent(runtime: ApplyRuntime, sessionId: string): RescueAgent | null
   // 本包的 sessionId 走的是调度器键与 Remote 请求体（裸 string），构造口只有文件头那枚
   // `brandString`（恒等函数，与 MessageId 那一位同一处值导入）。
   return agents.get(brandString<SessionId>(sessionId)) ?? null;
+}
+
+/** 定时器到点时的现读判定：preFireCheck 里任何一步抛错都必须把待办结算掉，否则
+ *  `rec.pending` 永久非空——该会话此后再也排不进新的续跑，记录也不再可淘汰。 */
+function preFireCheckSafely(
+  runtime: ApplyRuntime,
+  sessionId: string,
+  turn: number,
+  kind: RescueKind | "",
+): PreFireVerdict | undefined {
+  let verdict: PreFireVerdict | undefined;
+  try {
+    verdict = preFireCheck(
+      runtime,
+      findAgent(runtime, sessionId),
+      turn,
+      settingsOf(runtime.config),
+    );
+  } catch (error) {
+    runtime.scheduler.settle(sessionId, "skipped");
+    console.error(`[session-rescue] ${sessionId}: auto-${kind} check threw (${String(error)})`);
+    verdict = undefined;
+  }
+  return verdict;
 }
 
 function isRootAgent(runtime: ApplyRuntime, agent: RescueAgent): boolean {
@@ -1402,10 +1444,23 @@ function scheduleInjection(runtime: ApplyRuntime, opts: InjectionOptions): void 
     chainDelayMs: kind === "resume" ? chainDelayMs : 0,
   });
   if (decision.action === "skip") {
+    if (decision.reason === "capacity") {
+      // 容量饱和 = 新会话**永久**失去自动救援（除非旧会话释放），与 pending/配额/冷却
+      // 那类一次性流控不同：淹没在 info 里就是静默失效面。升 warn 且去重——饱和期间
+      // 每条新会话都 skip，逐条刷屏没有增量信息；任一次 schedule 成功即回落再武装。
+      if (!runtime.capacityWarned.value) {
+        runtime.capacityWarned.value = true;
+        console.warn(
+          `[session-rescue] scheduler at capacity: new sessions will NOT be auto-rescued — all session records are suspended/pending until they free up`,
+        );
+      }
+      return;
+    }
     // skip（pending/配额/冷却）是正常流控，不是错误：log 级即可（旧用 error 级刷屏）。
     console.info(`[session-rescue] ${sessionId}: auto-${kind} skipped (${decision.reason})`);
     return;
   }
+  runtime.capacityWarned.value = false;
   if (decision.chained) {
     console.info(
       `[session-rescue] ${sessionId}: chained failure at turn ${turn} (rescue-opened turn) — bypassing cooldown, re-scheduling in ${decision.delayMs}ms`,
@@ -1417,12 +1472,10 @@ function scheduleInjection(runtime: ApplyRuntime, opts: InjectionOptions): void 
   }
   const dispose = runtime.svc.timer.timeout(() => {
     // 设置现读：这一发从排期到这里隔着整个 delay 窗口。
-    const check = preFireCheck(
-      runtime,
-      findAgent(runtime, sessionId),
-      turn,
-      settingsOf(runtime.config),
-    );
+    const check = preFireCheckSafely(runtime, sessionId, turn, kind);
+    if (check === undefined) {
+      return;
+    }
     if (!check.ready) {
       runtime.scheduler.settle(sessionId, "skipped");
       console.info(
@@ -1483,24 +1536,24 @@ function resumeAfterReconnect(runtime: ApplyRuntime): void {
   runtime.suspendedSnapshots.value = [];
   const cfg = settingsOf(runtime.config);
   for (const item of snapshots) {
+    // 跨版本脏快照的 kind 可能是空串（见 PendingRecord 的注释）。这里与两个读点同一条
+    // 回落：不回落的话 textForKind 会在循环里抛错，把后面所有会话的补发一起带走。
+    const pending = { ...item.pending, kind: rescueKindOf(item.pending.kind) };
     if (!cfg.enabled || runtime.disabledSessions.has(item.sessionId)) {
       // 闸门拦下 = 这次补发作废，调度器那位的 suspended 记账必须一起清掉。
       runtime.scheduler.releaseSuspended(item.sessionId);
       console.info(
-        `[session-rescue] ${item.sessionId}: suspended auto-${item.pending.kind} dropped (disabled: plugin off or session toggle off)`,
+        `[session-rescue] ${item.sessionId}: suspended auto-${pending.kind} dropped (disabled: plugin off or session toggle off)`,
       );
     } else {
-      // kind 恒为 RescueKind（待办由 scheduler 进程内产生，无持久化/跨版本反序列化），
-      // textForKind 的返回类型因此收敛为 `string`：调用方不再需要 null 降级分支
-      // （这层的防御改在 textForKind 内部对闭合集之外的 kind 直接抛错）。
-      const text = textForKind(item.pending.kind, runtime.localeMessages());
+      const text = textForKind(pending.kind, runtime.localeMessages());
       // 剩余时间走调度器注入时钟的 remainingMsFor(fireAt)（与 state 读面同一算式）：
       // `restorePending` 交回 true 即已把 pending 写进同一条记录，紧随其后的同步读
       // 不可能为空，所以这里不需要按会话再开一条读口。
       // restorePending 交回 false = 该会话此刻已有别的待办，这份快照就此作废：
       // 同样要释放，否则那条记录从此不可淘汰。
-      if (runtime.scheduler.restorePending(item.sessionId, item.pending)) {
-        const remaining = runtime.scheduler.remainingMsFor(item.pending.fireAt);
+      if (runtime.scheduler.restorePending(item.sessionId, pending)) {
+        const remaining = runtime.scheduler.remainingMsFor(pending.fireAt);
         runtime.msgSeq.value += 1;
         // 断连重发路径与 scheduleInjection 的 fire 路径同一形状：官方 `UserMessage.id` 要
         // 的是品牌串（dsh-llm lib/types/brand.d.ts:14），构造口只有官方 `brandString`。
@@ -1508,16 +1561,14 @@ function resumeAfterReconnect(runtime: ApplyRuntime): void {
           `${PLUGIN_NAME}-${Date.now()}-${runtime.msgSeq.value}`,
         );
         const dispose = runtime.svc.timer.timeout(() => {
-          const check = preFireCheck(
-            runtime,
-            findAgent(runtime, item.sessionId),
-            item.pending.turn,
-            settingsOf(runtime.config),
-          );
+          const check = preFireCheckSafely(runtime, item.sessionId, pending.turn, pending.kind);
+          if (check === undefined) {
+            return;
+          }
           if (!check.ready) {
             runtime.scheduler.settle(item.sessionId, "skipped");
             console.info(
-              `[session-rescue] ${item.sessionId}: auto-${item.pending.kind} vetoed at re-fire (${check.reason})`,
+              `[session-rescue] ${item.sessionId}: auto-${pending.kind} vetoed at re-fire (${check.reason})`,
             );
             return;
           }
@@ -1531,17 +1582,17 @@ function resumeAfterReconnect(runtime: ApplyRuntime): void {
             });
             runtime.scheduler.settle(item.sessionId, "fired");
             console.info(
-              `[session-rescue] ${item.sessionId}: auto-${item.pending.kind} message sent after reconnect`,
+              `[session-rescue] ${item.sessionId}: auto-${pending.kind} message sent after reconnect`,
             );
           } catch (error) {
             // 恢复后再次发送失败：再挂起一次，等下一次 connection/reset。
-            const pending = runtime.scheduler.suspendSession(item.sessionId);
-            if (pending === null) {
+            const again = runtime.scheduler.suspendSession(item.sessionId);
+            if (again === null) {
               console.error(
-                `[session-rescue] ${item.sessionId}: failed to send auto-${item.pending.kind} after reconnect: ${String(error)}`,
+                `[session-rescue] ${item.sessionId}: failed to send auto-${pending.kind} after reconnect: ${String(error)}`,
               );
             } else {
-              pushSuspended(runtime, item.sessionId, pending);
+              pushSuspended(runtime, item.sessionId, again);
               console.error(
                 `[session-rescue] ${item.sessionId}: re-fire failed (${String(error)}) — preserved, waiting next reconnect`,
               );
@@ -1554,7 +1605,7 @@ function resumeAfterReconnect(runtime: ApplyRuntime): void {
         // 补发没了」的唯一线索）。作废即释放，否则 suspended 位会一直挂着，
         // 那条记录从此不可淘汰。
         console.info(
-          `[session-rescue] ${item.sessionId}: suspended auto-${item.pending.kind} dropped (a newer pending is already armed)`,
+          `[session-rescue] ${item.sessionId}: suspended auto-${pending.kind} dropped (a newer pending is already armed)`,
         );
         runtime.scheduler.releaseSuspended(item.sessionId);
       }
@@ -2253,6 +2304,8 @@ function apply(ctx: Context, config: PluginConfig): void {
   const requestRetryCounts = new Map<string, number>();
   /** 会话 → 最近一次失败请求的线路（见 ApplyRuntime.requestProviders）。 */
   const requestProviders = new Map<string, string>();
+  // 投影形状被拒的告警去重位（agent/disposed 时随会话释放）：降级是持续状态，报一次就够。
+  const factsRejections = new Set<string>();
   // locale 偏好读一次即缓存：跨命名空间读只剩 describe() 一条路，而它对每个活跃条目
   // 都要 schema.toJSON() + JSON.stringify 算 revision 再投影 value/base/user 三份。
   // 失效链：写配置 → app-boot/config-reload → SettingsForms invalidate() → 微任务里
@@ -2271,7 +2324,9 @@ function apply(ctx: Context, config: PluginConfig): void {
     disabledSessions,
     requestRetryCounts,
     requestProviders,
+    factsRejections,
     backoffs: new Set<() => void>(),
+    capacityWarned: { value: false },
     msgSeq: { value: 0 },
     suspendedSnapshots: { value: [] },
     transientPasses: { value: [] },
@@ -2349,6 +2404,7 @@ function apply(ctx: Context, config: PluginConfig): void {
     requestRetryCounts.delete(sid);
     requestProviders.delete(sid);
     disabledSessions.delete(sid);
+    factsRejections.delete(sid);
     // 未兑的 pass 记录一并撤销：会话都没了，"之后跑成功"永不可能发生，
     // 继续留着就是一条永不兑现的观察（且可能被误兑）。
     dropTransientPasses(runtime, sid);

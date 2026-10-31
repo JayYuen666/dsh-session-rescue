@@ -87,10 +87,13 @@ const failureArbitrary = fc.record(
   { requiredKeys: [] },
 );
 
-/** 限速措辞（文档承诺的那一族：429 字样 / rate limit / throttl / too many requests|busy）。 */
+/** 限速措辞（文档承诺的那一族：整串裸 429、HTTP 语境里的 429、`429 too many/rate/throttl`、
+ *  rate limit / throttl / too many requests|busy）。 */
 function hasRateWording(lower: string): boolean {
   return (
-    /\b429\b/u.test(lower) ||
+    /^\s*429\s*$/u.test(lower) ||
+    /\b(?:http|status|code|error)[\s:/]*429(?:\W|$)/u.test(lower) ||
+    /\b429[\s:]+(?:too many|rate|throttl)/u.test(lower) ||
     /rate[\s_.-]*limit/u.test(lower) ||
     lower.includes("throttl") ||
     /too many (?:request|busy)/u.test(lower)

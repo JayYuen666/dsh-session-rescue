@@ -31,17 +31,19 @@ import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import type { TurnReview } from "./turn-review.ts";
 // 未闭合口径必须与同步扫描同源（test/property/turn-facts.property.test.ts 钉着两侧逐项
-// 同解）；白名单的理由见 test/turn-review.test.ts 的「未知状态 ≠ 未完成」用例。
-import { OPEN_TODO_STATUSES } from "./turn-review.ts";
+// 同解）；事件读取器与白名单统一在 lib/event-fields.ts，两处不再各抄一份。
+import {
+  directStr,
+  nestedStr,
+  numIn,
+  openCountOf,
+  SCHEDULE_SOURCE_KIND,
+  typeOf,
+  USER_QUESTION_TOOL,
+} from "./event-fields.ts";
 
 /** 本包投影单元的注册键（host-only：不声明 wire ⇒ 不进客户端快照）。 */
 export const RESCUE_FACTS_KEY = "session-rescue.turnFacts";
-
-/** 与官方 Schedule 的注入身份对齐（turn-review.ts 同一位常量）。 */
-const SCHEDULE_SOURCE_KIND = "schedule";
-
-/** 等待用户澄清的工具名（turn-review.ts 同判据）。 */
-const USER_QUESTION_TOOL = "ask_user_question";
 
 /** 回合开启的日志事件名：折叠表（applyEvent 的 case）与两条回退扫描判的都是它。 */
 const TURN_START_EVENT = "turn/start";
@@ -145,33 +147,6 @@ declare module "@deepseek-ai/dsh-session-projection/types" {
 
 // ── 事件读取：防御式，与 turn-review.ts / host.ts 的读法同一判据 ───────────────
 
-function typeOf(ev: unknown): string {
-  const type = fieldOf(ev, "type");
-  return typeof type === "string" ? type : "";
-}
-
-/** 事件 `data` 里的 number 字段（缺字段/坏形状 → undefined）。
- *  只收**安全整数**：`NaN` 与 `1.5` 都是 `typeof === "number"`，但折叠一旦把它们存进
- *  状态，本单元的 `stateSchema`（`z.number().int()`）就拒收这份回填——`asFacts` 从此
- *  对这条会话恒回 undefined，三类判定整批掉回全量扫描而毫无征兆（属性层给的反例）。
- *  与官方 `SessionSeq`/`SessionLogOffset` 的校验口径同一（都是 isSafeInteger）。 */
-function numIn(ev: unknown, key: string): number | undefined {
-  const raw = fieldOf(fieldOf(ev, "data"), key);
-  return typeof raw === "number" && Number.isSafeInteger(raw) ? raw : undefined;
-}
-
-/** 事件 `data.<group>.<key>` 的 string 字段（`reason.kind`）。 */
-function nestedStr(ev: unknown, group: string, key: string): string | undefined {
-  const raw = fieldOf(fieldOf(fieldOf(ev, "data"), group), key);
-  return typeof raw === "string" ? raw : undefined;
-}
-
-/** 事件 `data.<key>` 的 string 字段（tool/call 的 name 等）。 */
-function directStr(ev: unknown, key: string): string | undefined {
-  const raw = fieldOf(fieldOf(ev, "data"), key);
-  return typeof raw === "string" ? raw : undefined;
-}
-
 /** user/message 的 `source.kind`：跨边界载荷，非对象/非字符串一律按「没有 kind」判。 */
 function sourceKindOf(ev: unknown): string | null {
   const source = fieldOf(fieldOf(ev, "data"), "source");
@@ -180,25 +155,6 @@ function sourceKindOf(ev: unknown): string | null {
   }
   const { kind } = source;
   return typeof kind === "string" ? kind : null;
-}
-
-/** todo/write 载荷里的未闭合条数；载荷不是数组 ⇒ undefined（这份快照不采信）。
- *  单条 return 收口（`typescript/consistent-return` 把 `return undefined` 记作无值返回）。 */
-function openCountOf(todos: unknown): number | undefined {
-  let open = 0;
-  let applicable = false;
-  if (Array.isArray(todos)) {
-    applicable = true;
-    for (const item of todos) {
-      if (isRecord(item)) {
-        const { status } = item;
-        if (typeof status === "string" && OPEN_TODO_STATUSES.has(status)) {
-          open += 1;
-        }
-      }
-    }
-  }
-  return applicable ? open : undefined;
 }
 
 /** 只留最近 OPENER_WINDOW 个回合（淘汰的回合由读侧回退扫描兜住）。 */
@@ -364,14 +320,29 @@ export const rescueFactsProjection = {
 // ── 读侧：把状态换算成三处判定原本各自要的答案 ──────────────────────────────
 
 /**
- * `stateOf()` 的返回值 → 形状可用的投影态（结构读口交回 unknown：官方 `Session` 是名义类，
- * 本包的替身永远满足不了，见 host.ts 的 ProjectionsRegistry）。形状不符 = key 未注册/
- * 持久缓存回填坏值/宿主漂移 ⇒ undefined ⇒ 调用方回退扫描。
+ * `stateOf()` 的返回值 → 投影态的三种回答。
+ *
+ * `absent` = 那一读根本没有值（key 未注册、投影未落地）；`rejected` = 有值但形状被拒
+ * （持久缓存回填坏值、宿主漂移），`reason` 是 schema 的原始判错串。以前两者折叠成同一个
+ * `undefined`，三类判定长期停在回退扫描却无从分辨是谁造成的。
  * 序列层面的可信度不在这里判，而在各读函数自己的 undefined 分支。
  */
-export function asFacts(value: unknown): RescueFacts | undefined {
+export type FactsRead =
+  | { readonly status: "facts"; readonly facts: RescueFacts }
+  | { readonly status: "rejected"; readonly reason: string }
+  | { readonly status: "absent" };
+
+/** 那一读没有值时的回答（读口缺席也用它，避免在调用点各拼一份字面量）。 */
+export const FACTS_ABSENT: FactsRead = { status: "absent" };
+
+export function asFacts(value: unknown): FactsRead {
+  if (value === undefined) {
+    return FACTS_ABSENT;
+  }
   const parsed = rescueFactsSchema.safeParse(value);
-  return parsed.success ? parsed.data : undefined;
+  return parsed.success
+    ? { status: "facts", facts: parsed.data }
+    : { status: "rejected", reason: parsed.error.issues.map((issue) => issue.message).join("; ") };
 }
 
 /**

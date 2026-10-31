@@ -367,8 +367,8 @@ jobs:
             "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
           printf '%s  %s\n' "$sha256" /tmp/actionlint.tar.gz | sha256sum -c -
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
-          # -ignore SC2016：探针脚本刻意用单引号包住 JS（脚本体里有 JS 模板串，
-          # 交给 shell 展开就坏了）。这是 shellcheck 的误报，而 shellcheck 指令在
-          # 跨行单引号构造上不被采信（已实测），所以只忽略这一条规则。
+          # SC2016 的豁免由 -config-file 显式指定的 .github/actionlint.yaml 提供，
+          # 且落在 paths 段上、只覆盖 ci.yml 那一份；命令行上的 -ignore 是全局正则，
+          # 一并传给四份工作流，按文件收窄就失效了（见该文件的注释）。
           # shell 先把 glob 展开，再把文件清单交给它。
-          /tmp/actionlint -ignore 'SC2016' .github/workflows/*.yml
+          /tmp/actionlint -config-file .github/actionlint.yaml .github/workflows/*.yml

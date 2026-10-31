@@ -27,12 +27,15 @@ const CONSOLE_CALL = /\bconsole\.(?:info|warn|error|log|debug)\(/gu;
 
 async function collectTypeScript(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
+  // readdir 的顺序不在规范里：骨架清单是顺序敏感的，先按名字排定，平台换一种返回顺序
+  // 不会把「内容一致」判成错位。
+  const ordered = entries.toSorted((left, right) => left.name.localeCompare(right.name));
   const nested = await Promise.all(
-    entries
+    ordered
       .filter((entry) => entry.isDirectory())
       .map((entry) => collectTypeScript(path.join(dir, entry.name))),
   );
-  const here = entries
+  const here = ordered
     .filter(
       (entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts"),
     )

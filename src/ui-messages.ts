@@ -40,8 +40,14 @@ export interface UiMessages {
   readonly actionFailed: string;
   /** host 写通道（取消/开关）被拒模板（`{label}` 插值动作名）。 */
   readonly hostActionFailed: string;
+  /** 停止重问只成了一半：重问已入队、停止当前回合被拒。 */
+  readonly reaskQueuedCancelFailed: string;
   /** 开关动作名（拼进 hostActionFailed 的 label）。 */
   readonly switchAction: string;
+  /** 本轮终态失败的原因行（`{detail}` 是宿主给的 code/message 拼接结果）。 */
+  readonly failureReason: string;
+  /** 重试按钮的副作用提示：该轮已跑过工具或命令。 */
+  readonly retrySideEffectTitle: string;
   // ── 编辑器（编辑重发 / Fork 重发） ──
   readonly sending: string;
   readonly resendInSession: string;
@@ -60,9 +66,10 @@ export interface UiMessages {
   readonly continueTitle: string;
   readonly continueOutput: string;
   // ── 每会话开关行 ──
-  /** 开关行的「开启」字样：与 toggleStateOff 成对，用于已关闭时提供开启入口，
-   *  不是「已开启」这一状态的描述（那个态由 toggleStateOff 缺席 + 按钮禁用表达）。 */
+  /** 状态展示：已开启。 */
   readonly toggleStateOn: string;
+  /** 按钮动作名：当前关着 → 动作是开启。与 toggleTurnOff 成对。 */
+  readonly toggleTurnOn: string;
   /** 状态展示：已关闭。 */
   readonly toggleStateOff: string;
   /** 快照未就绪的中性占位。 */
@@ -207,7 +214,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     branchUnavailable: "分支会话不可用",
     actionFailed: "操作失败",
     hostActionFailed: "{label}未生效（host 拒绝了这次请求），请重试",
+    reaskQueuedCancelFailed: "重问已入队，当前回合结束后会发出；停止本轮未生效",
     switchAction: "开关切换",
+    failureReason: "本轮失败原因：{detail}",
+    retrySideEffectTitle: "本轮已执行过工具或命令，重试会重做这些副作用",
     sending: "发送中…",
     resendInSession: "重发（本会话）",
     forkResend: "Fork 重发（新分支）",
@@ -224,7 +234,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     retry: "重试",
     continueTitle: "发送续写指令，从截断处继续",
     continueOutput: "继续输出",
-    toggleStateOn: "开启",
+    toggleStateOn: "已开启",
+    toggleTurnOn: "开启",
     toggleStateOff: "已关闭",
     toggleNeutral: "—",
     toggleTurnOff: "关闭",
@@ -246,30 +257,31 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     enabledLabel: "启用自动续跑",
     enabledHint: "关闭后仅保留手动编辑/重试/续写等 UI 能力",
     resumeDelayLabel: "续跑延迟",
-    resumeDelayHint: "内置重试耗尽后等待多久发送续跑消息（1–300 秒）",
+    resumeDelayHint: "内置重试耗尽后等待多久发送续跑消息（{min}–{max} 秒）",
     resumeCooldownLabel: "冷却时间",
-    resumeCooldownHint: "同一会话两次自动续跑的最短间隔（5–3600 秒）",
+    resumeCooldownHint: "同一会话两次自动续跑的最短间隔（{min}–{max} 秒）",
     maxResumesLabel: "每会话上限",
-    maxResumesHint: "单个会话最多自动续跑次数（0–20）",
+    maxResumesHint: "单个会话最多自动续跑次数（{min}–{max}）",
     chainDelayLabel: "链式重试延迟",
-    chainDelayHint: "续跑消息开出的回合再次失败时，跳过冷却按此延迟续跑（跨出限流窗口；1–300 秒）",
+    chainDelayHint:
+      "续跑消息开出的回合再次失败时，跳过冷却按此延迟续跑（跨出限流窗口；{min}–{max} 秒）",
     maxTokensSection: "输出截断自动继续（max-tokens）",
     continueDelayLabel: "继续延迟",
-    continueDelayHint: "回合因输出上限截断后等待多久自动补发续写指令（0.5–300 秒）",
+    continueDelayHint: "回合因输出上限截断后等待多久自动补发续写指令（{min}–{max} 秒）",
     continueCooldownLabel: "继续冷却",
-    continueCooldownHint: "同一会话两次自动继续的最短间隔（5–3600 秒）",
+    continueCooldownHint: "同一会话两次自动继续的最短间隔（{min}–{max} 秒）",
     maxContinuesLabel: "继续上限",
-    maxContinuesHint: "单个会话最多自动继续次数（0–20）",
+    maxContinuesHint: "单个会话最多自动继续次数（{min}–{max}）",
     unfinishedSection: "待办未闭合自动补跑（completed 回合）",
     openTodosLabel: "启用待办补跑",
     openTodosHint:
       "回合正常结束但本回合自己写的待办仍有未完成项时自动补跑；模型在等你回答（ask_user_question）或该回合由 goal 轮次驱动时不会注入",
     unfinishedDelayLabel: "补跑延迟",
-    unfinishedDelayHint: "检测到待办未闭合后等待多久发送补跑指令（1–300 秒）",
+    unfinishedDelayHint: "检测到待办未闭合后等待多久发送补跑指令（{min}–{max} 秒）",
     unfinishedCooldownLabel: "补跑冷却",
-    unfinishedCooldownHint: "同一会话两次待办补跑的最短间隔（5–3600 秒）",
+    unfinishedCooldownHint: "同一会话两次待办补跑的最短间隔（{min}–{max} 秒）",
     maxUnfinishedLabel: "补跑上限",
-    maxUnfinishedHint: "清单连续未闭合时最多补跑次数；清单闭合后配额自动恢复（0–20）",
+    maxUnfinishedHint: "清单连续未闭合时最多补跑次数；清单闭合后配额自动恢复（{min}–{max}）",
     excludesSection: "排除路由",
     excludesFieldLabel: "Provider 名单",
     excludesHint: "逗号分隔；列出的路由永不自动续跑（如已配置专属 retryPolicy 的路由）",
@@ -306,7 +318,12 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     branchUnavailable: "branch session unavailable",
     actionFailed: "action failed",
     hostActionFailed: "{label} had no effect (the host rejected this request) — try again",
+    reaskQueuedCancelFailed:
+      "The reask is queued and will be sent when this turn ends — stopping the turn failed",
     switchAction: "Toggle",
+    failureReason: "This turn failed: {detail}",
+    retrySideEffectTitle:
+      "this turn already ran tools or commands — retrying repeats those side effects",
     sending: "Sending…",
     resendInSession: "Resend (this session)",
     forkResend: "Fork & resend (new branch)",
@@ -324,6 +341,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     continueTitle: "Send the continue instruction to finish the truncated output",
     continueOutput: "Continue output",
     toggleStateOn: "On",
+    toggleTurnOn: "Turn on",
     toggleStateOff: "Off",
     toggleNeutral: "—",
     toggleTurnOff: "Turn off",
@@ -348,34 +366,34 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     enabledHint: "When off, only the manual edit / retry / continue UI stays available",
     resumeDelayLabel: "Resume delay",
     resumeDelayHint:
-      "How long to wait before sending the resume message once built-in retries are exhausted (1–300 s)",
+      "How long to wait before sending the resume message once built-in retries are exhausted ({min}–{max} s)",
     resumeCooldownLabel: "Cooldown",
-    resumeCooldownHint: "Minimum gap between two auto-resumes in one session (5–3600 s)",
+    resumeCooldownHint: "Minimum gap between two auto-resumes in one session ({min}–{max} s)",
     maxResumesLabel: "Per-session cap",
-    maxResumesHint: "Maximum auto-resumes in a single session (0–20)",
+    maxResumesHint: "Maximum auto-resumes in a single session ({min}–{max})",
     chainDelayLabel: "Chain retry delay",
     chainDelayHint:
-      "When the turn opened by a resume message fails again, skip the cooldown and resume at this delay (step out of the rate-limit window; 1–300 s)",
+      "When the turn opened by a resume message fails again, skip the cooldown and resume at this delay (step out of the rate-limit window; {min}–{max} s)",
     maxTokensSection: "Auto-continue after output truncation (max-tokens)",
     continueDelayLabel: "Continue delay",
     continueDelayHint:
-      "How long to wait before auto-sending the continue instruction after a turn is truncated by the output cap (0.5–300 s)",
+      "How long to wait before auto-sending the continue instruction after a turn is truncated by the output cap ({min}–{max} s)",
     continueCooldownLabel: "Continue cooldown",
-    continueCooldownHint: "Minimum gap between two auto-continues in one session (5–3600 s)",
+    continueCooldownHint: "Minimum gap between two auto-continues in one session ({min}–{max} s)",
     maxContinuesLabel: "Continue cap",
-    maxContinuesHint: "Maximum auto-continues in a single session (0–20)",
+    maxContinuesHint: "Maximum auto-continues in a single session ({min}–{max})",
     unfinishedSection: "Auto re-run when the todo list stays open (completed turns)",
     openTodosLabel: "Enable todo re-run",
     openTodosHint:
       "Re-run automatically when a turn ends normally but the todos it wrote itself still have open items; nothing is injected while the model waits for your answer (ask_user_question) or the turn is driven by goal rounds",
     unfinishedDelayLabel: "Re-run delay",
     unfinishedDelayHint:
-      "How long to wait before sending the re-run instruction after an open todo list is detected (1–300 s)",
+      "How long to wait before sending the re-run instruction after an open todo list is detected ({min}–{max} s)",
     unfinishedCooldownLabel: "Re-run cooldown",
-    unfinishedCooldownHint: "Minimum gap between two todo re-runs in one session (5–3600 s)",
+    unfinishedCooldownHint: "Minimum gap between two todo re-runs in one session ({min}–{max} s)",
     maxUnfinishedLabel: "Re-run cap",
     maxUnfinishedHint:
-      "Maximum re-runs while the list stays open; the budget refills once the list closes (0–20)",
+      "Maximum re-runs while the list stays open; the budget refills once the list closes ({min}–{max})",
     excludesSection: "Excluded routes",
     excludesFieldLabel: "Provider list",
     excludesHint:

@@ -100,6 +100,21 @@ function assertEquivalent(
   }
 }
 
+/** 采信支：不是可用的投影态就直接失败。 */
+function accepted(value: unknown): RescueFacts {
+  const read = asFacts(value);
+  if (read.status !== "facts") {
+    throw new Error(`应被采信，实际交回 ${JSON.stringify(read)}`);
+  }
+  return read.facts;
+}
+
+/** 判否支：有值但形状被拒时交回 schema 的原因，其余（含「没有值」）交回 null。 */
+function rejectionReason(value: unknown): string | null {
+  const read = asFacts(value);
+  return read.status === "rejected" ? read.reason : null;
+}
+
 describe("投影 ≡ 旧扫描（干净日志）", () => {
   it("空日志：与旧实现同一份空结论", () => {
     assertEquivalent([]);
@@ -444,7 +459,7 @@ describe("非整数轮次号：折叠不得产出自家 schema 拒收的态", ()
         `NaN/小数不能推进 latestTurnStart（${String(bad)}）`,
       );
       assert.equal(state.end?.turn, null, "那条 end 同样按缺号折叠");
-      assert.notEqual(asFacts(state), undefined, "折叠态必须能被自己的 schema 接住");
+      accepted(state);
       // 与旧扫描同解：两侧都把这一形读成「没有轮次号」。
       assertEquivalent(evs);
     }
@@ -456,7 +471,7 @@ describe("非整数轮次号：折叠不得产出自家 schema 拒收的态", ()
     assert.equal(state.latestTurnStart, 1, "NaN 那条 start 不算号");
     assert.equal(hasNewerTurn(state, 1), false);
     assert.equal(scanNewerTurn(evs, 1), false, "两条读法都不把 NaN 当更大的号");
-    assert.notEqual(asFacts(state), undefined);
+    accepted(state);
   });
 });
 
@@ -499,20 +514,22 @@ describe("投影单元与状态形状", () => {
     assert.equal("wire" in rescueFactsProjection, false, "host-only：不进客户端快照");
   });
 
-  it("asFacts：形状相符才采信，坏值一律 undefined", () => {
+  it("asFacts：形状相符才采信；没落地回 absent，坏形状回判错原因", () => {
     const good = foldEvents(round(1, USER));
-    const cloned = asFacts(structuredClone(good));
-    assert.equal(cloned?.latestTurnStart, 1);
-    for (const bad of [undefined, null, "x", 7, {}, { ...good, openers: "no" }]) {
-      assert.equal(asFacts(bad), undefined, "坏形状不采信");
+    assert.equal(accepted(structuredClone(good)).latestTurnStart, 1);
+    assert.equal(asFacts(undefined).status, "absent", "key 未落地不是「形状被拒」");
+    for (const bad of [null, "x", 7, {}, { ...good, openers: "no" }]) {
+      assert.ok(
+        (rejectionReason(bad) ?? "").length > 0,
+        `坏形状要带回可诊断的原因：${JSON.stringify(bad)}`,
+      );
     }
   });
 
   it("asFacts 拒绝被污染的字段类型", () => {
     const good: RescueFacts = foldEvents(round(1, USER));
-    assert.equal(asFacts({ ...good, latestTurnStart: "1" }), undefined);
     const { end } = good;
-    assert.ok(end !== null);
-    assert.equal(asFacts({ ...good, end: { ...end, aligned: "yes" } }), undefined);
+    assert.notEqual(rejectionReason({ ...good, latestTurnStart: "1" }), null);
+    assert.notEqual(rejectionReason({ ...good, end: { ...end, aligned: "yes" } }), null);
   });
 });

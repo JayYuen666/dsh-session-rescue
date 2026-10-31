@@ -36,7 +36,8 @@ const wireEntryArbitrary = fc.record(
 const wireSessionsArbitrary = fc.oneof(
   fc.dictionary(fc.string(), wireEntryArbitrary, { maxKeys: 6, size: "max" }),
   fc.dictionary(fc.string(), jsonArbitrary, { maxKeys: 6, size: "max" }),
-  fc.constant({ __proto__: { count: 1, pending: null } }),
+  // 计算键才写成自有属性；`__proto__: {...}` 只是设原型（= 空表），那条路必走不到。
+  fc.constant({ ["__proto__"]: { count: 1, pending: null } }),
 );
 
 const NO_ACTIONS: DockActionSignals = {
@@ -113,7 +114,6 @@ describe("/state 载荷解析（任意 JSON）", () => {
           return;
         }
         assert.equal(Object.getPrototypeOf(table), Object.prototype);
-        assert.equal(Object.getPrototypeOf({}), Object.prototype, "全局原型未被换掉");
       }),
       { numRuns: 800 },
     );

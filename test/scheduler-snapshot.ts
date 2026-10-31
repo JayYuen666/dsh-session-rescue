@@ -15,12 +15,13 @@ import type { ResumeScheduler } from "../lib/resume-scheduler.ts";
  * 已经走了一格，于是「有待办、但剩余 0ms」与「没待办」这两条断言就读到了两份不同的
  * 快照——失败信息会自相矛盾。取一次、读两位，两条判据才在同一个时刻上。
  */
-interface PendingReading {
+export interface PendingReading {
   pending: boolean;
   remainingMs: number | null;
 }
 
-function readPending(scheduler: ResumeScheduler, sessionId: string): PendingReading {
+/** 一次快照同时取两位读数；需要同时断言「有待办」与「剩余多久」时用它，别分别调两次。 */
+export function readPending(scheduler: ResumeScheduler, sessionId: string): PendingReading {
   const row = scheduler.stateSnapshot()[sessionId]?.pending ?? null;
   return { pending: row !== null, remainingMs: row === null ? null : row.remainingMs };
 }
