@@ -22,7 +22,9 @@ export interface PendingReading {
 
 /** 一次快照同时取两位读数；需要同时断言「有待办」与「剩余多久」时用它，别分别调两次。 */
 export function readPending(scheduler: ResumeScheduler, sessionId: string): PendingReading {
-  const row = scheduler.stateSnapshot()[sessionId]?.pending ?? null;
+  const snapshot = scheduler.stateSnapshot();
+  // 只认自有键：快照按普通对象装，sessionId 恰为 "__proto__" 之类时会命中原型而不是行。
+  const row = Object.hasOwn(snapshot, sessionId) ? (snapshot[sessionId]?.pending ?? null) : null;
   return { pending: row !== null, remainingMs: row === null ? null : row.remainingMs };
 }
 

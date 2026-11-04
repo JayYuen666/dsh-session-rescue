@@ -2,3 +2,25 @@
 # core.autocrlf=true 会把工作树换成 CRLF，而 oxfmt 的 endOfLine 默认是 lf —— 于是
 # fmt:check 只在 windows 那一格把每个文件都判成未格式化（内容一字不差）。
 * text=auto eol=lf
+
+# 存量内容的坑（前瞻，本仓今天没有这类文件）：这条规则只影响之后的 checkout/checkin 转换，
+# 索引里已提交成 CRLF 的 blob 不会自己变 LF——那样它在 eol=lf 下会一直显示为已修改，而红的是
+# windows 格的 fmt:check，读起来像格式化器坏了。引入这类文件时把索引一次性重算：
+#   git add --renormalize .   并与 .gitattributes 同一次提交。
+
+# 工具链自己要求 CRLF 的那几类，写回来时别被上面的通配顺手改掉：cmd.exe 解析 LF-only 的批处理
+# 会在多行 if/goto 块上出错，MSBuild 对 .sln/.vcxproj 的行尾也有自己的期待。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+
+# 显式声明「不是文本」：* text=auto 靠 Git 的文本启发式（前 8000 字节内有没有 NUL）分类，
+# 而不含 NUL 的二进制（部分快照夹具、UTF-16 资源）会被判成文本、在 checkout 时被改写行尾，
+# 形成「检出内容与索引不一致」的静默损坏。现量本仓的二进制只有图标一类，按类型点名。
+*.png -text
+*.jpg -text
+*.gif -text
+*.ico -text
+*.woff -text
+*.woff2 -text

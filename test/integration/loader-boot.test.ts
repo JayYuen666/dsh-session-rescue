@@ -1,10 +1,12 @@
 import { afterEach, afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import assert from "node:assert/strict";
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildHost } from "../../build-host.mjs";
+import { patchEntryId } from "../config-refs.ts";
 
 // 真实组合测试：用真实的 cordis + cordis-plugin-loader（本包 devDependencies 里的那对，
 // 版本与 dsh 自带的同一份，且 loader 把 cordis 声明为 peer，
@@ -25,6 +27,9 @@ const HOST_TS = path.join(PKG_ROOT, "host.ts");
 /** 本包在 Loader 里的条目 id（= 隐式 settings 命名空间，真源是 cordis.patch.yml 的裸
  *  `- id:`）：建条目与按 id 找 fiber 两侧必须是同一个串，测试侧按期望值自持。 */
 const PLUGIN_ENTRY_ID = "session-rescue";
+// 条目 id 与 cordis.patch.yml 裸 id 的同源断言挪进 beforeAll（patchEntryId 读文件，
+// setup 必须在 hook 里）：集成层要抓的正是这条漂移——条目 id == settings 命名空间
+//（隐式注册），patch 里的裸 id 改名时真实 profile 的命名空间就对不上。
 /** 宿主事件名：瞬时失败与回合终态两条驱动续跑的事件。 */
 const AGENT_ERROR_EVENT = "agent/error";
 const AGENT_STATUS_EVENT = "agent/status";
@@ -50,8 +55,28 @@ const FIXTURE_HOST = path.join(FIXTURE_PKG, "host.ts");
 const FIXTURE_HOST_JS = path.join(FIXTURE_PKG, "host.js");
 
 // 动态导入 .mjs 对 TS 为 any，先收窄到用到的最小面再取成员（避免 no-unsafe-*）。
-const CordisMod = (await import(CORDIS_ENTRY)) as { Context: unknown };
-const LoaderMod = (await import(LOADER_ENTRY)) as { default: unknown };
+// 载入失败要点名是哪一个入口：本文件载两份（cordis 与 loader），裸 ERR_MODULE_NOT_FOUND
+// 只说「找不到模块」，读的人还得先猜是哪一份；exports 条件变化时同理。
+async function importChecked(entry: string): Promise<Record<string, unknown>> {
+  try {
+    return (await import(entry)) as Record<string, unknown>;
+  } catch (error: unknown) {
+    throw new TypeError(`测试依赖载入失败（${entry}）：检查 devDependencies 与 exports 条件`, {
+      cause: error,
+    });
+  }
+}
+
+const CordisMod = await importChecked(CORDIS_ENTRY);
+const LoaderMod = await importChecked(LOADER_ENTRY);
+// 导出形状在这里当场校验：Context 不是构造函数、default 缺位这类漂移，
+// 否则要到 mount() 里的 new undefined() 才以难读的形式暴露。
+if (typeof CordisMod["Context"] !== "function") {
+  throw new TypeError("cordis 入口没有可构造的 Context 导出：模块形状变了");
+}
+if (LoaderMod["default"] === undefined) {
+  throw new TypeError("dsh loader 入口没有 default 导出：模块形状变了");
+}
 
 interface TimerEntry {
   fn: () => void;
@@ -80,8 +105,8 @@ interface TestCtx {
   fiber?: { dispose: () => Promise<void> };
 }
 
-const CordisContext = CordisMod.Context as new () => TestCtx;
-const Loader: unknown = LoaderMod.default;
+const CordisContext = CordisMod["Context"] as new () => TestCtx;
+const Loader: unknown = LoaderMod["default"];
 
 interface Mount {
   ctx: TestCtx;
@@ -202,15 +227,22 @@ async function mount(
   };
 
   const ctx = new CordisContext();
-  await ctx.plugin(dependencies);
-  await ctx.plugin(Loader);
-  // 条目 id == settings 命名空间（隐式注册；见 cordis.patch.yml 的裸 id）。
-  await ctx.loader.create({
-    id: PLUGIN_ENTRY_ID,
-    name: pathToFileURL(hostEntry).href,
-    config,
-  });
-  await ctx.loader.await();
+  try {
+    await ctx.plugin(dependencies);
+    await ctx.plugin(Loader);
+    // 条目 id == settings 命名空间（隐式注册；见 cordis.patch.yml 的裸 id）。
+    await ctx.loader.create({
+      id: PLUGIN_ENTRY_ID,
+      name: pathToFileURL(hostEntry).href,
+      config,
+    });
+    await ctx.loader.await();
+  } catch (error: unknown) {
+    // mount 只有成功返回后 live 才被赋值；loader 阶段抛错时 ctx 必须就地回收，
+    // 否则真定时器随根 fiber 带进同进程的后续用例。
+    await ctx.fiber?.dispose();
+    throw error;
+  }
 
   return {
     ctx,
@@ -218,7 +250,10 @@ async function mount(
     timers,
     configureCalls,
     tick() {
-      for (const timerEntry of timers) {
+      // 先快照再触发：回调链里会再次武装（scheduleInjection/resumeAfterReconnect），
+      // 活迭代会把新定时器的延迟窗口压成 0，退避时序的回归会被掩盖。
+      const snapshot = [...timers];
+      for (const timerEntry of snapshot) {
         if (!timerEntry.fired && !timerEntry.cancelled) {
           timerEntry.fired = true;
           timerEntry.fn();
@@ -228,20 +263,49 @@ async function mount(
   };
 }
 
-/** 条目确实经 Loader 激活（Node 原生 import + 类型剥离路径可用）。 */
-function assertLoaded(inst: Mount): void {
-  const rescue = [...inst.ctx.loader.entries()].find((entry) => entry.id === PLUGIN_ENTRY_ID);
-  expect(rescue?.fiber).toBeDefined();
-}
-
 function turnEnd(turn: number, kind: string): unknown {
   return { type: "turn/end", seq: turn * 10, time: turn * 10, data: { turn, reason: { kind } } };
+}
+
+/** 该会话的事件流只留指定终态：复审只看最后一条 turn/end，旧事件会串味。 */
+function resetEvsTo(inst: Mount, turn: number, kind: string): void {
+  inst.agent.session.evs.length = 0;
+  inst.agent.session.evs.push(turnEnd(turn, kind));
+}
+
+/** 发一条瞬时失败（RATE_LIMIT）的 agent/error，载荷形状各用例一致。 */
+function emitRateLimitError(inst: Mount, turn: number): void {
+  inst.ctx.emit(AGENT_ERROR_EVENT, {
+    agent: inst.agent,
+    turn,
+    step: 1,
+    error: { failure: { code: "RATE_LIMIT", message: "x" } },
+  });
+}
+
+/** 取本插件在 loader 里的条目（各用例共用，别再手写 entries().find）。 */
+function rescueEntryOf(
+  inst: Mount,
+): { id: string; fiber?: { uid?: unknown } | undefined } | undefined {
+  return [...inst.ctx.loader.entries()].find((entry) => entry.id === PLUGIN_ENTRY_ID);
+}
+
+/** 条目确实经 Loader 激活（Node 原生 import + 类型剥离路径可用）。
+ *  apply 内抛错会被 cordis 静默吞掉：fiber 存在不等于插件真的注册了东西，
+ *  读面服务（settings 命名空间挂的 remote）在位才算数。 */
+function assertLoaded(inst: Mount): void {
+  expect(rescueEntryOf(inst)?.fiber).toBeDefined();
+  expect(inst.ctx.get("sessionRescue"), "读面服务必须已注册（apply 真的跑完了）").toBeDefined();
 }
 
 describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发布产物）", () => {
   // 夹具的建/删在本套件的全部用例之外各跑一次（vitest 的结构类规则
   // 判「用例与 hook 不在 describe 里」；本文件只有这一个顶层套件，移进来作用面不变）。
   beforeAll(async () => {
+    assert.equal(PLUGIN_ENTRY_ID, patchEntryId(), "cordis.patch.yml 的裸条目 id 漂移");
+    // 先整目录清场再重建：cp 只覆盖/新增，源里删掉或改名的文件会以旧名留在副本里，
+    // 副本的相对 import 命中它时跑的就是过期代码（假绿，且极难归因）。
+    await rm(FIXTURE_PKG, { recursive: true, force: true });
     await mkdir(path.join(FIXTURE_PKG, "lib"), { recursive: true });
     await cp(HOST_TS, FIXTURE_HOST);
     await cp(path.join(PKG_ROOT, "lib"), path.join(FIXTURE_PKG, "lib"), { recursive: true });
@@ -250,14 +314,17 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
 
   let live: TestCtx | undefined;
   afterEach(async () => {
-    await live?.fiber?.dispose();
-    live = undefined;
-    // 冷却用例 fake 过 Date（见下），每条用例后放回真实时钟。
-    vi.useRealTimers();
+    try {
+      await live?.fiber?.dispose();
+    } finally {
+      live = undefined;
+      // 冷却用例 fake 过 Date（见下），每条用例后放回真实时钟——dispose 抛错也不跳过。
+      vi.useRealTimers();
+    }
   });
 
   afterAll(async () => {
-    await rm(FIXTURE_DIR, { recursive: true, force: true });
+    await rm(FIXTURE_PKG, { recursive: true, force: true });
   });
 
   it("loader 原生载入 host.ts：注入等待、事件驱动续跑、读面注册", { timeout: 30_000 }, async () => {
@@ -275,9 +342,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     // owner 比 fiber.uid，不比 fiber 对象本身：cordis 交出的 ctx/fiber 是代理，
     // 不同调用点拿到的对象标识并不保证相同（直接 toBe 必然不等，失败信息还会踩上
     // 代理属性读取的 pretty-format 坑）。uid 才是宿主自己的身份键。
-    const rescueFiberUid = [...inst.ctx.loader.entries()].find(
-      (entry) => entry.id === PLUGIN_ENTRY_ID,
-    )?.fiber?.uid;
+    const rescueFiberUid = rescueEntryOf(inst)?.fiber?.uid;
     expect(rescueFiberUid, "比对基准：条目 fiber 必须有 uid").toBeDefined();
     expect(
       inst.configureCalls[0]?.ownerUid,
@@ -285,12 +350,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     ).toBe(rescueFiberUid);
 
     // 事件驱动：瞬时失败 → 定时器武装 → 触发 → followup 发出
-    inst.ctx.emit(AGENT_ERROR_EVENT, {
-      agent: inst.agent,
-      turn: 1,
-      step: 1,
-      error: { failure: { code: "RATE_LIMIT", message: "x" } },
-    });
+    emitRateLimitError(inst, 1);
     expect(inst.timers).toHaveLength(1);
     // 10_000 既不是本用例写的、也不是替身写的：0.1.7 交进 apply 的是 cordis 按条目
     // `Config` 解析出的 volatile 引用，本用例 config 传空 → 这一读到的就是 schema 的
@@ -331,12 +391,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       expect(inst.ctx.get("sessionRescue")).toBeDefined();
 
       // 事件驱动链在产物形态下等价：瞬时失败 → 定时器武装 → 触发 → followup 发出
-      inst.ctx.emit(AGENT_ERROR_EVENT, {
-        agent: inst.agent,
-        turn: 1,
-        step: 1,
-        error: { failure: { code: "RATE_LIMIT", message: "x" } },
-      });
+      emitRateLimitError(inst, 1);
       expect(inst.timers).toHaveLength(1);
       inst.tick();
       expect(inst.agent.calls).toHaveLength(1);
@@ -375,7 +430,8 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
 
     inst.tick();
     expect(inst.agent.calls).toHaveLength(1);
-    const text = String((inst.agent.calls[0] as { content: { text: string }[] }).content[0]?.text);
+    const firstCall = inst.agent.calls[0] as { content?: { text?: string }[] } | undefined;
+    const text = String(firstCall?.content?.[0]?.text);
     // 必须发的是"清单未闭合"这一种文案，而不是被当成瞬时失败续跑文案
     expect(text).toContain("任务清单");
     expect(text).not.toContain("瞬时失败");
@@ -406,42 +462,23 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
 
     // 打满 3 次 resume（maxResumes 取 schema 默认 3，本用例不再自己喂表）
     for (let i = 1; i <= 3; i += 1) {
-      inst.agent.session.evs.length = 0;
-      inst.agent.session.evs.push(turnEnd(i, "error"));
-      inst.ctx.emit(AGENT_ERROR_EVENT, {
-        agent: inst.agent,
-        turn: i,
-        step: 1,
-        error: { failure: { code: "RATE_LIMIT", message: "x" } },
-      });
+      resetEvsTo(inst, i, "error");
+      emitRateLimitError(inst, i);
       inst.tick();
       pastCooldown();
     }
     expect(inst.timers).toHaveLength(3);
 
     // 第 4 次：配额已满 → 不再武装（修复前这就是永久静默到重启）
-    inst.agent.session.evs.length = 0;
-    inst.agent.session.evs.push(turnEnd(4, "error"));
-    inst.ctx.emit(AGENT_ERROR_EVENT, {
-      agent: inst.agent,
-      turn: 4,
-      step: 1,
-      error: { failure: { code: "RATE_LIMIT", message: "x" } },
-    });
+    resetEvsTo(inst, 4, "error");
+    emitRateLimitError(inst, 4);
     expect(inst.timers).toHaveLength(3);
 
     // 一次 completed 回合 → 配额恢复 → 第 6 轮失败可再续跑
-    inst.agent.session.evs.length = 0;
-    inst.agent.session.evs.push(turnEnd(5, "completed"));
+    resetEvsTo(inst, 5, "completed");
     inst.ctx.emit(AGENT_STATUS_EVENT, { agent: inst.agent, status: "idle" });
-    inst.agent.session.evs.length = 0;
-    inst.agent.session.evs.push(turnEnd(6, "error"));
-    inst.ctx.emit(AGENT_ERROR_EVENT, {
-      agent: inst.agent,
-      turn: 6,
-      step: 1,
-      error: { failure: { code: "RATE_LIMIT", message: "x" } },
-    });
+    resetEvsTo(inst, 6, "error");
+    emitRateLimitError(inst, 6);
     expect(inst.timers).toHaveLength(4);
   });
 
@@ -467,21 +504,19 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       assertLoaded(inst);
 
       inst.agent.session.evs.push(turnEnd(1, "error"));
-      inst.ctx.emit(AGENT_ERROR_EVENT, {
-        agent: inst.agent,
-        turn: 1,
-        step: 1,
-        error: { failure: { code: "RATE_LIMIT", message: "429 too many requests" } },
-      });
+      emitRateLimitError(inst, 1);
       expect(reports).toHaveLength(1);
       expect(reports[0]?.["category"]).toBe("transient-failure");
       expect(passes).toHaveLength(0);
 
-      inst.agent.session.evs.length = 0;
-      inst.agent.session.evs.push(turnEnd(2, "completed"));
+      resetEvsTo(inst, 2, "completed");
       inst.ctx.emit(AGENT_STATUS_EVENT, { agent: inst.agent, status: "idle" });
       expect(passes).toHaveLength(1);
       expect(passes[0]?.["category"]).toBe("transient-failure");
+      // 先验两侧都不是 undefined：宿主漏给 signature 时 undefined === undefined 会让
+      // 这条「同源」断言空转通过。
+      expect(reports[0]?.["signature"], "report 侧必须有签名").toBeTypeOf("string");
+      expect(passes[0]?.["signature"], "pass 侧必须有签名").toBeTypeOf("string");
       expect(passes[0]?.["signature"], "签名必须与 report 同源（规则卡定位键）").toBe(
         reports[0]?.["signature"],
       );

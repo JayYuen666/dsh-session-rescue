@@ -1236,7 +1236,11 @@ async function sleepWithAbort(
     finish(false);
   }, ms);
   // 卸载释放器：结算为「已中止」→ 调用方走 next()，既不重发也不占重试名额。
+  // 卸载这一支同样要摘 abort 监听：监听带 once，但 signal 真正中止时的那次回调
+  // 已是噪声，监听本体还挂在 signal 上多留一段。到点一支同理（上方）；
+  // onAbort 自身由 once 语义自摘，先判 aborted 的那一支还没注册，无须摘。
   holder.unregister = (): void => {
+    signal?.removeEventListener("abort", onAbort);
     finish(true);
   };
   backoffs.add(holder.unregister);
@@ -1839,11 +1843,9 @@ function handleAgentStatus(
   // sensenova 等 QUOTA 未配置 → 回合失败），且 Map 随会话增长泄漏。回合收口
   // （status→idle）= 请求周期结束（重试循环内 status 恒为 running，不会误重置），
   // 此处重置该会话计数——放在 root/disabled/review 判定之前，任何 idle 都清，兼防泄漏。
-  const idleSid = agent.session.id;
-  if (typeof idleSid === "string") {
-    runtime.requestRetryCounts.delete(idleSid);
-  }
+  // 与下面 disabledSessions / scheduler 对同一值的用法同一信任档，不再单设 typeof 守卫。
   const sessionId = agent.session.id;
+  runtime.requestRetryCounts.delete(sessionId);
   const cfg = idleRescueGates(runtime, agent, sessionId);
   if (cfg === null) {
     return;
@@ -1857,8 +1859,10 @@ function handleAgentStatus(
     return;
   }
 
-  // 用户中止/打断的回合既不调度也不重置配额（不消耗、不恢复，原样保留）。
-  // 这是 abort 判定的**唯一**存活位置：turn/end 此刻已落盘。
+  // 用户中止/打断的回合既不调度也不重置配额（不消耗、不恢复，原样保留），并且要在 max-tokens
+  // 那一档之前收口。判只能落在这一侧：turn/end 到此刻才落盘，agent/error 那侧扫它是空扫。
+  // 下面 `!== "completed"` 那一档今天也会把这两种 reason 挡回去，所以这一支不是唯一闸门——
+  // 留着它是因为「用户中止」这个因由要显式成立，靠下一档的顺带效果兜住会在取值名单被改动时静默失效。
   if (review.lastReasonKind === "aborted" || review.lastReasonKind === "interrupted") {
     return;
   }

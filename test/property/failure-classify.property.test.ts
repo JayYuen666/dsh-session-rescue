@@ -13,7 +13,11 @@
 // 照抄实现的属性测试只会永远通过。
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import type { FailureLike } from "../../lib/failure-classify.ts";
 import { classifyFailure, isRequestRetryWorthy } from "../../lib/failure-classify.ts";
+
+/** 与 unit 侧同款的窄门：unknown → FailureLike 收在唯一一处，不让 `as never` 扩散。 */
+const payloadLike = (raw: unknown): FailureLike => raw as FailureLike;
 
 /** 官方码表里「重试永远不会变好」那一族（与实现同一份清单，但这里是**判据陈述**：
  *  文档说这些码代表请求本身有问题，不是时机问题）。 */
@@ -45,9 +49,11 @@ const BALANCE_PHRASES = [
   "out of credits",
 ];
 
-/** 配额**窗口**措辞（分钟/吞吐型额度的说法）：文档明写这一形只归请求级判瞬时。 */
+/** 配额**窗口**措辞（分钟/吞吐型额度的说法）：文档明写这一形只归请求级判瞬时。
+ *  本式是实现 QUOTA_WINDOW_TEXT 的镜像（含连字符与 i 旗标），实现改口径要同步这里，
+ *  否则「usage-limit exceeded」会在实现里可重发、在 oracle 里不算窗口而假红。 */
 const QUOTA_WINDOW_WORDING =
-  /\bquota[\s_-]*(?:exceeded|exhausted|reached|limit)\b|\busage[\s_]+limit\b/u;
+  /\bquota[\s_-]*(?:exceeded|exhausted|reached|limit)\b|\busage[\s_-]+limit\b/iu;
 
 /** 「就是限速」的自然语言说法（只用文档承诺的措辞族：429 字样 / rate limit / throttl /
  *  too many requests）。自己造一句「too busy」然后断言它该瞬时，那就是拿想象当契约。 */
@@ -72,7 +78,7 @@ const failureArbitrary = fc.record(
     message: fc.oneof(
       fc.constantFrom(...BALANCE_PHRASES),
       fc.constantFrom(...RATE_PHRASES),
-      fc.constantFrom("quota exceeded for month", "bad request", ""),
+      fc.constantFrom("quota exceeded for month", "usage-limit exceeded", "bad request", ""),
       fc.string(),
     ),
     status: fc.oneof(
@@ -100,12 +106,14 @@ function hasRateWording(lower: string): boolean {
   );
 }
 
-/** 余额真耗尽的三种形态（与文档同一组形态，不是实现正则的副本）。 */
+/** 余额真耗尽的三种形态（判据陈述，需与实现的形态族同步维护）：尾端 \b 与实现一致，
+ *  缺了它 "insufficient quotas" 这类串会被这里当成余额证据、实现却不认，随机面上
+ *  oracle 与实现就会在「同解」上假分歧。 */
 function hasBalanceEvidence(lower: string): boolean {
   return (
-    /\binsufficient[\s_-]+(?:quota|balance|credits?)/u.test(lower) ||
-    /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)/u.test(lower) ||
-    /\bout[\s_-]+of[\s_-]+(?:credits?|budget)/u.test(lower)
+    /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/u.test(lower) ||
+    /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b/u.test(lower) ||
+    /\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b/u.test(lower)
   );
 }
 
@@ -194,7 +202,7 @@ describe("失败分类的证据次序（属性）", () => {
   it("全性：任意形状的载荷都不抛，且结论总是填满两个字段", () => {
     fc.assert(
       fc.property(anyFailureArbitrary, (raw) => {
-        const verdict = classifyFailure(raw as never);
+        const verdict = classifyFailure(payloadLike(raw));
         expect(verdict.transient).toBeTypeOf("boolean");
         expect(verdict.reason.length).toBeGreaterThan(0);
       }),
@@ -234,6 +242,29 @@ describe("失败分类的证据次序（属性）", () => {
       }),
       { numRuns: 100 },
     );
+  });
+
+  it("无措辞、无 429 时，provider 给了再来时刻才翻案（providerSaidWhen 分支）", () => {
+    // 上面那条「措辞或再来时刻」的随机面里 message 全是限速措辞，providerSaidWhen
+    // 那一支（仅凭再来时刻翻案）是死维度；这里单独供给：中性措辞 + 非 429 状态。
+    fc.assert(
+      fc.property(positiveNatArbitrary, (retryAfter) => {
+        const verdict = classifyFailure({
+          code: "QUOTA",
+          message: "quota reached",
+          status: 402,
+          providerRetryAfterMs: retryAfter,
+        });
+        expect(verdict.transient, `retryAfter=${String(retryAfter)} ⇒ ${verdict.reason}`).toBe(
+          true,
+        );
+      }),
+      { numRuns: 50 },
+    );
+    expect(
+      classifyFailure({ code: "QUOTA", message: "quota reached", status: 402 }).transient,
+      "没给再来时刻 ⇒ 永久",
+    ).toBe(false);
   });
 
   it("永久码一票否决：无论带什么状态码或措辞都判永久", () => {
@@ -331,11 +362,20 @@ describe("失败分类的证据次序（属性）", () => {
         // 断言就与条件无关了（也满足 vitest/no-conditional-expect）。
         const turnSaysPermanent = !classifyFailure(failure).transient;
         expect(
-          !turnSaysPermanent || waitThenResend || !isRequestRetryWorthy(failure as never),
+          !turnSaysPermanent || waitThenResend || !isRequestRetryWorthy(payloadLike(failure)),
           `回合级永久 + 无任何「等一会再来」证据时，请求级不得原地重发：${failure.code} / ${failure.message} / ${String(failure.status)}`,
         ).toBe(true);
       }),
       { numRuns: 2000 },
     );
+  });
+
+  it("oracle 的余额三形按词边界收口：复数形态不算余额证据", () => {
+    // 这三形是实现常量的镜像；少了尾端 `\b`，oracle 会把「insufficient quotas」这类串
+    // 当成余额证据，而实现不认——随机面上的「同解」就会变成假分歧。
+    expect(hasBalanceEvidence("insufficient quota")).toBe(true);
+    expect(hasBalanceEvidence("insufficient quotas")).toBe(false);
+    expect(hasBalanceEvidence("balance exhaustedness")).toBe(false);
+    expect(hasBalanceEvidence("out of budget")).toBe(true);
   });
 });

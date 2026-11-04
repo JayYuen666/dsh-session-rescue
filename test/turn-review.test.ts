@@ -131,6 +131,16 @@ describe("reviewLastTurn — todo 清单（最新快照 last-wins）", () => {
       turnEnd(1, "completed"),
     ]);
     assert.equal(result.openTodos, 0);
+    // 「安全忽略」的两个方向分开钉（与 openCountOf 的口径一致）：
+    //   · 非数组载荷 = 不可用快照，倒扫跳过，最后一次**合法**快照仍然生效；
+    //   · 数组载荷（哪怕元素全非法）= 可用快照（0 项未闭合），按 last-wins 覆盖——
+    //     上面第一段断言的 0 正是它。
+    const keep = reviewLastTurn([
+      todoWrite([OPEN, OPEN]),
+      ev(TODO_WRITE_EVENT, { todos: "not-array" }),
+      turnEnd(1, "completed"),
+    ]);
+    assert.equal(keep.openTodos, 2, "非数组载荷整份跳过，最后一次合法快照仍然生效");
   });
 
   it("不认识的 status 不计入未闭合（未知状态 ≠ 未完成）", () => {
@@ -305,6 +315,16 @@ describe("reviewLastTurn — Schedule 驱动回合（避免与官方定时提醒
     assert.equal(result.scheduleDrivenTurn, false);
   });
 
+  it("首条 user 才定身份：同回合先 user 后 schedule ⇒ false（见到第一条即返回）", () => {
+    const result = reviewLastTurn([
+      turnStart(9),
+      userMsg({ kind: "user", rpcId: "r1" }),
+      userMsg({ kind: "schedule" }),
+      turnEnd(9, "completed"),
+    ]);
+    assert.equal(result.scheduleDrivenTurn, false, "身份只看首条，后面的 schedule 不改判");
+  });
+
   it("goal 回合不算 schedule 驱动（两个身份互斥）", () => {
     const result = reviewLastTurn([
       turnStart(9),
@@ -316,6 +336,17 @@ describe("reviewLastTurn — Schedule 驱动回合（避免与官方定时提醒
 
   it("回合内没有 user/message → scheduleDrivenTurn=false", () => {
     assert.equal(reviewLastTurn([turnStart(9), turnEnd(9, "completed")]).scheduleDrivenTurn, false);
+  });
+
+  it("ask_user_question 的 tool/call 轮次与本轮不符 ⇒ 不算在等用户", () => {
+    // isAwaitsUserCall 的「turn 不符则排除」分支：崩溃恢复留下的交叉事件里，
+    // 若这条守卫失效（只看窗口），上一轮的等待会被误判成本轮在等用户、续跑被抑制。
+    const result = reviewLastTurn([
+      turnStart(5),
+      toolCall(4, "cx", "ask_user_question"),
+      turnEnd(5, "completed"),
+    ]);
+    assert.equal(result.awaitsUser, false, "他轮的等待不算本轮");
   });
 
   it("缺该回合 turn/start 时，上一回合的 schedule 身份不得串过来（保守 false）", () => {

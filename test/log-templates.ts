@@ -7,6 +7,9 @@
 //
 // 这份清单与源码的同步由 test/log-templates.test.ts 当场核对：它从 host.ts 与 lib/ 下现扫
 // 一遍 console.* 的首个模板字面量，与清单逐条比对，清单陈旧或手改都会判红。
+/** 骨架共用的包标签前缀；setup-logs 的账本分类读同一份，不再各自硬编码。 */
+export const LOG_PREFIX = "[session-rescue]";
+
 export const LOG_SKELETONS: readonly string[] = [
   "[session-rescue] ⟨slot⟩: rescue facts rejected by schema (⟨slot⟩) — falling back to event scans",
   "[session-rescue] ⟨slot⟩: auto-⟨slot⟩ check threw (⟨slot⟩)",
@@ -43,19 +46,27 @@ export const LOG_SKELETONS: readonly string[] = [
  * 切分拼正则），而普通字符串里出现花括号插值形态会触发 no-template-curly-in-string；
  * 换成模板串又会让占位符变成一次真插值。
  */
-const PLACEHOLDER = "⟨slot⟩";
+export const PLACEHOLDER = "⟨slot⟩";
 
-/** 骨架 → 整条日志的匹配式。转义字面量、把占位符换回通配，两端锚死。 */
+/** 骨架 → 整条日志的匹配式。转义字面量、把占位符换回通配，两端锚死。
+ *  带 `s` 旗标：`.*` 要跨得过换行——日志正文自带的换行不该把一条本来合法的日志判成
+ *  未认领；这与调用方是否先做空白折叠解耦（折叠只是归一化，不是本匹配的前提）。 */
 function skeletonPattern(skeleton: string): RegExp {
   const parts = skeleton
     .split(PLACEHOLDER)
     .map((part) => part.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`));
-  return new RegExp(`^${parts.join(".*")}$`, "u");
+  return new RegExp(`^${parts.join(".*")}$`, "us");
 }
 
 const SKELETON_PATTERNS = LOG_SKELETONS.map((skeleton) => skeletonPattern(skeleton));
 
-/** 一条日志是否整条对上某个骨架。端锚死是这条判据的全部意义：多一个尾巴就不算认领。 */
+/** 一条日志是否整条对上某个骨架。端锚死是这条判据的全部意义：多一个尾巴就不算认领。
+ *
+ *  两条已知边界（都朝**多认**的方向偏，且都有结构性兜底）：
+ *  ① 以占位符收尾的骨架尾端等于没锚，任意尾巴都会被认领——账本里确有一条这样的骨架；
+ *  ② 贪婪 `.*` 能吞掉骨架内部的字面分隔符，片段同形的新日志会被旧骨架顶包。
+ *  兜底是反向那道门：log-templates.test.ts 现扫源码与账本逐条比对，源码里真有新日志
+ *  而账本没记时，那道门先红——本函数的「多认」不会让新日志绕过登记。 */
 export function claimsLog(text: string): boolean {
   return SKELETON_PATTERNS.some((pattern) => pattern.test(text));
 }

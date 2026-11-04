@@ -13,17 +13,16 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, it } from "vitest";
 
-import { LOG_SKELETONS, claimsLog } from "./log-templates.ts";
+import { LOG_SKELETONS, claimsLog, PLACEHOLDER } from "./log-templates.ts";
 
 const PKG_ROOT = path.resolve(import.meta.dirname, "..");
 
 /** 账本覆盖的扫描面：宿主侧模块（客户端日志不进这个账本）。 */
 const SCAN_ROOTS: readonly string[] = ["lib"];
 
-/** 插值占位符，与 test/log-templates.ts 用的是同一个记号。 */
-const PLACEHOLDER = "⟨slot⟩";
-
-const CONSOLE_CALL = /\bconsole\.(?:info|warn|error|log|debug)\(/gu;
+// 方法集与文件头「每个 console.* 调用」的口径一致：group/trace/table/dir 也收，
+// 源码里真用了它们时账本就得接——漏检比多检更难查（当前扫描面只有 info/warn/error）。
+const CONSOLE_CALL = /\bconsole\.(?:info|warn|error|log|debug|group|trace|table|dir)\(/gu;
 
 async function collectTypeScript(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -115,10 +114,15 @@ async function scanLogSkeletons(): Promise<{ skeletons: string[]; opaque: string
     const file = files[at] ?? "";
     for (const match of source.matchAll(CONSOLE_CALL)) {
       const [call] = match;
-      const body = templateBodyAt(source, match.index + call.length);
-      if (body === null) {
+      // 行首是注释的行不算：文档注释里提一句 `console.error(` 就会多出一条假骨架，
+      // 把红指到与清单无关的地方。只按「该行行首」判，不做注释剥除——手写词法在
+      // 正则字面量与字符串里的 `//` 上会走偏，走偏的结果是静默少扫，比误报更难查。
+      const lineStart = source.lastIndexOf("\n", match.index - 1) + 1;
+      const commentLead = /^\s*(?:\/\/|\*|\/\*)/u.test(source.slice(lineStart, match.index));
+      const body = commentLead ? null : templateBodyAt(source, match.index + call.length);
+      if (!commentLead && body === null) {
         opaque.push(`${path.relative(PKG_ROOT, file)}: ${call}`);
-      } else {
+      } else if (body !== null) {
         skeletons.push(body.replaceAll(/\s+/gu, " ").trim());
       }
     }
@@ -154,6 +158,15 @@ describe("日志骨架清单与源码同源", () => {
     for (const skeleton of LOG_SKELETONS) {
       const filled = skeleton.replaceAll(PLACEHOLDER, "填值");
       assert.equal(claimsLog(filled), true, `按骨架填出来的日志没被认领：${skeleton}`);
+      // 正文自带换行也要被认领：匹配式带 `s` 旗标，`.*` 跨得过换行。调用方（账本）是否先
+      // 折叠空白与这条判据无关——不写下来，它就只是一条没人守着的隐式契约。
+      assert.equal(
+        claimsLog(
+          skeleton.endsWith(PLACEHOLDER) ? `${filled}\n尾行` : filled.replace("填值", "首行\n次行"),
+        ),
+        true,
+        `正文含换行的日志没被认领：${skeleton}`,
+      );
       assert.equal(
         claimsLog(`前缀${filled}`),
         false,

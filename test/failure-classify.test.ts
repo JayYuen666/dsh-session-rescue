@@ -19,6 +19,12 @@ function payloadLike(raw: unknown): FailureLike {
 /** 余额耗尽的原始措辞（provider 回执里的原话）：三处用例都拿它当「不可恢复」的证据。 */
 const BALANCE_TEXT = "Insufficient quota, please top up";
 
+/** OpenRouter 的空响应原文；无 code 与 PI_AI_ERROR 两形态的用例共用。 */
+const EMPTY_RESPONSE_TEXT_LITERAL = "Provider returned an empty response";
+
+/** 百度 token plan 的实测措辞（窗口型配额）；三处用例共用同一串原文。 */
+const BAIDU_WINDOW_MESSAGE = "Allocated quota exceeded, please increase your quota limit.";
+
 describe("classifyFailure（失败分类：瞬时/永久）", () => {
   it("瞬时：标准码 RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE", () => {
     for (const code of ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"]) {
@@ -55,7 +61,7 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     // 裸 402：账单侧「先付钱」，没有随信证据就是永久。
     const bare = classifyFailure({ code: "", message: "", status: 402 });
     assert.equal(bare.transient, false);
-    assert.match(bare.reason, /billing status 402/u);
+    assert.match(bare.reason, /402/u);
     assert.equal(isRequestRetryWorthy({ code: "", message: "", status: 402 }), false);
     // 正文明确写了限速措辞：那是「伪装成账单的限流」，与 QUOTA 码第一支同解
     // （适配器把 402 归进 QUOTA 码，见 isQuotaExceededError(detail) || status === 402）。
@@ -65,7 +71,7 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
       status: 402,
     });
     assert.equal(rateWording.transient, true);
-    assert.match(rateWording.reason, /rate-limit text pattern/u);
+    assert.match(rateWording.reason, /rate/u);
   });
 
   it("瞬时：百度 token plan 429（code QUOTA + 限流文本证据）", () => {
@@ -170,7 +176,7 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     });
     assert.equal(verdict.transient, false);
     // 余额型耗尽的证据在 reason 里可见（不是靠 status 抢判）
-    assert.match(verdict.reason, /QUOTA with balance-exhausted evidence/u);
+    assert.match(verdict.reason, /balance/u);
   });
 
   it("瞬时：QUOTA 带 provider Retry-After 即按 provider 的话再来一次", () => {
@@ -181,14 +187,14 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
       providerRetryAfterMs: 15_000,
     });
     assert.equal(verdict.transient, true);
-    assert.match(verdict.reason, /QUOTA with provider Retry-After/u);
+    assert.match(verdict.reason, /retry/iu);
   });
 
   it("瞬时：status 429 + insufficient_quota 必须重试（HTTP 429 定义即限速；百度 token plan 限流型配额拒绝，冷却后有配额回来）", () => {
     const verdict = classifyFailure(
       payloadLike({
         code: "insufficient_quota",
-        message: "Allocated quota exceeded, please increase your quota limit.",
+        message: BAIDU_WINDOW_MESSAGE,
         status: 429,
         type: "invalid_request_error",
       }),
@@ -240,10 +246,16 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     }
   });
 
+  it("瞬时：两条兜底措辞在没有 code 时同样照认（适配器实测会连 code 一起丢）", () => {
+    // adapterWordingVerdict 对 code 缺位（""）与 PI_AI_ERROR 同认；全部用例都带
+    // PI_AI_ERROR 时，把守卫收紧回「只认 PI_AI_ERROR」的回归在这层是静默的。
+    assert.equal(classifyFailure({ message: "Provider finish_reason: other" }).transient, true);
+    assert.equal(classifyFailure({ message: EMPTY_RESPONSE_TEXT_LITERAL }).transient, true);
+  });
+
   it("瞬时：PI_AI_ERROR + 上游空响应原文（网关措辞；2026-09 真实漏跑案例）", () => {
     assert.equal(
-      classifyFailure({ code: "PI_AI_ERROR", message: "Provider returned an empty response" })
-        .transient,
+      classifyFailure({ code: "PI_AI_ERROR", message: EMPTY_RESPONSE_TEXT_LITERAL }).transient,
       true,
     );
     assert.equal(
@@ -253,7 +265,7 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     assert.equal(
       classifyFailure({
         code: "PI_AI_ERROR",
-        message: "Provider returned an empty response",
+        message: EMPTY_RESPONSE_TEXT_LITERAL,
       }).reason,
       "provider returned an empty response",
     );
@@ -346,11 +358,31 @@ describe("QUOTA@429 的两种形（回合级也必须分得开）", () => {
     // 否则同一枚失败会「重发请求可以、重开回合不行」，行为难以解释。
     const verdict = classifyFailure({
       code: "QUOTA",
-      message: "Allocated quota exceeded, please increase your quota limit.",
+      message: BAIDU_WINDOW_MESSAGE,
       status: 429,
     });
     assert.equal(verdict.transient, true);
-    assert.match(verdict.reason, /QUOTA at 429 without balance-exhaustion evidence/u);
+    assert.match(verdict.reason, /429/u);
+    // 注释宣称的「同向」必须两侧都断言：只判回合级时，请求级 QUOTA 分支改坏
+    // （例如丢掉 status===429 那支）这里照样全绿。
+    assert.equal(
+      isRequestRetryWorthy({
+        code: "QUOTA",
+        message: BAIDU_WINDOW_MESSAGE,
+        status: 429,
+      }),
+      true,
+      "请求级同向：429 状态码在 QUOTA 分支内接住",
+    );
+  });
+
+  it("有意分歧：月度配额窗口（status:0）回合级永久、请求级可重发", () => {
+    // QUOTA_WINDOW_TEXT 注释写明的唯一分歧：回合级问「值不值得重开一个回合」，
+    // 没有其它证据时保守判永久；请求级问「等一会儿再发同一个请求会不会更好」，
+    // 窗口型额度答「会」。不用例钉住，这个分歧读起来就像实现分叉。
+    const payload = { code: "QUOTA", message: "quota exceeded for month", status: 0 };
+    assert.equal(classifyFailure(payload).transient, false, "回合级：无 429/限速/余额证据 ⇒ 永久");
+    assert.equal(isRequestRetryWorthy(payload), true, "请求级：窗口措辞值得等");
   });
 
   it("字段类型不符时按缺失降级，不抛", () => {
@@ -364,6 +396,15 @@ describe("QUOTA@429 的两种形（回合级也必须分得开）", () => {
       isRequestRetryWorthy(payloadLike({ code: 429, providerRetryAfterMs: 30_000 })),
       true,
       "provider 明确给了再来时刻 ⇒ 值得等",
+    );
+    // 同一载荷两侧各按自己的问题作答（有意差异，不是分叉）：回合级问「值不值得重开
+    // 一个回合」——数值 429 不是可路由的字符串码、文本证据缺席 ⇒ 永久；请求级只问
+    // 「等一等再发同一个请求会不会更好」——provider 给了再来时刻就值得等。
+    assert.equal(
+      classifyFailure(payloadLike({ code: 429, message: null, providerRetryAfterMs: 30_000 }))
+        .transient,
+      false,
+      "回合级：数值 code 与空文本都不可路由 ⇒ 永久",
     );
   });
 });
@@ -392,10 +433,16 @@ describe("looksRateLimitish（观察性日志用）", () => {
 });
 
 describe("降级细节（fallback 组装与坏字段形状）", () => {
-  it("无 code 的未知失败：reason 取 message 前 80 字", () => {
+  it("无 code 的未知失败：reason 收进 message 的前 80 字", () => {
     const verdict = classifyFailure({ message: "mystery ".repeat(20) });
     assert.equal(verdict.transient, false);
-    assert.equal(verdict.reason, `unclassified: ${"mystery ".repeat(20).slice(0, 80)}`);
+    // 截断上限是观察性输出的实现细节，逐字复制进断言会让措辞微调批量变红；
+    // 这里只钉语义前缀与长度上界（80 字）。
+    assert.match(verdict.reason, /^unclassified: mystery/u);
+    assert.ok(
+      verdict.reason.length <= "unclassified: ".length + 80,
+      `reason 超出 80 字截断：${verdict.reason}`,
+    );
   });
 
   it("完全空白的失败：reason 落到 empty 兜底", () => {

@@ -77,16 +77,22 @@ function digestOf(text: string): string {
 }
 
 /**
- * 取包名：正则从 package.json 抠，不为此把整张依赖表拉进类型面（同 client 侧夹具的取法）。
+ * 取包名：JSON.parse 后读顶层 `name`。不用正则从原文抠——`"name":` 可能出现在
+ * 嵌套对象（publishConfig 之类）里，第一个命中未必是顶层名；也绝不静默回落
+ * "unknown"：package.json 缺失或解析失败意味着 pkgDir 的推断假设已不成立，
+ * 门禁必须在起点上就红，而不是带着错标签继续比。
  * @param pkgDir - 包根绝对路径
- * @returns package.json 的 name，抠不到时为 unknown
+ * @returns package.json 的 name
  */
 function packageNameOf(pkgDir: string): string {
-  return (
-    /"name":\s*"(?<pkgName>[^"]+)"/u.exec(readText(path.resolve(pkgDir, "package.json")))?.groups?.[
-      "pkgName"
-    ] ?? "unknown"
-  );
+  const manifest = JSON.parse(readFileSync(path.resolve(pkgDir, "package.json"), "utf8")) as {
+    name?: unknown;
+  };
+  const { name } = manifest;
+  if (typeof name !== "string" || name === "") {
+    throw new Error(`[${pkgDir}] package.json 的 name 缺失或不是字符串，指纹门禁无从标身份`);
+  }
+  return name;
 }
 
 /**
@@ -132,18 +138,51 @@ export async function hostFreshnessEvidence(
   // 动态导入 .mjs 对 TS 为 any，先收窄到调用面再 await（避免 no-unsafe-*）。
   // import() 只收 URL 或说明符，不收裸文件系统路径：Windows 上 `C:\…\build-host.mjs`
   // 会被当成协议 `c:` 解析而抛 ERR_UNSUPPORTED_ESM_URL_SCHEME；POSIX 的 `/…` 只是恰好能过。
-  const mod = (await import(
-    pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href
-  )) as unknown as Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
+  let mod: Record<string, (() => Promise<BuiltArtifacts>) | undefined>;
+  try {
+    mod = (await import(pathToFileURL(path.resolve(pkgDir, "build-host.mjs")).href)) as Record<
+      string,
+      (() => Promise<BuiltArtifacts>) | undefined
+    >;
+  } catch (error: unknown) {
+    // 这条门禁的语义是「产物过期」；连模块都载不进来属于「构建根本没跑起来」，
+    // 原样冒泡的 ERR_MODULE_NOT_FOUND 看不出是包根定位错了还是文件没了，这里点名。
+    throw new Error(
+      `[${pkgName}] 无法加载 ${path.resolve(pkgDir, "build-host.mjs")}：门禁要对它做内存构建`,
+      { cause: error },
+    );
+  }
   const build = mod[builder];
   if (typeof build !== "function") {
     throw new TypeError(
       `[${pkgName}] build-host.mjs 没有可调用导出 ${builder}：门禁的 builder 选项必须指它真实导出的名字。`,
     );
   }
-  const built = await build();
+  let built: BuiltArtifacts;
+  try {
+    built = await build();
+  } catch (error: unknown) {
+    throw new Error(
+      `[${pkgName}] build-host.mjs 的 ${builder}() 构建失败：先让构建本身过，再谈产物新鲜度`,
+      { cause: error },
+    );
+  }
   if (typeof built === "string") {
     return { pkgName, pkgDir, onDisk: readText(path.resolve(pkgDir, artifact)), built };
+  }
+  if (!(built instanceof Map)) {
+    // builder 退化成别的形状时，下游 manifestOf 会以 `built.entries is not a function`
+    // 的模糊 TypeError 收场，真实病因（构建函数返回面变了）藏在栈底。
+    throw new TypeError(
+      `[${pkgName}] ${builder}() 返回了 string 与 Map 之外的形状（${Object.prototype.toString.call(built)}）：门禁只认这两种产物形态。`,
+    );
+  }
+  if (options.artifact !== undefined) {
+    // 多产物清单形态的比对面是 builder 交回的整张清单，artifact 只对单文件形态生效；
+    // 配了却无声忽略正是门禁最怕的「配置没接上」形态，当场红。
+    throw new TypeError(
+      `[${pkgName}] ${builder}() 交回的是产物清单，artifact 选项（${options.artifact}）只对单文件形态生效，请删掉它`,
+    );
   }
   return {
     pkgName,

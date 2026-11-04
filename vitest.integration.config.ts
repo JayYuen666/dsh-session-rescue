@@ -1,7 +1,8 @@
 import { defineConfig } from "vitest/config";
 
 // 集成层：真实宿主装配（真 cordis Context + 真 SessionStore/AgentLoop/投影注册表 +
-// 真 WebServer + 真 HTTP 客户端），只在内存与回环端口上跑，不碰 ~/.dsh、不需要 API key。
+// 真 WebServer + 真 HTTP 客户端），不碰 ~/.dsh、不需要 API key；副作用只有回环端口
+// 与仓库内临时目录（loader-boot 会在 .tmp/pkg/ 建逐字节副本，跑完即删）。
 // 与单测项目的分工：单测钉「本包自己的判定」，这一层钉「本包对宿主行为的假设是否为真」——
 // 手写替身按作者的想象造事件流，真宿主按代码造事件流，两者不一致时只有这一层会红。
 // 覆盖率门槛不在此处（见 vitest.config.ts 的 100%）：这一层的价值在于组合可用性与真序，
@@ -26,6 +27,7 @@ export default defineConfig({
     hookTimeout: 60_000,
     // 每条用例各自占一个回环端口与一个临时目录；并行跑时失败现场难归因，串行更划算。
     fileParallelism: false,
-    coverage: { reporter: ["text"], enabled: false },
+    // reporter 在 enabled:false 下永不生效，只留开关与意图（覆盖率由 vitest.config.ts 的 100% 负责）。
+    coverage: { enabled: false },
   },
 });

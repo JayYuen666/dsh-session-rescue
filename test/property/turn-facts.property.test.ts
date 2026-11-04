@@ -21,6 +21,7 @@ import {
   scanOpenerKind,
   turnOpenerKind,
 } from "../../lib/turn-facts.ts";
+import type { RescueFacts } from "../../lib/turn-facts.ts";
 import { foldEvents } from "../turn-facts-fold.ts";
 
 /** 轮次号取值：正常档 + 边界（0、相邻、跳跃）+ 缺失/非数字的脏形状。 */
@@ -121,7 +122,11 @@ const eventArbitrary = fc.oneof(
 // 默认只到个位数），而折叠语义要在**长序列**上才成立。
 const eventsArbitrary = fc.array(eventArbitrary, { maxLength: 40, size: "max" });
 
-/** 事件表里出现过的最大轮次号上界（断言遍历的号码范围据此定，不写死）。 */
+/** 遍历防线：算出来的号码范围超出它就要有人看一眼——静默裁剪会把覆盖缩掉而测试照绿。 */
+const TURN_SCAN_CAP = 40;
+
+/** 断言遍历的号码上界：由事件流里真出现过的轮次号推出。起点 3 是「哪怕一条带号的
+ *  事件都没有，也至少问一遍 0..3」的下界；超出防线时红，不再 Math.min 悄悄裁掉。 */
 function maxTurnOf(events: readonly unknown[]): number {
   let max = 3;
   for (const event of events) {
@@ -131,7 +136,69 @@ function maxTurnOf(events: readonly unknown[]): number {
       max = Math.max(max, Math.trunc(turn) + 2);
     }
   }
-  return Math.min(max, 40);
+  assert.ok(
+    max <= TURN_SCAN_CAP,
+    `遍历上界算到 ${max}，超出防线 ${TURN_SCAN_CAP}：生成器的轮次范围放大了，请同步这道防线`,
+  );
+  return max;
+}
+
+/** 查询面：0..上界 **并上** 折叠态里真实出现过的轮次号。生成器刻意产负数、1.5 与 NaN，
+ *  它们会进 openers 与 latestTurnStart；只问 0..上界就永远查不到它们。 */
+function queryTurns(state: RescueFacts, maxTurn: number): number[] {
+  const turns = new Set<number>();
+  for (let turn = 0; turn <= maxTurn; turn += 1) {
+    turns.add(turn);
+  }
+  for (const row of state.openers) {
+    turns.add(row.turn);
+  }
+  if (state.latestTurnStart !== null) {
+    turns.add(state.latestTurnStart);
+  }
+  return [...turns].toSorted((left, right) => left - right);
+}
+
+/** 事件行的轮次号按「安全整数才算有号」读：与实现的 numIn 同口径，NaN／小数／无穷都算缺号。 */
+function turnOf(row: unknown): number | undefined {
+  const turn = (row as { data?: { turn?: unknown } }).data?.turn;
+  return typeof turn === "number" && Number.isSafeInteger(turn) ? turn : undefined;
+}
+
+/** 最后一条 turn/end 的下标；一条都没有时 -1（那支由 `state.end === null` 管）。 */
+function lastEndAt(events: readonly unknown[]): number {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if ((events[i] as { type?: unknown }).type === "turn/end") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** end 之前**最近**那条 start 是否与它同号：途中撞见另一条 end 即判左边界缺失；最近那条
+ *  start 自己缺号也算对不上（实测反例：start(1) 之后又一条不带号的 start，再 end(1)）。 */
+function hasMatchingStart(events: readonly unknown[], endAt: number, endTurn: number): boolean {
+  for (let i = endAt - 1; i >= 0; i -= 1) {
+    const row = events[i] as { type?: unknown };
+    if (row.type === "turn/end") {
+      return false;
+    }
+    if (row.type === "turn/start") {
+      return turnOf(row) === endTurn;
+    }
+  }
+  return false;
+}
+
+/** 从事件流本身倒推的独立判据：最后一条 end 没有同号 start 与之相配（含它自己缺号那形）。
+ *  判据读这条而不是读实现的 aligned 标志——读标志就是同义复述，实现与断言一起漂时不响。 */
+function endWithoutMatchingStart(events: readonly unknown[]): boolean {
+  const endAt = lastEndAt(events);
+  if (endAt === -1) {
+    return false;
+  }
+  const endTurn = turnOf(events[endAt]);
+  return endTurn === undefined || !hasMatchingStart(events, endAt, endTurn);
 }
 
 describe("回合事实投影 ≡ 同步扫描（随机日志）", () => {
@@ -166,7 +233,7 @@ describe("回合事实投影 ≡ 同步扫描（随机日志）", () => {
       fc.property(eventsArbitrary, (events) => {
         const state = foldEvents(events);
         const maxTurn = maxTurnOf(events);
-        for (let turn = 0; turn <= maxTurn; turn += 1) {
+        for (const turn of queryTurns(state, maxTurn)) {
           assert.equal(
             hasNewerTurn(state, turn),
             scanNewerTurn(events, turn),
@@ -183,7 +250,7 @@ describe("回合事实投影 ≡ 同步扫描（随机日志）", () => {
       fc.property(eventsArbitrary, (events) => {
         const state = foldEvents(events);
         const maxTurn = maxTurnOf(events);
-        for (let turn = 0; turn <= maxTurn; turn += 1) {
+        for (const turn of queryTurns(state, maxTurn)) {
           const projected = turnOpenerKind(state, turn);
           if (projected === undefined) {
             assert.equal(
@@ -206,9 +273,10 @@ describe("回合事实投影 ≡ 同步扫描（随机日志）", () => {
         const state = foldEvents(events);
         const projected = reviewFromFacts(state);
         if (projected === undefined) {
-          assert.ok(
-            state.end !== null && !state.end.aligned,
-            "只有最后一条 end 对不上它的 start 时才交回 undefined",
+          assert.equal(
+            endWithoutMatchingStart(events),
+            true,
+            "交回 undefined 必须对应扫描看到的那件事：最后一条 end 找不到同号的 start",
           );
           return;
         }

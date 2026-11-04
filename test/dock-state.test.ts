@@ -86,7 +86,8 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
       mkRescue({ [sessionId]: session({ pending }) }),
       sessionId,
     );
-    assert.equal(decision.pending, pending);
+    // 字段一致即可：透传还是重建投影是实现细节，断言不该绑在对象同一性上。
+    assert.deepEqual(decision.pending, pending);
     assert.equal(decision.hasContent, true);
   });
 
@@ -128,6 +129,18 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
     }
   });
 
+  it("根级坏载荷 → null（ok 非 true / 缺位 / 入参非对象）", () => {
+    // /state 读到 401 页、代理折返 HTML、网关给回错误 JSON 时，根级形状先崩：
+    // 这些与「空快照」的区分由信封 schema 的 ok 字面量位承担，单测逐形钉死。
+    assert.equal(parseStateBody({ ok: false }), null, "ok:false 不是成功信封");
+    assert.equal(parseStateBody({}), null, "ok 缺位同样不是成功信封");
+    assert.equal(parseStateBody({ ok: "true" }), null, "字符串 true 不等于字面量 true");
+    assert.equal(parseStateBody(null as never), null, "null 入参");
+    assert.equal(parseStateBody([1, 2] as never), null, "数组不是记录");
+    assert.equal(parseStateBody(42 as never), null, "数字不是记录");
+    assert.equal(parseStateBody("ok" as never), null, "字符串不是记录");
+  });
+
   it("sessions 缺位 → 一份就绪但没有会话的快照（更早版本的载荷）", () => {
     const body = parseStateBody({ ok: true });
     assert.notEqual(body, null);
@@ -136,18 +149,27 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
     }
     assert.equal(body.ok, true);
     assert.equal(body.sessions, undefined, "缺位不补一张空表：补了就无法与「真的没有会话」区分");
+    // 旧载荷的下游语义一并钉住：就绪快照 + 无该会话记录 ⇒ 开关行在场、按没关过判 on、
+    // 区域有内容（showToggleRow 进 hasContent）。这一组默认值是本模块最易漂移的面。
+    const decision = decideDockState(NO_ACTIONS, body, sessionId);
+    assert.equal(decision.rescueKnown, true);
+    assert.equal(decision.showToggleRow, true);
+    assert.equal(decision.toggle, "on");
+    assert.equal(decision.hasContent, true, "开关行在场 ⇒ 区域有内容");
   });
 
-  it("pending 为 null + 无实时动作 + 无开关行 → 区域无内容（组件仍常驻，仅容器隐藏）", () => {
-    const decision = decideDockState(NO_ACTIONS, null, sessionId);
-    assert.equal(decision.hasContent, false);
-  });
-
-  it("快照空窗 + 无 pending，但失败轮可重试 → 容器必须显形", () => {
-    // 动作行的可用性只取决于实时 view（canRetry 来自 failureOfLastTurn），与快照在不在场
-    // 无关。旧判据没把这一位算进 hasContent：容器 hidden，而容器里那三个按钮本该在——
-    // 用户看到的就是「回合失败了却没有任何入口」，尤其是 /state 一直读不通的那种部署。
-    for (const key of ["canEdit", "canRetry", "canContinue"] as const) {
+  it("快照空窗 + 无 pending，但任一实时位亮 → 容器必须显形", () => {
+    // 动作位与本地状态位的可用性只取决于实时 view，与快照在不在场无关。旧判据没把
+    // canRetry 一类算进 hasContent：容器 hidden，而容器里那几个按钮本该在——用户看到
+    // 的就是「回合失败了却没有任何入口」，尤其是 /state 一直读不通的那种部署。
+    // 六位逐一过：canStopReask 在「快照未就绪」一节单独亮过，这里补齐其余五位。
+    for (const key of [
+      "canEdit",
+      "canRetry",
+      "canContinue",
+      "editing",
+      "hostActionFailed",
+    ] as const) {
       const decision = decideDockState(oneAction(key), null, sessionId);
       assert.equal(decision.hasContent, true, `${key} 一位亮 ⇒ 区域有内容`);
       assert.equal(decision.showToggleRow, false, "开关行仍按快照在场与否判，不因动作位而变");

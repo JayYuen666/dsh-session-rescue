@@ -64,8 +64,9 @@ export interface TranscriptView {
   readonly nodes: readonly TranscriptNode[];
   readonly turnEnds: ReadonlyMap<number, number>;
   readonly runningCalls: readonly RunningCall[];
-  running: boolean;
-  removed: boolean;
+  /** 同样来自宿主（useSession 的快照位），一并只读：写操作漏进宿主状态的口子不留例外。 */
+  readonly running: boolean;
+  readonly removed: boolean;
 }
 
 /** 给定轮开始前的边界 seq（上一轮 end；第一轮为 0）。
@@ -114,21 +115,37 @@ export function interruptedAssistantInTurn(
   view: TranscriptView,
   turn: number,
 ): TranscriptNode | null {
+  // 与 turnErrorInTurn 同一条口径：同一轮可能有多条中断记录（宿主重试、重跑），投影要的是
+  // 最后一次的结果。按 seq 显式比大小，不依赖 nodes 的排列顺序。
+  let latest: TranscriptNode | null = null;
   for (const node of view.nodes) {
-    if (node.kind === "assistant" && node.turn === turn && node.interrupted === true) {
-      return node;
+    if (
+      node.kind === "assistant" &&
+      node.turn === turn &&
+      node.interrupted === true &&
+      (latest === null || node.seq > latest.seq)
+    ) {
+      latest = node;
     }
   }
-  return null;
+  return latest;
 }
 
 export function turnErrorInTurn(view: TranscriptView, turn: number): TranscriptNode | null {
+  // 同一轮可能有多条 turn-error（宿主在轮内重试）：取 seq 最大的一条。轮内第一次
+  // 尝试的错误往往已被后续尝试取代，失败投影（classifyFailureOfTurn）要的是
+  // 这一轮最终失败的原因；按 seq 显式比大小，不依赖 nodes 的排列顺序。
+  let latest: TranscriptNode | null = null;
   for (const node of view.nodes) {
-    if (node.kind === "turn-error" && node.turn === turn) {
-      return node;
+    if (
+      node.kind === "turn-error" &&
+      node.turn === turn &&
+      (latest === null || node.seq > latest.seq)
+    ) {
+      latest = node;
     }
   }
-  return null;
+  return latest;
 }
 
 export function maxTokensInTurn(view: TranscriptView, turn: number): boolean {

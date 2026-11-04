@@ -50,12 +50,17 @@ const TURN_START_EVENT = "turn/start";
 
 /** opener 窗口：只为最近这么多回合记住「该回合 start 之后首条 user/message 的 kind」。
  *  不在表里 ⇒ `turnOpenerKind` 交回 undefined ⇒ 调用方回退扫描（宁可多扫一次，
- *  不给出错答案）。 */
-const OPENER_WINDOW = 64;
+ *  不给出错答案）。
+ *
+ *  导出只给 `test/turn-facts.test.ts` 的窗口淘汰用例：那里的回合数与表长都由它算。
+ *  写成字面量时改这个常量会红两条不点名的判据（实测窗口取 70 时红的是「淘汰后不给答案」
+ *  那句、取 2 时红的是 `openers.length`），读不出成因。 */
+export const OPENER_WINDOW = 64;
 
 /** 最近一条 turn/start 的「本回合内」累加器（等价旧扫描在 (S, end] 区间里逐项判的东西）。 */
 export interface StartRow {
-  /** 该回合的轮次号；`null` = 这条 turn/start 不带 turn 字段（那已置 degenerate）。 */
+  /** 该回合的轮次号；`null` = 这条 turn/start 不带 turn 字段——其后任何 turn/end 都
+   *  对不上号，投影交 `aligned: false`，读侧回退扫描。 */
   turn: number | null;
   /** 该 start 之后是否已出现首条 user/message。 */
   seenFirst: boolean;
@@ -385,7 +390,10 @@ export function hasNewerTurn(state: RescueFacts, failedTurn: number): boolean {
  * 交回 `undefined` = 该回合不在 opener 窗口内 ⇒ 调用方回退扫描。
  */
 export function turnOpenerKind(state: RescueFacts, turn: number): string | null | undefined {
-  const row = state.openers.find((entry) => entry.turn === turn);
+  // 取最后一条而不是第一条：折叠侧对同一 turn 是 last-wins（旧行 filter 掉再追加），
+  // 本模块其余读法（foldTurnStart 覆写、scanOpenerKind 倒扫）也都是 last-wins 语义。
+  // findFirst 在「行有重复」的坏状态下会交回过期的 kind 且不触发 undefined 回退。
+  const row = state.openers.findLast((entry) => entry.turn === turn);
   return row === undefined ? undefined : row.kind;
 }
 

@@ -7,6 +7,11 @@
 # 为什么只有 ci.yml：它的探针步骤刻意用单引号包住一段 JS（脚本体里有 JS 模板串，交给 shell
 # 展开就坏了），shellcheck 对「单引号里出现 $」报 SC2016，是误报。其余三份工作流里如果真出现
 # 「单引号里写 $VAR 以为是变量」的实错，仍然要能抓到。
+# 两条隐性约束，改这里之前先看：
+#   1）paths 的键是**逐字路径**，actionlint 不会因为某个键没匹配到任何文件而报警——ci.yml
+#      改名或拆分时，这条豁免会静默失效，SC2016 重新变红且看不出成因；
+#   2）本文件的结构按 actionlint 1.7.12 实测，版本锚点在 .github/workflows/ci.yml 的
+#      actionlint 步骤里（version=…），抬那一处版本时要连带复验这里还认不认这份豁免。
 paths:
   .github/workflows/ci.yml:
     ignore:

@@ -18,9 +18,14 @@
 // 第四组门禁管 registry 侧的元数据与宿主发现面：本包靠 `dsh` 段被宿主认出条目与客户端半，靠
 // `engines`/peer 被版本门校验，靠 keywords/homepage/bugs 被检索与反馈找回。这些字段拼错不会
 // 让任何用例变红，只会让包在 registry 上沉默地难找，或装上去才发现宿主不认识它。
+//
+// 第五组门禁把随包文档的版本声明绑到 manifest：CHANGELOG 顶部条目、两份 README 的宿主窗口
+// 与 dsh 徽章都从 `package.json` 现量。这三处各自手抄一份时，改 manifest 不动文档不会红，
+// 而发布出去的 tarball 会带着一套与安装门不一致的兼容性声明。
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 import { canonicalizeDeclarationSpecifiers, listDeclarations } from "../build-types.mjs";
 
@@ -76,6 +81,7 @@ interface Manifest {
   readonly devDependencies?: Record<string, string>;
   readonly peerDependencies?: Record<string, string>;
   readonly name?: string;
+  readonly version?: string;
   readonly license?: string;
   readonly keywords?: readonly string[];
   readonly homepage?: string;
@@ -89,12 +95,14 @@ interface Manifest {
   };
 }
 
-/** 一条 `files` 模式的两种形态。 */
+/** 一条 `files` 模式的三种形态。 */
 type PatternShape =
   /** 目录或后缀模式：列该目录（可递归）下以 `extension` 结尾的文件。 */
   | { readonly kind: "glob"; readonly dir: string; readonly extension: string }
   /** 精确文件名：带点号又无通配的条目是**文件名**（`host.js`），不是后缀过滤。 */
-  | { readonly kind: "exact"; readonly file: string };
+  | { readonly kind: "exact"; readonly file: string }
+  /** 本门禁的语法之外（`!` 取反、`?`、`[]`）：按字面目录去找会得到空集。 */
+  | { readonly kind: "unknown"; readonly entry: string };
 
 /**
  * 把 `files` 的一条模式归类。本仓实际用到的只有三种写法：裸文件名、目录名、`dir/*.ext`。
@@ -103,23 +111,34 @@ type PatternShape =
  * `files` 里列的每个构建产物都匹配不上任何条目——`files` 覆盖这道断言的集合会空掉，门禁
  * 自己先失效。实测报出来是「main 指向 host.js，但它不在 files 覆盖范围内」。
  *
+ * 认不出的写法归 `unknown` 而不是当作「没有匹配」：`!lib`、`src/?oo`、`lib/[xy]` 这类
+ * minimatch 语法若按字面目录去找，展开集会静默变成空集，门禁于是在最该响的时候安静。
+ *
  * @param entry - `files` 数组里的一项
- * @returns 该模式要列的目录与后缀过滤，或一个精确文件名
+ * @returns 该模式要列的目录与后缀过滤，一个精确文件名，或 `unknown`
  */
 function shapeOf(entry: string): PatternShape {
-  const dot = entry.lastIndexOf(".");
-  const star = entry.indexOf("*");
+  // `./lib` 与 `lib` 在 npm 眼里是同一条写法：不归一化就落到「带点号 ⇒ 精确文件名」那一档，
+  // 于是既不展开也不被字符串匹配抓住，整条目录写法的门禁静默放行。
+  const normalized = entry.replace(/^\.\//u, "");
+  if (normalized.startsWith("!") || /[?[\]]/u.test(normalized)) {
+    return { kind: "unknown", entry };
+  }
+  const star = normalized.indexOf("*");
   if (star !== -1) {
+    // 点在 `*` 之后才是后缀过滤；`src/**` 这类没有后缀的通配要按「该目录下全部文件」处理，
+    // 否则 slice 出的 extension 是 "/"，什么都不匹配，展开集恒空。
+    const dot = normalized.lastIndexOf(".");
     return {
       kind: "glob",
-      dir: entry.slice(0, star).replace(/\/$/u, ""),
-      extension: entry.slice(dot),
+      dir: normalized.slice(0, star).replace(/\/$/u, "") || ".",
+      extension: dot > star ? normalized.slice(dot) : "",
     };
   }
-  if (!entry.includes(".")) {
-    return { kind: "glob", dir: entry, extension: "" };
+  if (!normalized.includes(".")) {
+    return { kind: "glob", dir: normalized, extension: "" };
   }
-  return { kind: "exact", file: entry };
+  return { kind: "exact", file: normalized };
 }
 
 /**
@@ -131,6 +150,9 @@ function shapeOf(entry: string): PatternShape {
 async function expand(shape: PatternShape): Promise<string[]> {
   if (shape.kind === "exact") {
     return existsSync(path.join(pkgDir, shape.file)) ? [shape.file] : [];
+  }
+  if (shape.kind === "unknown") {
+    return [];
   }
   const dir = path.join(pkgDir, shape.dir);
   // 目录不存在时按空集合处理：`types/` 在 .gitignore 里，fresh clone 没跑 build:types 时
@@ -192,7 +214,11 @@ function entryFiles(manifest: Manifest): readonly { label: string; file: string 
  * 于是漏写进 `files` 也没人发现：registry 页面看不出任何异常，只有真去找那份文件的人会撞到。
  * 下面的「包根每份 .md 都在发布面」把这一类一次性封住，不靠这份清单枚举得完整。
  */
-const ALWAYS_SHIPPED = ["package.json", "README.md", "README.zh-CN.md", "LICENSE"];
+/** 两份语言 README 的文件名：发布面清单与文档同源门禁共用，避免同一字面量抄三遍。 */
+const README_EN = "README.md";
+const README_ZH = "README.zh-CN.md";
+
+const ALWAYS_SHIPPED = ["package.json", README_EN, README_ZH, "LICENSE"];
 
 /** 声明入口：`types` 字段与 `exports["."].types` 都指向它，宿主侧的类型面由它落地。 */
 const DECLARATION_ENTRY = "types/host.d.ts";
@@ -217,6 +243,20 @@ const PKG_NAME = "@jayyuen66/dsh-session-rescue";
  * 声明，`host.ts` / `lib/x.ts` 指进来照样红。
  */
 const SOURCE_SUFFIX = /(?<!\.d)\.tsx?$/u;
+
+/** types/ 声明产物的正文（两条声明内容检查共用同一段读取）。 */
+async function readTypeDeclarations(): Promise<{ file: string; text: string }[]> {
+  const produced = await listDeclarations(path.join(pkgDir, "types"), "");
+  // 空集在这里就断掉：两条内容检查都是 `for` 循环遍历这份清单，清单为空时它们逐字节
+  // 表现为「通过」——实测过：把读取器改成返回空数组，20 条用例全绿，禁面词可以随便进声明。
+  expect(produced.length, "types/ 没产出声明：两条声明内容检查会空转").toBeGreaterThan(0);
+  return Promise.all(
+    produced.map(async (file) => ({
+      file,
+      text: await readFile(path.join(pkgDir, "types", file), "utf8"),
+    })),
+  );
+}
 
 /**
  * 读 manifest 与它应当发出去的文件清单。
@@ -261,9 +301,29 @@ async function collectSources(dir: string, prefix: string): Promise<string[]> {
   return groups.flat();
 }
 
+/** 一行是否以注释记号开头（行首 `//`/`/*`/`*`/`#`）。 */
+function isCommentLine(line: string): boolean {
+  return /^\s*(?:\/\/|\/\*|\*|#)/u.test(line);
+}
+
+/** 块注释覆盖到的行号（以 0 起）：续行不带 `*` 前缀时，那一行仍然是注释正文。 */
+function blockCommentRows(text: string): Set<number> {
+  const rows = new Set<number>();
+  for (const match of text.matchAll(/\/\*[\s\S]*?\*\//gu)) {
+    const at = match.index;
+    const from = text.slice(0, at).split("\n").length;
+    const to = text.slice(0, at + match[0].length).split("\n").length;
+    for (let line = from; line <= to; line += 1) {
+      rows.add(line - 1);
+    }
+  }
+  return rows;
+}
+
 /**
- * 取一段文本里属于注释或文档的行。文档（`.md`）整体算；代码只取注释行，免得把字符串
- * 字面量里的数据（日期夹具、示例路径）误判成注释噪音。
+ * 取一段文本里属于注释或文档的行。文档（`.md`）整体算；代码只取注释，免得把字符串
+ * 字面量里的数据（日期夹具、示例路径）误判成注释噪音。注释的三种写法都进门：行首注释、
+ * 行尾注释，以及多行块注释里不带 `*` 前缀的正文行。
  *
  * @param file - 相对包根的文件名，用于决定判定口径
  * @param text - 文件全文
@@ -273,7 +333,23 @@ function commentLines(file: string, text: string): string[] {
   if (file.endsWith(".md")) {
     return text.split("\n");
   }
-  return text.split("\n").filter((line) => /^\s*(?:\/\/|\/\*|\*|#)/u.test(line));
+  const lines = text.split("\n");
+  const block = blockCommentRows(text);
+  const picked: string[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (isCommentLine(line) || block.has(index)) {
+      picked.push(line);
+    } else {
+      // 行尾注释也要进门：只认行首注释时，`const x = 1; // 2026-01-01 修过` 这类写法
+      // 能带着禁面词绕过去。`://` 不是注释（URL），先替换占位再找行尾 `//`。
+      const stripped = line.replaceAll("://", "∶∶");
+      const at = stripped.indexOf("//");
+      if (at !== -1) {
+        picked.push(stripped.slice(at + 2));
+      }
+    }
+  }
+  return picked;
 }
 
 describe("发布形态", () => {
@@ -330,13 +406,21 @@ describe("发布形态", () => {
     // 声明由 build-types.mjs 从 host.ts 与 lib/*.ts emit 出来，所以「声明过期」的**充要**表现就是
     // 这批输入里至少有一个比声明新——build:types 没跑，或跑了但失败。不按导出名比：那要先
     // import 产物，于是这道门反过来依赖 build 已经跑过，而单跑 `vitest` 时产物可能不存在。
-    const declaredAt = statSync(path.join(pkgDir, DECLARATION_ENTRY)).mtimeMs;
-    const sources = [
-      "host.ts",
-      ...readdirSync(path.join(pkgDir, "lib"))
-        .filter((name) => name.endsWith(".ts"))
-        .map((name) => path.join("lib", name)),
-    ];
+    // 声明入口在 .gitignore 里：fresh clone / 只跑 vitest 时它不存在，这条断言先红并
+    // 指到修复命令，而不是让 statSync 以裸 ENOENT 收场。
+    const declarationPath = path.join(pkgDir, DECLARATION_ENTRY);
+    assert.ok(
+      existsSync(declarationPath),
+      `${DECLARATION_ENTRY} 不存在：请先运行 npm run build:types（新鲜度门读的是它的 mtime）`,
+    );
+    const declaredAt = statSync(declarationPath).mtimeMs;
+    // 输入面按 tsconfig 的口径递归收集（lib/**/*.ts），只枚举 lib 顶层时，lib 下
+    // 新增子目录的源文件改了不会让这道门红——静默失效。
+    const sources = readdirSync(path.join(pkgDir, "lib"), { recursive: true, encoding: "utf8" })
+      .map((name) => name.split(path.sep).join("/"))
+      .filter((name) => name.endsWith(".ts"))
+      .map((name) => path.join("lib", name));
+    sources.push("host.ts");
     const stale = sources.filter((rel) => statSync(path.join(pkgDir, rel)).mtimeMs > declaredAt);
     expect(
       stale,
@@ -349,15 +433,8 @@ describe("发布形态", () => {
     // （`typeof import("/Users/…/node_modules/…")`）。那是构建机的家目录，不该发出去；
     // `.pnpm/` 是 pnpm 的内容寻址目录名，出现即说明类型从硬链接路径解析来，消费方在自己
     // 机器上解析不到。
-    const produced = await listDeclarations(path.join(pkgDir, "types"), "");
     const forbidden: readonly RegExp[] = [/\/(?:Users|home)\//u, /\.pnpm[\\/]/u];
-    const texts = await Promise.all(
-      produced.map(async (file) => ({
-        file,
-        text: await readFile(path.join(pkgDir, "types", file), "utf8"),
-      })),
-    );
-    for (const { file, text } of texts) {
+    for (const { file, text } of await readTypeDeclarations()) {
       for (const pattern of forbidden) {
         expect(pattern.test(text), `types/${file} 命中 ${pattern}`).toBe(false);
       }
@@ -368,14 +445,7 @@ describe("发布形态", () => {
     // build-types.mjs 的存在理由：源码按 NodeNext 写 `./lib/x.ts`，tsc 会把说明符原样抄进
     // .d.ts，而包里没有 `lib/x.ts`（只有 `types/lib/x.d.ts`）。留着 `.ts` 后缀，消费方解析
     // `types/host.d.ts` 就指向一个不存在的文件。
-    const produced = await listDeclarations(path.join(pkgDir, "types"), "");
-    const texts = await Promise.all(
-      produced.map(async (file) => ({
-        file,
-        text: await readFile(path.join(pkgDir, "types", file), "utf8"),
-      })),
-    );
-    for (const { file, text } of texts) {
+    for (const { file, text } of await readTypeDeclarations()) {
       expect(
         /from\s+["']\.{1,2}\/[^"']*\.ts["']/u.test(text),
         `types/${file} 的相对说明符仍指源码 .ts：请运行 npm run build:types`,
@@ -440,8 +510,11 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     const { manifest } = await readSurface();
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
     // 「哪个包钉成了什么」，比逐条抛错更好读。
+    // 锚定全串：旧式只验前缀，稳定版（0.2.2）会被判「没精确钉」而误红，且
+    // 「0.2.2-plus 尾巴」这类非精确形反而放行。
     const ranged = Object.entries(manifest.devDependencies ?? {}).filter(
-      ([name, range]) => name.startsWith(DSH_PREFIX) && !/^\d+\.\d+\.\d+-/u.test(range),
+      ([name, range]) =>
+        name.startsWith(DSH_PREFIX) && !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/u.test(range),
     );
     expect(ranged, "这些 dsh-* 开发依赖没有精确钉住版本").toStrictEqual([]);
   });
@@ -546,14 +619,36 @@ describe("registry 与宿主发现面", () => {
   });
 
   it("files 不打包源码面与测试面（发布的是产物，源码由仓库读）", async () => {
-    // 与「入口指产物」互补：那条管入口指向，这条管整目录别被顺手带上。`lib` 或 `src` 写进
-    // files 会把 TS 源面发出去，消费方 profile 里多出一堆没人解析的文件，而仓库才是源码真源。
+    // 与「入口指产物」互补：那条管入口指向，这条管整目录别被顺手带上。判据按**展开后
+    // 的实际文件**与源码后缀求交，而不是只匹配条目字符串——`src/**`、`./lib`、`src/*.ts`
+    // 这类等价写法在字符串匹配下能逃逸，展开口径与上面「入口覆盖」用的是同一套。
     const { manifest } = await readSurface();
-    const sources = (manifest.files ?? []).filter(
-      (entry) =>
-        entry === "src" || entry === "lib" || entry === "test" || SOURCE_SUFFIX.test(entry),
+    const escaped: { entry: string; file: string }[] = [];
+    for (const entry of manifest.files ?? []) {
+      if (entry === "src" || entry === "lib" || entry === "test" || SOURCE_SUFFIX.test(entry)) {
+        escaped.push({ entry, file: entry });
+      }
+    }
+    // 读不懂的写法若按字面目录去找，展开集是空集 ⇒ 这道门会在最该响的时候安静，所以点名它。
+    const unreadable = (manifest.files ?? []).flatMap((entry) => {
+      const shape = shapeOf(entry);
+      return shape.kind === "unknown" ? [shape.entry] : [];
+    });
+    expect(unreadable, "这些 files 写法在本门禁的语法之外（`!` 取反或 `?`/`[]`）").toStrictEqual(
+      [],
     );
-    expect(sources, "这些 files 条目是源码面").toStrictEqual([]);
+    const globs = (manifest.files ?? [])
+      .map((entry) => shapeOf(entry))
+      .filter((shape) => shape.kind === "glob");
+    const expandedLists = await Promise.all(globs.map((shape) => expand(shape)));
+    const expanded = expandedLists.flat();
+    for (const file of expanded) {
+      // lookbehind 已排除 .d.ts
+      if (SOURCE_SUFFIX.test(file)) {
+        escaped.push({ entry: "(glob 展开)", file });
+      }
+    }
+    expect(escaped, "这些 files 条目（或其展开）会把源码面发出去").toStrictEqual([]);
   });
 });
 
@@ -577,6 +672,99 @@ describe("注释与文档没有内部指涉", () => {
           ).toBe(false);
         }
       }
+    }
+  });
+});
+
+/** README 与 CHANGELOG 都随包发布；它们的版本声明必须从 manifest 现量，不能另抄一份。 */
+const DOC_FILES = [README_EN, README_ZH] as const;
+const CHANGELOG_FILE = "CHANGELOG.md";
+
+/**
+ * 解 shields 徽章里的 dsh 段：`^` 编成 `%5E`，单连字符编成 `--`，空格编成 `%20`。
+ * 本仓窗口里没有下划线，所以不需要 shields 的 `_` / `__` 那套转义。
+ *
+ * @param encoded - 徽章 URL 里 `dsh-` 与 `-658EFF` 之间的那一截
+ * @returns 可读的版本范围
+ */
+function decodeBadgeVersion(encoded: string): string {
+  return encoded
+    .replaceAll("%5E", "^")
+    .replaceAll("%7C", "|")
+    .replaceAll("%20", " ")
+    .replaceAll("--", "-");
+}
+
+/**
+ * 读包根的一份文本文件。
+ *
+ * @param relative - 相对包根的路径
+ * @returns 文件全文
+ */
+async function readText(relative: string): Promise<string> {
+  return readFile(path.join(pkgDir, relative), "utf8");
+}
+
+/** 一次读回两份 README 的正文，供两条同源断言复用。 */
+async function readDocs(): Promise<{ file: string; text: string }[]> {
+  return Promise.all(DOC_FILES.map(async (file) => ({ file, text: await readText(file) })));
+}
+
+describe("文档与版本同源", () => {
+  it("changelog 顶部条目就是 package.json 的 version", async () => {
+    const { manifest } = await readSurface();
+    if (manifest.version === undefined) {
+      throw new Error("package.json 缺 version");
+    }
+    const changelog = await readText(CHANGELOG_FILE);
+    const headings = changelog
+      .split("\n")
+      .filter((line) => line.startsWith("## "))
+      .map((line) => line.slice(3).trim());
+    expect(headings.length, "CHANGELOG 没有任何版本条目").toBeGreaterThan(0);
+    expect(headings[0], "CHANGELOG 顶部版本落后于 package.json").toBe(manifest.version);
+  });
+
+  it("两份 readme 都写明 engines.dsh 的完整窗口", async () => {
+    const { manifest } = await readSurface();
+    const window = manifest.engines?.["dsh"];
+    if (window === undefined) {
+      throw new Error("缺 engines.dsh：README 没有可对照的真源");
+    }
+    const docs = await readDocs();
+    for (const { file, text } of docs) {
+      expect(text, `${file} 没写 engines.dsh 的窗口 ${window}`).toContain(window);
+    }
+  });
+
+  it("readme 的 dsh 徽章解码后等于窗口的第一条", async () => {
+    const { manifest } = await readSurface();
+    const window = manifest.engines?.["dsh"];
+    if (window === undefined) {
+      throw new Error("缺 engines.dsh：徽章没有可对照的真源");
+    }
+    const [firstPart] = window.split("||");
+    const first = firstPart?.trim();
+    if (first === undefined) {
+      throw new Error("engines.dsh 的窗口为空：徽章没有可对照的第一条");
+    }
+    const docs = await readDocs();
+    for (const { file, text } of docs) {
+      const badges = text.split("\n").filter((line) => line.includes("img.shields.io/badge/dsh-"));
+      expect(badges).toHaveLength(1);
+      const [badge] = badges;
+      if (badge === undefined) {
+        throw new Error(`${file} 里 dsh 徽章应恰好一枚`);
+      }
+      const match = /badge\/dsh-(?<encoded>[^?"]+)-658EFF/u.exec(badge);
+      if (match?.groups === undefined) {
+        throw new Error(`${file} 的 dsh 徽章 URL 解析不出编码段`);
+      }
+      const { encoded } = match.groups;
+      if (encoded === undefined) {
+        throw new Error(`${file} 的 dsh 徽章 URL 里没有版本编码段`);
+      }
+      expect(decodeBadgeVersion(encoded), `${file} 的 dsh 徽章与窗口第一条不一致`).toBe(first);
     }
   });
 });

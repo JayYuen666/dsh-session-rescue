@@ -9,11 +9,21 @@ node_modules/
 /coverage/
 /.tmp/
 
-# 本地环境与凭据：这类文件一旦被 `git add -A` 扫进去就是泄漏，规则兜在最前面。
+# 本地环境与凭据：这类文件一旦被 `git add -A` 扫进去就是泄漏。这一族集中成组放在这里，
+# 不依赖顺序，也不与上面的构建产物规则混写。
 .env
 .env.*
+# 样板要能入库：`.env.*` 连 `.env.example` / `.env.sample` / `.env.template` 一起挡掉了，
+# 而新人给设置卡或 CI 配环境时正是要靠这一份样板——被静默跳过时 `git status` 不报任何东西。
+!.env.example
+!.env.sample
+!.env.template
 *.pem
 *.key
+# 公钥证书与 TLS 夹具是「测试可复现」的一部分，需要能显式加进来；上面两条不带前导斜杠，
+# 在任意层级生效，所以这里按目录反向放行——放行的是夹具目录，不是任何位置的私钥。
+!test/fixtures/**/*.pem
+!test/fixtures/**/*.crt
 
 # 手工打包留下的 tarball（`pnpm pack` 与 smoke 回路都会在包根生成）。
 /*.tgz

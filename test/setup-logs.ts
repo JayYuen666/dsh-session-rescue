@@ -6,13 +6,17 @@
 //   ② 带别家标签的日志出现在本包测试里也红（装配范围错了）；
 //   ③ 生产侧一行不改：级别、文案、时机全部照旧，账本只在测试进程里接管输出。
 // 用例要看日志内容时用 logged()/loggedText() 取，断言写在用例里。
+// 账本按**串行用例**建模（records/testFailed 是模块级单例、console 接管是进程级状态）：
+// 本包测试禁用 test.concurrent / --sequence.concurrent——并发用例会共用同一份 records，
+// 日志串用例且先收尾的 afterEach 会摘走另一条用例的接管。真要并发化得先把 records
+// 换成按用例上下文隔离的形态，那是一次单独的改造。
 import { afterEach, beforeEach, onTestFailed } from "vitest";
 import assert from "node:assert/strict";
 
-import { claimsLog } from "./log-templates.ts";
+import { claimsLog, LOG_PREFIX } from "./log-templates.ts";
 
-/** 本包标签前缀，如 `[session-rescue]`。 */
-const PKG_PREFIX = "[session-rescue]";
+/** 本包标签前缀（与骨架账本同源，见 log-templates.ts 的导出）。 */
+const PKG_PREFIX = LOG_PREFIX;
 
 /** 插件会用到的 console 级别（联合类型取属性，避免以字符串索引 Console）。
  *  带上 debug：`log-templates.test.ts` 的源码扫描认这一级，接管面不跟上的话，
@@ -25,6 +29,9 @@ export interface LogRecord {
   level: LogLevel;
   text: string;
   extra: unknown[];
+  /** 首参是否字符串：本包骨架都是模板字面量（字符串首参），非字符串首参（Error/对象）
+   *  落进 String() 会变成 `[object Object]` 一类摘要，三段分类会把它错报成「没打标签」。 */
+  stringFirst: boolean;
 }
 
 let records: LogRecord[] = [];
@@ -43,7 +50,12 @@ function spyLevel(level: LogLevel): void {
     // 的值——把它们也拼进来会让「整条骨架对齐」这条认领判据永远对不上（骨架结尾的标点之后
     // 还会多出值）。落盘的一律是首参，其余实参留在 extra 里（堆栈就藏在那儿）。
     const [first, ...rest] = args;
-    records.push({ level, text: String(first).replaceAll(/\s+/gu, " "), extra: rest });
+    records.push({
+      level,
+      text: String(first).replaceAll(/\s+/gu, " "),
+      extra: rest,
+      stringFirst: typeof first === "string",
+    });
   };
 }
 
@@ -75,23 +87,45 @@ beforeEach(() => {
   });
 });
 
+/** 断言消息里的单条读数：级别 + 首参摘要 + 其余实参的个数与首个。
+ *  `String(first)` 会丢掉结构（Error 变成 "Error: …"、对象变成 "[object Object]"），
+ *  而真正的原因常常在其余实参里（堆栈就在那儿），所以这里把它一并带进消息。 */
+function describeRecord(record: LogRecord): string {
+  const rest =
+    record.extra.length === 0
+      ? ""
+      : `（另有 ${String(record.extra.length)} 个实参，首个：${String(record.extra[0]).slice(0, 120)}）`;
+  return `${record.level}: ${record.text.slice(0, 120)}${rest}`;
+}
+
 /** 三条日志契约的判定体。单独抽出来是为了让它在两种时机都能跑（见下面两处调用）：
  *  正常收尾的 afterEach，以及「用例已经失败」那条路径。 */
 function assertLogContract(): void {
-  const ours = records.filter((record) => record.text.startsWith(PKG_PREFIX));
-  const strangers = records
+  // 非字符串首参单独点名：console.error(new Error(…)) / console.log(obj) 这类调用的
+  // String() 摘要既不以标签开头也不像人话，混进 untagged 只会给出误导性的「补前缀」。
+  const nonStringFirst = records
+    .filter((record) => !record.stringFirst)
+    .map((record) => describeRecord(record));
+  const classified = records.filter((record) => record.stringFirst);
+  const ours = classified.filter((record) => record.text.startsWith(PKG_PREFIX));
+  const strangers = classified
     .filter((record) => record.text.startsWith("["))
     .filter((record) => !record.text.startsWith(PKG_PREFIX))
-    .map((record) => record.text.slice(0, 120));
+    .map((record) => describeRecord(record));
   // 一条连标签都没写的日志两头不落：不以 PKG_PREFIX 开头，所以不进 ours（躲过骨架账本）；
   // 也不以 `[` 开头，所以不进 strangers（躲过装配范围判据）。两条断言都读不到它。
-  const untagged = records
+  const untagged = classified
     .filter((record) => !record.text.startsWith("["))
-    .map((record) => record.text.slice(0, 120));
+    .map((record) => describeRecord(record));
   const unclaimed = ours
     .filter((record) => !claimsLog(record.text))
-    .map((record) => record.text.slice(0, 120));
+    .map((record) => describeRecord(record));
 
+  assert.deepEqual(
+    nonStringFirst,
+    [],
+    "这些 console.* 调用的首参不是字符串（Error/对象/格式串）：算子日志必须以带标签的字符串首参打印",
+  );
   assert.deepEqual(strangers, [], "本包测试里出现了别家插件的日志：装配范围错了");
   assert.deepEqual(
     untagged,

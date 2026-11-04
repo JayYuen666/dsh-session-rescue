@@ -29,7 +29,7 @@ function isVolatileField(node: SchemaNode): boolean {
 export interface SchemaNode {
   type?: string;
   meta?: Record<string, unknown>;
-  dict?: Record<string, SchemaNode>;
+  dict?: Record<string, SchemaNode> | null;
 }
 
 /** 一次 settings.configure() 的调用记录（页面策略断言用）。 */
@@ -43,12 +43,25 @@ export interface ConfigureCall {
  *  在**零个字段**上成立，而 schemastery 换成别的形状（Config 不再是带 dict 的 object schema）
  *  正是它会发生的时候——那时门禁会安静地全绿，而卡片可能一个字段都没接上。 */
 export function configDict(): Record<string, SchemaNode> {
-  // 解构而不是直接取成员：`plugin.Config.dict` 这条读法被判 prefer-destructuring，
-  // 而这里要的也只是 dict 一个字段。
-  const { dict } = plugin.Config as unknown as SchemaNode;
+  // 先确认 Config 在位再解构：默认导出形状变了时，`const { dict } = undefined` 的
+  // TypeError 会把本函数要给的「schema 形状变了」诊断整个吞掉。
+  const config = plugin.Config as unknown as SchemaNode | null | undefined;
+  // 只判 `!== undefined` 会把 `Config: null` 放到下一句的解构里，抛的还是那个不带诊断的 TypeError。
   assert.ok(
-    dict !== undefined && Object.keys(dict).length > 0,
+    config !== undefined && config !== null,
+    "plugin 默认导出上没有 Config：插件契约形状变了",
+  );
+  // 解构而不是直接取成员：`plugin.Config.dict` 这条读法被判 prefer-destructuring，
+  // 而这里要的也只是 dict 一个字段。dict 缺失与空字典分开报：前者是形状变了，
+  // 后者会让「每个 schema 字段都被覆盖」的断言在零个字段上恒真。
+  const { dict } = config;
+  assert.ok(
+    dict !== undefined && dict !== null,
     "plugin.Config 上没有 dict：schemastery 的 object schema 形状变了，配置面门禁无从比对",
+  );
+  assert.ok(
+    Object.keys(dict).length > 0,
+    "plugin.Config 的 dict 是空字典：配置面门禁会在零个字段上恒真",
   );
   return dict;
 }
@@ -59,6 +72,15 @@ export function configDict(): Record<string, SchemaNode> {
  * createVolatile 也只有一个 get()，见 harness vendor/cosmokit/src/volatile.ts）。
  * @param read - 现读设置活值（mock 的 scope.set 会整体换表，故这里传函数而不是快照）。
  */
+/** 两条分支共用的读取器：缺键（undefined）回落 schema default，显式 null 原样保留。
+ *  真宿主在装载期已按 `.default()` 填满（host.ts settingsOf 的注释「故交进来的引用
+ *  恒有值」），桩件的 read 表漏键时读 undefined 却照绿，正是本文件要防的漂移形态。
+ *  `??` 做不到这件事——它会把显式 null 也当成缺省换掉。 */
+function readField(read: () => Record<string, unknown>, key: string, fallback: unknown): unknown {
+  const value = read()[key];
+  return value === undefined ? fallback : value;
+}
+
 function refsOf(read: () => Record<string, unknown>): Record<string, unknown> {
   // volatile 字段给稳定引用（值可变）；**非 volatile**（请求级重试三值）给普通值
   // 快照 —— 真宿主从不给它们 .get()，给错了插件就读到一个函数。
@@ -68,8 +90,8 @@ function refsOf(read: () => Record<string, unknown>): Record<string, unknown> {
       // 不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本桩件里
       // 被判成非 volatile，而宿主照样把它投影进表单 ⇒ 测试绿、卡片少一项。
       isVolatileField(field)
-        ? [key, { get: () => read()[key] }]
-        : [key, read()[key] ?? field.meta?.["default"]],
+        ? [key, { get: () => readField(read, key, field.meta?.["default"]) }]
+        : [key, readField(read, key, field.meta?.["default"])],
     ),
   );
 }
@@ -95,6 +117,15 @@ export function schemaDefaults(): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(configDict()).map(([key, field]) => [key, field.meta?.["default"]]),
   );
+}
+
+/** volatile 字段名清单：宿主会为它们各发一枚 Volatile 引用。`refsOf` 里两条分支共用
+ *  同一个读取器（缺键回落 schema 默认、显式 null 原样保留），所以 read 表漏键不再读到
+ *  undefined，而是读到与宿主装载期一致的那份默认值。 */
+export function volatileFieldNames(): string[] {
+  return Object.entries(configDict())
+    .filter(([, field]) => isVolatileField(field))
+    .map(([key]) => key);
 }
 
 /**
@@ -138,6 +169,16 @@ export function patchEntryId(): string {
   const pattern = new RegExp(
     `^\\s*-\\s+id:\\s*(?<id>\\S+)\\s*$(?:(?!^[ \\t]*-[ \\t]+id:)[\\s\\S])*?^\\s*name:\\s*["']?${escaped}["']?\\s*$`,
     "mu",
+  );
+  // 操作键也钉住：宿主的 config-document schema 里这一层只有 `insert` 一个属性
+  // （deepseek-harness/packages/boot/app-boot/src/config-schema/document.ts 的
+  // `properties: { insert: ref('entryList') }`，`compatibility-preflight.ts` 交回的就是
+  // `[{ insert: rows }]`）。键名拼错的形状是「层栈里没有这一条、settings 命名空间随之失效」，
+  // 而本文件其余判据都在比同一个解析结果，读不出这件事。
+  assert.match(
+    yml,
+    /^- insert:[ \t]*$/mu,
+    "cordis.patch.yml 顶层不是独占一行的 `- insert:` 操作项：宿主按那个键装载层条目",
   );
   const match = pattern.exec(yml);
   const id = match?.groups?.["id"];

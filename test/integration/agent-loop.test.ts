@@ -128,18 +128,15 @@ async function boot(
           }),
     });
     await ctx.plugin(AgentLoop, { agents: [] });
-    await ctx.plugin(
-      plugin as never,
-      {
-        resumeDelayMs: 1000,
-        resumeCooldownMs: 5000,
-        continueDelayMs: 500,
-        continueCooldownMs: 5000,
-        unfinishedDelayMs: 1000,
-        unfinishedCooldownMs: 5000,
-        ...options.config,
-      } as never,
-    );
+    await ctx.plugin(plugin, {
+      resumeDelayMs: 1000,
+      resumeCooldownMs: 5000,
+      continueDelayMs: 500,
+      continueCooldownMs: 5000,
+      unfinishedDelayMs: 1000,
+      unfinishedCooldownMs: 5000,
+      ...options.config,
+    });
     const agent = await ctx.agentLoop.create(
       brandString<SessionId>(`rescue-${sequence.join("-")}`),
       {
@@ -169,7 +166,8 @@ async function boot(
   }
 }
 
-/** 在插件之前挂一个 `agent/request-error` 观察者：cordis 首个注册者最外层。
+/** 在插件**之后**挂一个 `agent/request-error` 观察者：cordis 首个注册者最外层，
+ *  插件的处理端在外面——本探针只在插件让位调用 next() 时才被调用到。
  *  这里只记录宿主交回的 `retryPolicy` 位，然后 next() 原样放行，不参与决策。 */
 function probeRequestError(ctx: Context, sink: { policy: unknown }[]): void {
   const scoped = ctx as unknown as {
@@ -226,19 +224,29 @@ describe("真 AgentLoop 下的自动续跑", () => {
   afterEach(async () => {
     const current = rig;
     rig = undefined;
-    if (current !== undefined) {
-      await current.ctx.fiber.dispose();
-      await current.server.close();
+    try {
+      if (current !== undefined) {
+        try {
+          await current.ctx.fiber.dispose();
+        } finally {
+          await current.server.close();
+        }
+      }
+    } finally {
+      vi.unstubAllEnvs();
     }
-    vi.unstubAllEnvs();
   });
 
   it("限流失败后自动补一条救援消息，下一轮真跑成功", async () => {
     rig = await boot(["rate_limit", "success"]);
-    const { agent } = rig;
+    const { agent, server } = rig;
     await send(agent, "first task");
     // 回合失败后插件armed 定时器（本处取 schema 下限 1000ms）；等它 fire 并跑完第二轮。
-    await expect(waitFor(() => rescueMessages(agent).length > 0, within(6000))).resolves.toBe(true);
+    // 锚点必须含「第二轮已发出」：救援消息在 followup 投递时就落盘，而第二轮请求是
+    // 异步的——只等消息落盘就 whenIdle，慢机上会在 agent 尚未起跑时提前 resolve。
+    await expect(
+      waitFor(() => rescueMessages(agent).length > 0 && server.requests.length >= 2, within(6000)),
+    ).resolves.toBe(true);
     await agent.whenIdle();
     expect(rig.server.requests).toHaveLength(2);
     expect(agent.status).toBe("idle");
@@ -279,9 +287,11 @@ describe("真 AgentLoop 下的自动续跑", () => {
     expect(rig.failures[0]?.failure.message).toBe("mock insufficient quota");
     // 判据：QUOTA 是官方码表里「额度到了」的机器码，重试不可能变好；429 只是它的
     // HTTP 外衣（provider 用同一个状态码表达余额耗尽与分钟限速），所以必须由 code 路由。
-    await expect(waitFor(() => rescueMessages(agent).length > 0, within(3000))).resolves.toBe(
-      false,
-    );
+    // 插件对 QUOTA 的拒绝是「不武装定时器」，没有任何事件可等——否定判据只能按窗
+    // 锚定：失败时刻 + 延迟窗（1000ms）+ 余量之后仍无救援，才不是「还没轮到」。
+    const failedAt = Date.now();
+    await expect(waitFor(() => Date.now() - failedAt > 1500, within(10_000))).resolves.toBe(true);
+    expect(rescueMessages(agent)).toHaveLength(0);
     expect(rig.server.requests).toHaveLength(1);
   }, 60_000);
 
@@ -291,7 +301,13 @@ describe("真 AgentLoop 下的自动续跑", () => {
     // 「宿主已解析出策略 ⇒ 重试归官方 llm-retry」这条判据成立。两条推论只有真宿主
     // 能给：本包阶梯不是这个适配器的兜底路径（那条路只有单测能造），而 profile 若没装
     // dsh-llm-retry，一次 429 会零次重发直接终态。
-    rig = await boot(["rate_limit", "success"], { withAdapterPolicy: false });
+    // resumeDelayMs 抬到 30s：回合级续跑在本用例里仍会武装（那是设计内行为），
+    // 抬高延迟让「请求条数 === 1」的断言不再与 1s 的定时器赛跑——慢机上断言
+    // 只要落在延迟窗内就是确定的。
+    rig = await boot(["rate_limit", "success"], {
+      withAdapterPolicy: false,
+      config: { resumeDelayMs: 30_000 },
+    });
     const { agent } = rig;
     const observed: { policy: unknown }[] = [];
     probeRequestError(rig.ctx, observed);

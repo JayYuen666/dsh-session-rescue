@@ -10,7 +10,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fc from "fast-check";
-import { ResumeScheduler } from "../../lib/resume-scheduler.ts";
+import { ResumeScheduler, MAX_SESSIONS } from "../../lib/resume-scheduler.ts";
 import type {
   FailureDecision,
   PendingRecord,
@@ -18,8 +18,9 @@ import type {
   SessionSnapshot,
 } from "../../lib/resume-scheduler.ts";
 
-/** 与实现同一道闸门的会话数上限（这里当作**判据**用：越满越要证明空闲判定没错）。 */
-const MAX_SESSIONS = 200;
+// 容量上限用实现导出的 MAX_SESSIONS（顶部 import），这里当作**判据**用：越满越要
+// 证明空闲判定没错。硬编码 200 在实现侧调参时会静默失去意义（越界分支不进或每步
+// 误进，都不报错）。
 const KINDS: RescueKind[] = ["resume", "continue", "unfinished"];
 /** 单个 kind 在任何指令里被给到的最大配额（不变量用它判「计数不得越界」）。 */
 const MAX_QUOTA_SEEN = 4;
@@ -39,6 +40,11 @@ interface Model {
   pending: Map<string, PendingRecord>;
   /** 已处理过的最大回合号。 */
   handled: Map<string, number>;
+  /** 实现那边配额记忆的插入序镜像：超过天花板时最旧那份被丢掉，那一枚会话号才真的归零。 */
+  memoOrder: string[];
+  /** 本步正在为哪个会话号腾位（实现的 protect 位）：溢出时要跳过它，否则模型会把
+   *  「为它腾位却把它自己的记忆挤掉」这个被实现挡住的排列当成合法行为。 */
+  admitting: string | null;
 }
 
 interface TimerDisposerBox {
@@ -49,9 +55,6 @@ interface TimerDisposerBox {
 interface Attachments {
   /** 会话 → 当前挂着且尚未释放的 disposer 调用次数盒。 */
   live: Map<string, TimerDisposerBox>;
-  /** 累计被创建 / 被调用的 disposer 数（判「放大了没有」）。 */
-  created: number;
-  disposed: number;
 }
 
 /** 一条指令。 */
@@ -122,11 +125,13 @@ function makeRun(stats: Stats): Run {
     restored: new Map(),
     pending: new Map(),
     handled: new Map(),
+    memoOrder: [],
+    admitting: null,
   };
   return {
     scheduler: new ResumeScheduler({ now: () => model.now }),
     model,
-    live: { live: new Map(), created: 0, disposed: 0 },
+    live: { live: new Map() },
     suspended: new Map(),
     suspendedFlag: new Map(),
     stats,
@@ -177,14 +182,17 @@ function checkEntry(run: Run, key: string, entry: SessionSnapshot): void {
     );
   }
 
-  const modelCounts = run.model.counts.get(key);
-  if (modelCounts !== undefined && !run.model.pending.has(key)) {
+  // 模型没记过账的会话（只被 noteTurn/restorePending 建过记录）impl 侧计数必为 0：
+  // 用零计数兜底对账，这几条入口路径上清错/写错计数不再漏判。
+  const modelCounts = run.model.counts.get(key) ?? zeroCounts();
+  if (!run.model.pending.has(key)) {
     assert.deepEqual(entry.counts, modelCounts, `${key}：kind 计数与模型漂移`);
   }
 }
 
-/** 定时器配对：在挂数不得超过有 pending 的会话数（`onFailure` 与 `attachTimer` 之间
- *  的窗口本就没有定时器，所以这里只能判「不超过」），且每一枚都对应仍存在的待办。 */
+/** 定时器配对：在挂数不得超过有 pending 的会话数（`onFailure` 与 `attachTimer` 之间的
+ *  窗口本就没有定时器，而 `settle("skipped")` 有意放下 disposer 引用——宿主定时器要到点
+ *  才走它），所以这里只能判「不超过」；配对的另一半由 `box.calls` 那三条判据负责。 */
 function checkTimers(run: Run, pendingKeys: Set<string>, withPending: number): void {
   assert.ok(
     run.live.live.size <= withPending,
@@ -192,7 +200,8 @@ function checkTimers(run: Run, pendingKeys: Set<string>, withPending: number): v
   );
   for (const [key, box] of run.live.live) {
     assert.ok(pendingKeys.has(key), `会话 ${key} 的待办已不在快照里，定时器却还挂着（泄漏）`);
-    assert.ok(box.calls <= 1, `disposer 被调用 ${String(box.calls)} 次（重复释放）`);
+    // disposer 一被调用就把自己从 live 表摘掉：还留在表里的必然一次都没被调过。
+    assert.equal(box.calls, 0, `仍在挂载表里的 disposer 已被调用 ${String(box.calls)} 次`);
   }
 }
 
@@ -206,13 +215,27 @@ function noteEvictions(run: Run, currentKeys: Set<string>): void {
       assert.equal(run.model.pending.has(key), false, `${key}：被淘汰的会话仍有待办`);
       assert.equal(run.live.live.has(key), false, `${key}：被淘汰的会话定时器还挂着`);
       assert.notEqual(run.suspendedFlag.get(key), true, `${key}：被淘汰的会话正欠着一次补发`);
-      // 淘汰即失忆：实现把 kind 配额、冷却时刻和回合水位连同记录一起丢了（这是有界内存
-      // 的代价，也是它明说的取舍）。模型不跟着丢，就会把「同一会话号被淘汰后重建」这条
-      // 合法路径判成缺陷。
-      run.model.counts.delete(key);
+      // 淘汰丢掉的是冷却时刻与回合水位；**配额按实现留在 quotaMemo 里**（记录可以遗忘，
+      // max-resumes 这道闸门不能凭空恢复），所以模型只删前两位。记忆本身也有上限，
+      // 被淘汰次数超过 MAX_SESSIONS 之后最旧那份会被丢掉，那时同一会话号重新出现才真的归零。
       run.model.lastFireAt.delete(key);
       run.model.handled.delete(key);
+      // restore 补发的增量是记录本地的：实现里没有对应的记忆，模型也不能留着它。
+      run.model.restored.delete(key);
       run.suspendedFlag.delete(key);
+      // 实现那边的记忆表也有天花板：装不下的最旧一份被丢掉，那一枚会话号重新出现时
+      // 才是真的归零。模型不跟着丢，就会把「记忆溢出」这条合法路径判成缺陷。
+      run.model.memoOrder.push(key);
+      if (run.model.memoOrder.length > MAX_SESSIONS) {
+        // 表里除了被保护那一格必然还有可丢的（天花板是 200，被保护的至多一格），
+        // 所以这里按不变量断言，不开「找不到就不丢」的分支。
+        // 与实现同一条规则：为 `admitting` 那个会话号腾位时它自己的记忆不让位，丢的是次旧那份。
+        const lost = run.model.memoOrder.find((entry) => entry !== run.model.admitting);
+        if (lost !== undefined) {
+          run.model.memoOrder.splice(run.model.memoOrder.indexOf(lost), 1);
+          run.model.counts.delete(lost);
+        }
+      }
     }
   }
 }
@@ -234,11 +257,15 @@ function checkInvariants(run: Run): void {
   }
   checkTimers(run, pendingKeys, pendingKeys.size);
   run.prevKeys = currentKeys;
+  // protect 位只对「刚刚那一步的建记录」有效，留着它会让下一步的溢出丢弃跳错格子。
+  run.model.admitting = null;
 }
 
 /** 排期指令：只在实现真排上时登记待办，并把三条判序各自撞一遍。 */
 function applyFailure(run: Run, cmd: Extract<Cmd, { op: "failure" }>): void {
   const key = sessionKey(cmd.session);
+  // 只有记录不在位时，实现才会带着 protect 走腾位那一段。
+  run.model.admitting = run.scheduler.stateSnapshot()[key] === undefined ? key : null;
   const decision: FailureDecision = run.scheduler.onFailure({
     sessionId: key,
     turn: cmd.turn,
@@ -294,11 +321,9 @@ function applyAttach(run: Run, cmd: Extract<Cmd, { op: "attach" }>): void {
   const box: TimerDisposerBox = { calls: 0 };
   const disposer = (): void => {
     box.calls += 1;
-    run.live.disposed += 1;
     run.live.live.delete(key);
   };
   const attached = run.scheduler.attachTimer(key, disposer);
-  run.live.created += 1;
   if (attached) {
     // 同一会话已有在挂定时器时，实现必须先释放旧的那一枚：直接覆盖会让旧 disposer
     // 的引用丢失，而它的定时器还留在宿主计时器表里（泄漏，且到点还会多发一次注入）。
@@ -384,6 +409,7 @@ function applyTodosClosed(run: Run, cmd: Extract<Cmd, { op: "todosClosed" }>): v
 /** 水位单调：只有严格更大才算新轮。 */
 function applyNoteTurn(run: Run, cmd: Extract<Cmd, { op: "noteTurn" }>): void {
   const key = sessionKey(cmd.session);
+  run.model.admitting = run.scheduler.stateSnapshot()[key] === undefined ? key : null;
   const before = run.model.handled.get(key) ?? 0;
   const accepted = run.scheduler.noteTurnHandled(key, cmd.turn);
   assert.equal(accepted, cmd.turn > before, `${key}：旧轮重放闸门判错`);
@@ -607,5 +633,28 @@ describe("调度器的状态机不变量（随机指令序列）", () => {
       reached.capacitySkips > 0,
       "整批没碰到过一次「新建时表已满且全忙」 ⇒ 硬上限判据只是空转",
     );
+  });
+
+  it("disposeAll 释放仍在挂的定时器（随机面不把定时器留到收尾，这一支定向钉住）", () => {
+    const scheduler = new ResumeScheduler({ now: () => 0 });
+    scheduler.onFailure({
+      sessionId: "s1",
+      turn: 1,
+      kind: "resume",
+      delayMs: 10,
+      cooldownMs: 10,
+      maxResumes: 3,
+    });
+    let calls = 0;
+    assert.equal(
+      scheduler.attachTimer("s1", () => {
+        calls += 1;
+      }),
+      true,
+      "有待办才挂得上",
+    );
+    assert.equal(calls, 0, "还没释放时 disposer 不得被调用");
+    scheduler.disposeAll();
+    assert.equal(calls, 1, "disposeAll 必须释放挂着的 disposer");
   });
 });

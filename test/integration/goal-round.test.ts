@@ -68,11 +68,8 @@ interface Rig {
 
 let rig: Rig | undefined;
 
-/** 起一份真装配：goal 服务 + 真 round driver + 真 agent-loop + mock 故障脚本。 */
-async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
-  vi.stubEnv("DEEPSEEK_API_KEY", "mock-key");
-  const server = await startMockLlmServer({ sequence, apiKey: "mock-key" });
-  const ctx = new Context();
+/** boot 的装配体（server 之外的全部插件注册与事件挂接）。 */
+async function bootInto(ctx: Context, server: MockLlmServer): Promise<void> {
   // settings 用记账替身（真 SettingsForms 要 loader+profileContext，属装配面的另一层）；
   // goal 服务、round driver、agent-loop、llm 适配器全是真身。
   ctx.provide("settings", {
@@ -96,27 +93,43 @@ async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
   await ctx.plugin(AgentLoop, { agents: [] });
   await ctx.plugin(GoalService, { defaultMaxGoalRounds: MAX_GOAL_ROUNDS });
   await ctx.plugin(GoalRoundDriver);
-  await ctx.plugin(
-    plugin as never,
-    {
-      // 全部取 schema 允许的最小档：集成层等的是真定时器。
-      resumeDelayMs: 1000,
-      resumeCooldownMs: 5000,
-      continueDelayMs: 500,
-      continueCooldownMs: 5000,
-      unfinishedDelayMs: 1000,
-      unfinishedCooldownMs: 5000,
-    } as never,
-  );
-  const agent = await ctx.agentLoop.create(brandString<SessionId>(GOAL_SESSION_ID), {
-    provider: "deepseek-official",
-    model: "mock-model",
+  await ctx.plugin(plugin, {
+    // 全部取 schema 允许的最小档：集成层等的是真定时器。
+    resumeDelayMs: 1000,
+    resumeCooldownMs: 5000,
+    continueDelayMs: 500,
+    continueCooldownMs: 5000,
+    unfinishedDelayMs: 1000,
+    unfinishedCooldownMs: 5000,
   });
-  const failedTurns: number[] = [];
-  ctx.on("agent/error", (payload: { turn?: number }) => {
-    failedTurns.push(payload.turn ?? -1);
-  });
-  return { ctx, agent, server, failedTurns };
+}
+
+/** 起一份真装配：goal 服务 + 真 round driver + 真 agent-loop + mock 故障脚本。 */
+async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
+  vi.stubEnv("DEEPSEEK_API_KEY", "mock-key");
+  const server = await startMockLlmServer({ sequence, apiKey: "mock-key" });
+  // 装配中途抛错时，已建出的 server / ctx 必须就地回收：afterEach 看 rig === undefined
+  // 什么都不撤，真定时器与 HTTP 监听会泄漏进后续用例。
+  let ctx: Context | undefined;
+  try {
+    ctx = new Context();
+    await bootInto(ctx, server);
+    const agent = await ctx.agentLoop.create(brandString<SessionId>(GOAL_SESSION_ID), {
+      provider: "deepseek-official",
+      model: "mock-model",
+    });
+    const failedTurns: number[] = [];
+    ctx.on("agent/error", (payload: { turn?: number }) => {
+      failedTurns.push(payload.turn ?? -1);
+    });
+    return { ctx, agent, server, failedTurns };
+  } catch (error: unknown) {
+    if (ctx !== undefined) {
+      await ctx.fiber.dispose();
+    }
+    await server.close();
+    throw error;
+  }
 }
 
 /** 会话日志里按 source.kind 数用户消息：goal 轮与本包救援各自的条数。 */
@@ -152,16 +165,22 @@ describe("真 goal + 真 round driver 下的接管", () => {
   afterEach(async () => {
     const current = rig;
     rig = undefined;
-    if (current !== undefined) {
-      await current.ctx.fiber.dispose();
-      await current.server.close();
+    try {
+      if (current !== undefined) {
+        try {
+          await current.ctx.fiber.dispose();
+        } finally {
+          await current.server.close();
+        }
+      }
+    } finally {
+      vi.unstubAllEnvs();
     }
-    vi.unstubAllEnvs();
   });
 
   it("goal 轮被限流打掉的瞬间：driver 只 disarm，本包接管补发一条", async () => {
     rig = await boot(["rate_limit", "success"]);
-    const { ctx, agent } = rig;
+    const { ctx, agent, failedTurns } = rig;
     const created = ctx.goals.create(agent, {
       objective: "把报告写完并核对一遍数据",
       maxGoalRounds: MAX_GOAL_ROUNDS,
@@ -174,7 +193,7 @@ describe("真 goal + 真 round driver 下的接管", () => {
     await expect(waitFor(() => kindCount(agent, GOAL_KIND) > 0, within(30_000))).resolves.toBe(
       true,
     );
-    await expect(waitFor(() => rig!.failedTurns.length > 0, within(30_000))).resolves.toBe(true);
+    await expect(waitFor(() => failedTurns.length > 0, within(30_000))).resolves.toBe(true);
     await expect(
       waitFor(() => ctx.goals.get(agent)?.activation === "disarmed", within(30_000)),
     ).resolves.toBe(true);
@@ -194,8 +213,10 @@ describe("真 goal + 真 round driver 下的接管", () => {
     expect(kindCount(agent, GOAL_KIND)).toBe(1);
     // driver 没有第二十一手：它 disarm 之后就不再开轮（轮次计数停在 1）。
     expect(ctx.goals.get(agent)?.roundsStarted).toBe(1);
-    // 真报文数：goal 那一轮 + 救援那一轮。
-    expect(rig.server.requests).toHaveLength(2);
+    // 真报文数：goal 那一轮 + 救援那一轮各至少一次。条数同时取决于 driver 的开轮
+    // 时机与适配器行为，合法的预检/重连都会让精确断言误报；语义条数已由上面两条
+    // kindCount 各自钉死为 1。
+    expect(rig.server.requests.length).toBeGreaterThanOrEqual(2);
     expect(agent.status).toBe("idle");
   }, 60_000);
 
@@ -205,12 +226,12 @@ describe("真 goal + 真 round driver 下的接管", () => {
     // 常常是那一位而不是 goal 闸门——两道门谁先命中取决于监听时序，本层不去假定它。
     // `goal-armed` 那一支的判据本身由单测钉住（test/host-contract.test.ts 的五位判定）。
     rig = await boot(["rate_limit", "success", "success"]);
-    const { ctx, agent } = rig;
+    const { ctx, agent, failedTurns } = rig;
     const created = ctx.goals.create(agent, {
       objective: "把报告写完并核对一遍数据",
       maxGoalRounds: MAX_GOAL_ROUNDS,
     });
-    await expect(waitFor(() => rig!.failedTurns.length > 0, within(30_000))).resolves.toBe(true);
+    await expect(waitFor(() => failedTurns.length > 0, within(30_000))).resolves.toBe(true);
     await expect(
       waitFor(() => ctx.goals.get(agent)?.activation === "disarmed", within(30_000)),
     ).resolves.toBe(true);
@@ -219,10 +240,18 @@ describe("真 goal + 真 round driver 下的接管", () => {
     const resumed = ctx.goals.resume(agent, { id: created.id, revision: created.revision });
     expect(resumed.activation).toBe("armed");
 
-    // 给足超过 delay 的时间：不注入必须是真的没注入，而不是还没轮到。不等 whenIdle——
-    // driver 会一轮接一轮跑到 mock 脚本用尽，那之后的 disarm 与本条判据无关（本条只问：
-    // driver 还在续跑的这一段里，本包有没有插话）。
-    await sleep(2500);
+    // 不注入必须是真的没注入，而不是还没轮到：以「插件延迟窗（1000ms）已过且
+    // driver 已开出下一轮」为锚点轮询，锚点齐了再做否定断言。固定 sleep 在慢机上
+    // 两个方向都不可靠——窗口可能不够长（假通过），driver 也可能还没开轮（假失败）。
+    // 不等 whenIdle——driver 会一轮接一轮跑到 mock 脚本用尽，那之后的 disarm 与
+    // 本条判据无关（本条只问：driver 还在续跑的这一段里，本包有没有插话）。
+    const resumedAt = Date.now();
+    await expect(
+      waitFor(
+        () => Date.now() - resumedAt > 1500 && kindCount(agent, GOAL_KIND) >= 2,
+        within(30_000),
+      ),
+    ).resolves.toBe(true);
     expect(kindCount(agent, RESCUE_KIND), "救援一条都不发：续跑归 driver").toBe(0);
     // driver 自己把下一轮开起来了——这正是让路要保住的那一侧。
     expect(kindCount(agent, GOAL_KIND)).toBeGreaterThanOrEqual(2);

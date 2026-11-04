@@ -235,10 +235,9 @@ function createCtx(
   const lessonPasses: LessonPass["input"][] = [];
   const lessonLoop = {
     report(input: LessonReport["input"]) {
-      if (holder.ctx?.lessonLoop?.report === lessonLoop.report) {
-        lessonReports.push(input);
-      }
-      holder.ctx?.lessonReports.push(input);
+      // 只 push 一次：ctx.lessonReports 与这个闭包数组是同一份引用（ctx 字面量里
+      // 挂的就是 lessonReports），条件分支只会造成同一条报告记两遍。
+      lessonReports.push(input);
     },
     pass(input: LessonPass["input"]) {
       holder.ctx?.lessonPasses.push(input);
@@ -347,7 +346,10 @@ function createCtx(
       return handler?.(data, next);
     },
     tick() {
-      for (const entry of timers) {
+      // 先快照再触发：fn 内部新排的定时器属下一轮，不该在同一轮里被顺带执行
+      // （真实 setTimeout 没有这个语义，混了会让重复注入与实现 bug 难以区分）。
+      const snapshot = [...timers];
+      for (const entry of snapshot) {
         if (!entry.fired && !entry.cancelled) {
           entry.fired = true;
           entry.fn();
@@ -364,7 +366,6 @@ function createCtx(
     },
   };
   holder.ctx = ctx;
-  void lessonLoop;
   return ctx;
 }
 
@@ -515,6 +516,29 @@ function suspendAgent(ctx: MockCtx, agent: MockAgent): void {
   const latest = ctx.timers.at(-1);
   assert.ok(latest, "suspendAgent 期待调度出定时器");
   latest.fn();
+}
+
+/** 脏 Retry-After 探针：每个值独立 ctx/agent——请求级计数按会话累加，共用一个会话时
+ *  第二枚探针读到的计数取决于微任务顺序，「都落第一档」就只是时序侥幸而不是判据。
+ *  返回武装的延迟，断言留在用例体内。 */
+async function probeDirtyRetryAfter(value: number): Promise<number | undefined> {
+  const probeCtx = createCtx();
+  applyPlugin(probeCtx);
+  const probeAgent = register(probeCtx, makeAgent(`dirty-${String(value)}`, KNOWN_PROVIDER));
+  const pending = listenerOf(probeCtx)(
+    {
+      agent: probeAgent,
+      turn: 1,
+      failure: { code: "RATE_LIMIT", message: "slow down", providerRetryAfterMs: value },
+      signal: undefined,
+    },
+    nextNoop,
+  );
+  probeCtx.tick();
+  assert.deepEqual(await pending, { kind: "retry" });
+  const armed = probeCtx.timers.at(-1);
+  probeCtx.disposeEffects();
+  return armed?.ms;
 }
 
 describe("宿主服务缺失降级", () => {
@@ -1140,6 +1164,33 @@ describe("resumeAfterReconnect 分支", () => {
     assert.equal(agent.followupCalls.length, 0, "恢复后否决不补发");
   });
 
+  it("脏 kind 的挂起快照不带走整批补发", () => {
+    // 跨版本快照的 kind 可能是空串（PendingRecord 那一位如实承认）。恢复这一批时若不先
+    // 归一，textForKind 会在循环里抛错——第一条之后的所有会话都不再补发，而挂起记账留在
+    // 调度器里不可淘汰。回落被删掉时这条红在第一句断言上，不是红在某句文案上。
+    const ctx = createCtx();
+    applyPlugin(ctx);
+    const first = makeAgent("s1", "x");
+    const second = makeAgent("s2", "x");
+    suspendAgent(ctx, first);
+    suspendAgent(ctx, second);
+    const service: unknown = ctx.get(RESCUE_REMOTE_NAMESPACE);
+    assert.ok(service !== undefined, "Remote 读面没注册到上下文");
+    // 服务实例上那位 `runtime` 就是插件装配的那一份状态（不是测试另造的假件），
+    // 所以这里改的是真台账：脏 kind 从这一位进来，走的还是生产那条恢复路。
+    const live = service as unknown as {
+      runtime: { suspendedSnapshots: { value: { pending: { kind: string } }[] } };
+    };
+    const { runtime } = live;
+    assert.equal(runtime.suspendedSnapshots.value.length, 2, "两条挂起快照都在台账里");
+    const [dirty] = runtime.suspendedSnapshots.value;
+    assert.ok(dirty !== undefined, "第一条挂起快照在位");
+    dirty.pending.kind = "";
+    const before = ctx.timers.length;
+    assert.equal(remoteOf(ctx).resume().restored, 2, "两条都要交回，不因第一条脏而中断整批");
+    assert.ok(ctx.timers.length > before, "第二条仍被重新武装");
+  });
+
   it("恢复后 re-fire 再次发送失败 → 再次挂起等待下次重连", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
@@ -1316,9 +1367,12 @@ function latestTimer(ctx: MockCtx): TimerEntry {
   return entry;
 }
 
-/** 触发最新一枚定时器（fire 时刻的模拟入口）。 */
+/** 触发最新一枚定时器（fire 时刻的模拟入口）；与 tick 同一套记账：置 fired 再触发，
+ *  否则先 fireLatest 再 tick 会把同一枚待办再执行一次。 */
 function fireLatest(ctx: MockCtx): void {
-  latestTimer(ctx).fn();
+  const entry = latestTimer(ctx);
+  entry.fired = true;
+  entry.fn();
 }
 
 describe("事件流与 inbox 的坏形状（逐项守卫，不抛错也不误发）", () => {
@@ -2561,26 +2615,13 @@ describe("宿主交回形状的真实性", () => {
     // 官方在构造期就丢掉 <=0 / 非有限的这个字段（llm/src/adapter-failure.ts:76-78），
     // 所以这两枚都是漂移兜底面：NaN 连 `> cap` 比较都过不掉（NaN 与任何数比都是
     // false），既不配当延迟也不配当「等不起」的信号，只能走阶梯。
-    const ctx = createCtx();
-    applyPlugin(ctx);
-    const agent = register(ctx, makeAgent("dirty-after", KNOWN_PROVIDER));
-    const listener = listenerOf(ctx);
-    const probe = async (value: number): Promise<void> => {
-      const pending = listener(
-        {
-          agent,
-          turn: 1,
-          failure: { code: "RATE_LIMIT", message: "slow down", providerRetryAfterMs: value },
-          signal: undefined,
-        },
-        nextNoop,
-      );
-      ctx.tick();
-      assert.deepEqual(await pending, { kind: "retry" });
-      const armed = ctx.timers.at(-1);
-      assert.ok(armed !== undefined, "脏 Retry-After 也要排上退避");
-      assert.equal(armed.ms, 2000, `阶梯第一档，而不是把 ${String(value)} 当延迟`);
-    };
-    await Promise.all([probe(Number.NaN), probe(-5000)]);
+    const [nanDelay, negativeDelay] = await Promise.all([
+      probeDirtyRetryAfter(Number.NaN),
+      probeDirtyRetryAfter(-5000),
+    ]);
+    assert.ok(nanDelay !== undefined, "脏 Retry-After 也要排上退避");
+    assert.ok(negativeDelay !== undefined, "负数 Retry-After 同样要排上退避");
+    assert.equal(nanDelay, 2000, "阶梯第一档，而不是把 NaN 当延迟");
+    assert.equal(negativeDelay, 2000, "阶梯第一档，而不是把 -5000 当延迟");
   });
 });

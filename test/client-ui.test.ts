@@ -131,8 +131,6 @@ const fetchCalls: FetchCall[] = [];
 interface FetchRoute {
   ok: boolean;
   body: unknown;
-  /** 非 2xx 时 host 回的状态码（applyPreset 的 `HTTP <status>` 文案取它）。 */
-  status?: number;
   /** 响应体不可 JSON 解析（host 直接回 HTML/空体）——真实网络里非罕见。 */
   badJson?: boolean;
   /** 传输层直接以该值 reject（非 Error 的 reject 是真实存在的形态）。 */
@@ -161,7 +159,7 @@ function stubFetch(router: (url: string) => FetchRoute): void {
     }
     return {
       ok: route.ok,
-      status: route.status ?? (route.ok ? 200 : 500),
+      status: route.ok ? 200 : 500,
       json: async () => {
         if (route.badJson === true) {
           throw new Error("response body is not json");
@@ -177,16 +175,6 @@ const flush = (): Promise<void> => {
   setTimeout(() => {
     resolve(undefined);
   }, 0);
-  return promise;
-};
-
-/** 真实等一拍（毫秒级）：用于轮询定时器（快慢档见 nextPollMs）——该回调必须被真实
- *  tick 触发，假定时器会让 fetch 的 Promise 链与 act 的队列交错，测不出真实排布。 */
-const sleep = (ms: number): Promise<void> => {
-  const { promise, resolve } = Promise.withResolvers<undefined>();
-  setTimeout(() => {
-    resolve(undefined);
-  }, ms);
   return promise;
 };
 
@@ -512,6 +500,17 @@ describe("rescueState 轮询契约", () => {
     rescueState.listeners.clear();
   });
 
+  it("refresh：响应体不可 JSON 解析与传输层非 Error reject 同档（静默空跳）", async () => {
+    // 两个真实形态：网关折回 HTML/空体（json() 抛错）、传输层以裸字符串 reject。
+    // 都属于「这一跳没读到有效快照」，轮询不炸、data 保持 null。
+    stubFetch(() => ({ ok: true, body: null, badJson: true }));
+    await rescueState.refresh();
+    assert.equal(rescueState.data, null, "坏 JSON 这一跳没读到快照");
+    stubFetch(() => ({ ok: true, body: null, rejectWith: "socket hang up" }));
+    await rescueState.refresh();
+    assert.equal(rescueState.data, null, "非 Error 的 reject 同档");
+  });
+
   it("连着读不到：到档才把快照判为过期，且只在那一跳通知一次", async () => {
     stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
     await rescueState.refresh();
@@ -564,12 +563,21 @@ describe("rescueState 轮询契约", () => {
     });
     await flush();
     assert.equal(rescueState.failStreak, 0);
-    const firstTimer = rescueState.timer;
-    assert.notEqual(firstTimer, null);
+    assert.notEqual(rescueState.timer, null);
     stubFetch(() => ({ ok: false, body: null }));
+    // 捕获排程用的 setTimeout 实参：failStreak===2 只说明计数在涨，退避的
+    // 「两倍档」要落到下一跳的实际延迟上才算被钉住。spy 透传，不改变真实时钟。
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     await rescueState.refresh();
     await rescueState.refresh();
     assert.equal(rescueState.failStreak, 2, "两跳空 ⇒ 该退到两倍档");
+    const lastDelay = setTimeoutSpy.mock.lastCall?.[1];
+    setTimeoutSpy.mockRestore();
+    assert.equal(
+      lastDelay,
+      IDLE_POLL_MS * 2,
+      `重试后的下一跳按两倍档排程，实测 ${String(lastDelay)}`,
+    );
     unsub();
   });
 
@@ -683,8 +691,8 @@ describe("rescueState 轮询契约", () => {
       // 与停表动作要一起被验到，直调只测到方法本身。
       win.document.dispatchEvent(new win.Event("visibilitychange"));
       assert.equal(rescueState.timer, null, "隐藏应撤掉下一跳");
-      await sleep(ACTIVE_POLL_MS + 300);
-      assert.equal(stateFetchCount(), before, "隐藏期间不再发");
+      // 不再补固定时长的负向等待：定时器已撤，窗口里没有任何可触发的东西，
+      // 下一跳的恢复由下面「回到可见补一跳」的正向断言承担。
     } finally {
       Reflect.deleteProperty(document, "hidden");
     }
@@ -1432,6 +1440,34 @@ describe("RescueDockView 渲染决策", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
+  it("宿主不带 slots 契约（useProjection 整个缺席）→ dock 照常渲染不抛错", async () => {
+    // 0.1.5 之前的宿主没有 useProjection：inbox seat 缺席时排队读面回空而不是抛。
+    const { container } = await mountDock({}, { ok: true, sessions: {} }, { noProjection: true });
+    assert.ok(container.textContent.length > 0, "dock 仍渲染出内容");
+    assert.equal(container.textContent.includes("undefined"), false, "缺席的投影不漏进文案");
+  });
+
+  it("inbox 投影交回坏形状：非数组 / 条目 content 不是数组 / 条目不是对象 ⇒ 都退化成空队列", async () => {
+    // 投影是宿主交进来的外部输入。这一炸炸掉的是整张 dock（用户连取消都点不到），
+    // 而不是队列里的一行，所以宽容面要有判据——本节标题此前是空头承诺。
+    // 判据取「与空队列渲染得一模一样」：只断渲染出来了，半截文案漏进来也算过。
+    const baseline = await mountDock({ queue: [] }, { ok: true, sessions: {} });
+    const emptyText = baseline.container.textContent;
+    assert.ok(emptyText.length > 0, "空队列基线本身要有内容，否则这组比对比不出东西");
+    const expectEmptyLike = async (label: string, queue: unknown): Promise<void> => {
+      const bad = await mountDock({ queue: queue as never }, { ok: true, sessions: {} });
+      assert.equal(bad.container.textContent, emptyText, `${label}：坏形状要退化成空队列`);
+      assert.equal(
+        bad.container.textContent.includes("undefined"),
+        false,
+        `${label}：坏形状不得漏出 undefined 文案`,
+      );
+    };
+    await expectEmptyLike("非数组", "not-an-array");
+    await expectEmptyLike("条目 content 不是数组", [{ id: "x", content: "text" }]);
+    await expectEmptyLike("条目不是对象", [42]);
+  });
+
   it("pending 横幅：显示倒计时；点取消 → 走 cancel 读面", async () => {
     const body: RescueStateBody = {
       ok: true,
@@ -1972,8 +2008,9 @@ describe("RescueSettingsCard 设置卡", () => {
   });
 
   it("保存抛错 → saveError 显示（commitTouched catch 面）", async () => {
-    // commitTouched 同步调用 props.set；同步 throw 走 catch 面（async throw 只会
-    // 产生 rejected promise，catch 面抓不到）。
+    // save 的 `failure = await commitTouched(...)` 在 try/catch 里：mutate 同步 throw
+    // 经 await 链转成 rejection、异步 reject 原样 —— 两种形态都落同一条 catch 面，
+    // 本用例覆盖的就是「非 Error 的 reject 原值进文案」这一支。
     const { container } = await mountSettingsCard(
       { enabled: true, resumeDelayMs: 10_000 },
       {},
@@ -1995,6 +2032,51 @@ describe("RescueSettingsCard 设置卡", () => {
       await flush();
     });
     assert.ok(container.textContent.includes(SETTINGS_REJECT_REASON), "保存失败文案可见");
+  });
+
+  it("数字栏键入即上报这一击的新值（不是上一次渲染的旧草稿）", async () => {
+    // 回归护栏：旧实现的 onChange 从闭包旧草稿取值，键入 5 落盘的却是上一个值 3。
+    const { container, writes: setCalls } = await mountSettingsCard({
+      enabled: true,
+      maxResumes: 3,
+    });
+    const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]')!;
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
+        target: { value: "5" },
+      });
+    });
+    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
+    assert.equal(saveBtn.disabled, false, "键入 5 就是一条待保存的改动");
+    // 上报的值本身必须是这一击的 5：只断回显不断落盘时，提交侧换回旧值这条用例照样绿。
+    assert.equal(input.value, "5", "输入框回显这一击的新值");
+    await act(async () => {
+      saveBtn.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    const write = setCalls.find((entry) => entry.field === "maxResumes");
+    assert.equal(write?.value, 5, "落盘的是这一击的 5");
+  });
+
+  it("清空数字栏（全选 + Delete）不上报 0：空草稿等于没填", async () => {
+    // `Number("")` 是 **0**：不设这一道的话，抹掉 maxResumes 会被当成「设成 0」
+    // 记成改动并落盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
+    const { container, writes: setCalls } = await mountSettingsCard({
+      enabled: true,
+      maxResumes: 3,
+    });
+    const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]');
+    assert.ok(input !== null, "maxResumes 是一枚数字栏");
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
+        target: { value: "" },
+      });
+    });
+    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
+    assert.equal(saveBtn.disabled, true, "空草稿不得被当成 0 记成改动");
+    assert.deepEqual(setCalls, [], "没有改动就没有落盘");
   });
 });
 
@@ -2045,41 +2127,6 @@ describe("RetryPolicySection 重试策略区块", () => {
     const post = fetchCalls.find((entry) => entry.url === POLICY_URL);
     assert.ok(post, "落盘走 retry-policy POST");
     assert.equal((post.init.body as string).includes('"preset":"off"'), true, "body 携带档位");
-  });
-
-  it("数字栏键入即上报这一击的新值（不是上一次渲染的旧草稿）", async () => {
-    // setDraft 到下一次渲染才生效：`onChange` 里紧跟着读闭包 `draft` 拿到的是
-    // 改动前的值，于是这条链上报的永远是上一个数——用户改了值，落盘的却是旧值。
-    const { container } = await mountSettingsCard({ enabled: true, maxResumes: 3 });
-    const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]')!;
-    await act(async () => {
-      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
-        target: { value: "5" },
-      });
-    });
-    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
-    assert.equal(saveBtn.disabled, false, "键入 5 就是一条待保存的改动");
-    // 上报的值本身必须是这一击的 5（旧写法上报的是草稿态的上一值 3 → 无改动 → 按钮不亮）。
-    assert.equal(input.value, "5", "输入框回显这一击的新值");
-  });
-
-  it("清空数字栏（全选 + Delete）不上报 0：空草稿等于没填", async () => {
-    // `Number("")` 是 **0**：不设这一道的话，抹掉 maxResumes 会被当成「设成 0」
-    // 记成改动并落盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
-    const { container, writes: setCalls } = await mountSettingsCard({
-      enabled: true,
-      maxResumes: 3,
-    });
-    const input = container.querySelector<HTMLInputElement>('input[data-field="maxResumes"]');
-    assert.ok(input !== null, "maxResumes 是一枚数字栏");
-    await act(async () => {
-      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(input).onChange({
-        target: { value: "" },
-      });
-    });
-    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
-    assert.equal(saveBtn.disabled, true, "空草稿不得被当成 0 记成改动");
-    assert.deepEqual(setCalls, [], "没有改动就没有落盘");
   });
 
   it("provider 列表不可用（ok:false）→ 错误文案", async () => {
@@ -2215,21 +2262,30 @@ describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外�
     });
     await flush();
     assert.equal(stateFetchCount(), 1, "订阅即首跳");
-    await sleep(ACTIVE_POLL_MS + 300);
-    assert.ok(stateFetchCount() > 1, "快档：一秒内应再发一次 /state");
+    // 轮询等第二跳出现而不是赌固定 1.3s：CI 负载下 1s 定时器可能迟到。
+    // 仍用真实时钟（假定时器会打乱 fetch 的 Promise 链与 act 的队列交错）。
+    await vi.waitFor(
+      () => {
+        assert.ok(stateFetchCount() > 1, "快档：一秒档应再发一次 /state");
+      },
+      { timeout: 5000, interval: 50 },
+    );
     unsubscribe();
     assert.equal(rescueState.timer, null);
   });
 
-  it("无 pending 走慢档：一秒后不再补发（旧实现正是这里的空转）", async () => {
+  it("无 pending 走慢档：下一跳按 IDLE 档排程，而不是 1Hz 空转", async () => {
     stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
+    // 判据落在**排程延迟**上，不是「等 1.3 秒看有没有第二发」：无 pending 的下一跳是
+    // IDLE_POLL_MS(5s)，1.3s 窗口里等不到既证不了实现对、也只白等一秒（旧实现正是空转 1Hz）。
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const unsubscribe = rescueState.subscribe(() => {
       /* 计数无关 */
     });
     await flush();
-    const first = stateFetchCount();
-    await sleep(ACTIVE_POLL_MS + 300);
-    assert.equal(stateFetchCount(), first, "慢档：一秒后不该再打一发");
+    const lastDelay = setTimeoutSpy.mock.lastCall?.[1];
+    setTimeoutSpy.mockRestore();
+    assert.equal(lastDelay, IDLE_POLL_MS, `慢档：下一跳按 IDLE 排程，实测 ${String(lastDelay)}`);
     unsubscribe();
   });
 
@@ -2352,8 +2408,6 @@ describe("createActions 成功支与残余失败支", () => {
     });
   });
 });
-
-// ── inbox 投影的宽容面（坏形状不得炸 dock）────────────────────────────────
 
 // ── RescueEditor 全链路（发送 / fork / 键盘 / 失败呈现）───────────────────
 
@@ -2617,7 +2671,7 @@ describe("dock 动作行与 host 写通道", () => {
     });
     assert.equal(stub.calls[0]?.name, "sendSameSession");
     assert.ok(String(stub.calls[0].args[1]).includes("从截断处继续"), "续写文案");
-    assert.equal(container.textContent.includes("sr-error"), false);
+    assert.equal(container.querySelector(".sr-error"), null, "成功时错误条不渲染");
   });
 
   it("停止重问：busy 文案 + 重入闸门 + 失败文案", async () => {
@@ -3094,6 +3148,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
               ok: true,
               providers: [
                 { provider: "zero", mode: "normal", maxRetries: 0, hasQuota: false },
+                { provider: "unlim", mode: "always", maxRetries: 5, hasQuota: true },
                 { provider: 42, mode: 7, maxRetries: "x", hasQuota: "yes" },
                 "not-a-row",
               ],
@@ -3101,10 +3156,17 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
           }
         : { ok: true, body: { ok: true, sessions: {} } },
     );
-    assert.equal(retryComboboxes(container).length, 2, "非对象行丢弃");
+    assert.equal(retryComboboxes(container).length, 3, "非对象行丢弃");
     assertPreset(container, 0, "off");
-    assertPreset(container, 1, "off");
+    assertPreset(container, 1, "always");
+    assertPreset(container, 2, "off");
     assert.ok(container.textContent.includes("normal · max 0 · QUOTA ✗"));
+    // always（无限）不得把宿主兜底的 5 显示成次数上限。
+    assert.ok(
+      container.textContent.includes("always · unlimited · QUOTA ✓"),
+      "always 档的提示行不得出现 max 次数",
+    );
+    assert.ok(!/always · max /u.test(container.textContent));
   });
 
   it("连续两次保存各自落盘：成功清空暂存，第二次照常发", async () => {

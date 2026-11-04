@@ -240,6 +240,26 @@ describe("轮内失败节点识别", () => {
     assert.equal(turnErrorInTurn(view, 1), null);
   });
 
+  it("turnErrorInTurn 同轮多条取 seq 最新（轮内重试后的最终失败原因）", () => {
+    // 两个排列都要测：`[小 seq 在前]` 那一支才区分「按 seq 比大小」与「取数组第一条」，
+    // 只给反排那一支时取第一条恰好也命中最大值，用例对两种实现同样绿（实测退回取第一条
+    // 时本文件零红）。
+    const ascending = mkView({
+      nodes: [turnError(12, 2, "first", "SERVER"), turnError(20, 2, "second")],
+    });
+    const descending = mkView({
+      nodes: [turnError(20, 2, "second"), turnError(12, 2, "first", "SERVER")],
+    });
+    const latest = turnErrorInTurn(ascending, 2);
+    assert.ok(latest !== null, "该轮存在 turn-error，不应返回 null");
+    assert.equal(latest.seq, 20, "后到的更大：换过去");
+    assert.equal(latest.message, "second");
+    assert.equal(turnErrorInTurn(descending, 2)?.seq, 20, "更小的后到：不覆盖");
+    // 轮守卫：他轮的错误不算本轮（删掉 node.turn === turn 时这条红）。
+    const otherTurn = mkView({ nodes: [turnError(20, 3, "other")] });
+    assert.equal(turnErrorInTurn(otherTurn, 2), null, "他轮不命中");
+  });
+
   it("maxTokensInTurn", () => {
     const view = mkView({ nodes: [maxTokens(12, 2)] });
     assert.equal(maxTokensInTurn(view, 2), true);
@@ -253,6 +273,8 @@ describe("轮内失败节点识别", () => {
     assert.equal(hostRetryPending(pendingScheduled, 2), true);
     assert.equal(hostRetryPending(pendingStarted, 2), true);
     assert.equal(hostRetryPending(pendingCancelled, 2), false);
+    // 轮守卫：他轮的重试不算本轮（删掉 node.turn === turn 这条守卫时这里红）。
+    assert.equal(hostRetryPending(pendingScheduled, 1), false, "他轮的 scheduled 不命中");
   });
 
   it("interruptedAssistantInTurn", () => {
@@ -260,6 +282,20 @@ describe("轮内失败节点识别", () => {
     const plainView = mkView({ nodes: [assistant(9, 2)] });
     assert.equal(interruptedAssistantInTurn(view, 2)?.seq, 9);
     assert.equal(interruptedAssistantInTurn(plainView, 2), null);
+  });
+
+  it("interruptedAssistantInTurn：同轮多条中断记录取 seq 最大的那一条，与出现顺序无关", () => {
+    const ascending = mkView({
+      nodes: [assistant(7, 2, { interrupted: true }), assistant(11, 2, { interrupted: true })],
+    });
+    const descending = mkView({
+      nodes: [assistant(11, 2, { interrupted: true }), assistant(7, 2, { interrupted: true })],
+    });
+    assert.equal(interruptedAssistantInTurn(ascending, 2)?.seq, 11, "后到的更大：换过去");
+    assert.equal(interruptedAssistantInTurn(descending, 2)?.seq, 11, "更小的后到：不覆盖");
+    // 轮守卫：他轮的中断记录不算本轮（删掉 node.turn === turn 时这条红）。
+    const otherTurn = mkView({ nodes: [assistant(11, 3, { interrupted: true })] });
+    assert.equal(interruptedAssistantInTurn(otherTurn, 2), null, "他轮不命中");
   });
 
   it("turnHasToolActivity：窗口内 tool-result/command 或运行中调用", () => {
@@ -271,8 +307,9 @@ describe("轮内失败节点识别", () => {
       ]),
     });
     assert.equal(turnHasToolActivity(v1, 2), true);
+    // seq 8 不在 (0,5] 窗口 ⇒ turn 1 只有 (0,5] 可看，toolResult(8) 不命中。
     assert.equal(turnHasToolActivity(v1, 1), false);
-    // seq 8 不在 (0,5] 窗口
+    // v2 的期望依据：command(3) 落在 turn 1 的 (0,5] 窗口内。
     const v2 = mkView({ nodes: [command(3)], turnEnds: new Map([[1, 5]]) });
     assert.equal(turnHasToolActivity(v2, 1), true);
     // 官方 `RunningToolCall` 的必选成员齐备：time/subCalls/args 都不能少，argsRaw 只在这一支。
@@ -394,6 +431,12 @@ describe("failureOfLastTurn", () => {
       turnEnds: new Map([[1, 5]]),
     });
     assert.equal(failureOfLastTurn(view)?.kind, TURN_ERROR_KIND);
+    // 第二条边：interrupted 不得遮蔽 max-tokens（顺序对调时这条会红）。
+    const midView = mkView({
+      nodes: [assistant(3, 1, { interrupted: true }), maxTokens(4, 1)],
+      turnEnds: new Map([[1, 5]]),
+    });
+    assert.equal(failureOfLastTurn(midView)?.kind, "max-tokens");
   });
 });
 
@@ -445,6 +488,9 @@ describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支
   // 两处择优（lastCompletedUserTarget 的 fork 边界、failureOfLastTurn 的取最大轮号）
   // 都要在"后面的键更小"时才走到 `end < last.seq && end > forkAtSeq` / `turnId > turn`
   // 的否定侧——只测升序 Map 等于漏测一半。
+  // 夹具形状说明：一条 user 节点后跟多条轮尾在真实转录里不会出现（一条 user 只开一轮）。
+  // 这里的多条轮表是**刻意**的——它们钉的是 tie-break 本身（fork 边界取最后一个早于
+  // 该消息的轮尾、failure 取最大轮号），不是真实输入上的行为；tie-break 改语义时这里红。
   it("lastCompletedUserTarget：有一条晚于该消息的轮尾就算已完成轮", () => {
     const view = mkView({
       nodes: [user(10, "hi")],
@@ -472,7 +518,7 @@ describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支
       ]),
     });
     const target = lastCompletedUserTarget(view);
-    assert.equal(target?.forkAtSeq, 8, "6 晚于 8 之前的最大值不覆盖");
+    assert.equal(target?.forkAtSeq, 8, "turn 3 的 end=6 不大于已选最大值 8，不覆盖");
   });
 
   it("failureOfLastTurn：非升序轮表按 turnId 取最大轮", () => {
@@ -490,6 +536,8 @@ describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支
   });
 
   it("failureOfLastTurn：turn-error 缺 message/code → 双双归 null", () => {
+    // 官方 TurnErrorNode.message 是必选，宿主交不出这种节点；这份裸夹具刻意保住
+    // `?? null` 的防御分支（类型面漂移时它才可达），覆盖率门也要求这条分支有判据。
     const bare = asNode({ kind: TURN_ERROR_KIND, seq: 21, time: 0, turn: 1, step: 0 });
     const view = mkView({ nodes: [bare], turnEnds: new Map([[1, 20]]) });
     const failure = failureOfLastTurn(view);

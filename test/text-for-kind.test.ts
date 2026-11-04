@@ -16,9 +16,13 @@ function fillTemplate(text: string, params: Record<string, unknown>): string {
   });
 }
 
-/** 模板里的 {占位符} 名字清单（不具名捕获组，避开 dot-notation 与 TS4111 的相互要求）。 */
+/** 模板里的 {占位符} 名字清单（不具名捕获组，避开 dot-notation 与 TS4111 的相互要求）。
+ *  只认完整的 `{name}`：按花括号切分后收任意 `\w+` 片段，会把漏了右括号的 `{count`
+ *  也当成占位符，「中英集合一致」在模板已坏时照样通过。 */
 function placeholders(template: string): Set<string> {
-  return new Set(template.split(/[{}]/u).filter((piece) => /^\w+$/u.test(piece)));
+  return new Set(
+    Array.from(template.matchAll(/\{(?<name>\w+)\}/gu), (match) => match.groups?.["name"] ?? ""),
+  );
 }
 
 /** 只投影 hostMessages 真正用到的那一个成员（其余服务面与本用例无关）。
@@ -37,12 +41,12 @@ function svcWithPreference(preference: unknown): never {
 }
 
 // 未知 kind 绝不能回退到任何一份 approved 文案（错文案比不发危害更大）。
-// 签名已从 `RescueKind | string | undefined → string | null` 收紧为
-// `RescueKind → string`：pending 快照只在进程内由 scheduler 产生，未知 kind 在
-// host 侧不可达，调用方也就没有 null 分支可走。防御随之从「返回 null」改为
-// 「抛错」——语义更强（静默降级 → 显式失败），断言一条没少。
-// 文案本身不再住在 host.ts 的模块常量里，而是取自 lib/messages.ts 的双语字典
-// （语言由 hostMessages 按官方 locale 偏好选表），本函数因此多收一个 messages 入参。
+// host 的签名刻意收 `string` 而不是 `RescueKind`：闭合集之外的 kind 在运行时
+// **确实到得了**（跨版本脏快照的空 kind、suspended 台账原样回传），那道「抛错」
+// 闸门必须留在运行时——写死 RescueKind 会让抛错分支被判不可达而死掉。本组用例
+// 把 undefined / 原型键名注入进去，钉的就是这条运行时闸门活着。
+// 文案取自 lib/messages.ts 的双语字典（语言由 hostMessages 按官方 locale 偏好选表），
+// 本函数因此多收一个 messages 入参。
 describe("textForKind 文案映射与未知 kind 防御", () => {
   it("已知 kind 返回各自 approved 文案", () => {
     assert.ok(textForKind("resume", MESSAGES.zh).includes("瞬时失败"));
@@ -51,7 +55,13 @@ describe("textForKind 文案映射与未知 kind 防御", () => {
   });
 
   it("三类文案两两不同（漏一种 kind 就拿错文案的那类缺陷）", () => {
-    const kinds: RescueKind[] = ["resume", "continue", "unfinished"];
+    // 穷尽护栏：RescueKind 扩员时这个 Record 直接编译红——新 kind 必须补进映射并给文案。
+    const exhaustive: Record<RescueKind, true> = {
+      resume: true,
+      continue: true,
+      unfinished: true,
+    };
+    const kinds = Object.keys(exhaustive) as RescueKind[];
     for (const catalog of ["zh", "en"] as const) {
       const texts = kinds.map((kind) => textForKind(kind, MESSAGES[catalog]));
       assert.equal(new Set(texts).size, kinds.length, `${catalog} 三类文案不得重合`);
@@ -98,7 +108,8 @@ describe("hostMessages 语言选取与双语字典", () => {
     for (const key of Object.keys(MESSAGES.en) as (keyof SessionRescueMessages)[]) {
       assert.doesNotMatch(
         MESSAGES.en[key],
-        /\p{Script=Han}/u,
+        // 汉字之外，全角/中文标点（，。：（）等 Script=Common）也是翻译复制粘贴最常见的残留。
+        /[\p{Script=Han}\u3000-\u303F\uFF00-\uFFEF]/u,
         `英文文案残留中文：${MESSAGES.en[key]}`,
       );
     }
@@ -112,6 +123,18 @@ describe("hostMessages 语言选取与双语字典", () => {
         placeholders(MESSAGES.en[key]),
         placeholders(MESSAGES.zh[key]),
         `${key} 占位符不一致`,
+      );
+    }
+  });
+
+  it("模板占位符恰为 {count}（host 侧按它 replaceAll，改名即红）", () => {
+    // host 的插值不是通用模板引擎，是 `replaceAll("{count}", …)` 一处：
+    // 这里把两语模板的占位符集合钉死在该位上，模板换占位符名而 host 没跟时会红。
+    for (const locale of ["zh", "en"] as const) {
+      assert.deepEqual(
+        [...placeholders(MESSAGES[locale].unfinishedLessonDetail)].toSorted(),
+        ["count"],
+        `${locale} 的 unfinishedLessonDetail 占位符漂了`,
       );
     }
   });
@@ -131,5 +154,21 @@ describe("hostMessages 语言选取与双语字典", () => {
       fillTemplate(MESSAGES.en.unfinishedLessonDetail, { count: 1 }),
       /\b1 open items\b/u,
     );
+  });
+});
+
+describe("host 注入正文与 dock 手动动作的措辞同源", () => {
+  // dock 的手动「继续输出」与宿主自动续写注入的是同一语义指令：两份字典各写一份、
+  // 任一侧单独改写都会让两条路径给模型的措辞分叉，而这种漂移没有编译期约束。
+  // 本用例钉住同解——有意改写时两侧必须一起改，红的就是这把尺子。
+  it("continueText 在 host 与 client 两份字典里逐字一致（中英各自）", async () => {
+    const { UI_MESSAGES } = await import("../src/ui-messages.ts");
+    for (const locale of ["zh", "en"] as const) {
+      assert.equal(
+        UI_MESSAGES[locale].continueText,
+        MESSAGES[locale].continueText,
+        `${locale} 的 continueText 两份字典不同解：手动继续与自动续写会给模型两种措辞`,
+      );
+    }
   });
 });

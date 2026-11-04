@@ -3,19 +3,26 @@
 # action 侧覆盖本仓的全部 workflow 引用：这些引用都钉了 commit SHA，Dependabot 提的 PR
 # 会把「换了哪个提交」变成一次可评审的 diff。
 #
-# 这里刻意**没有** npm 更新块：本仓依赖只有两类，两类都不该由更新机器人改动。
-# 一是工具链与大部分宿主依赖写成 catalog:，那条范围的真源在伞根的 pnpm-workspace.yaml；
-# 二是其余依赖写成字面版本，而每一枚都在本仓 pnpm-workspace.yaml 的 overrides 里被钉死
-# （宿主族统一 0.2.1-rc.2 那条线）。Dependabot 对第二类提的 PR 会被 overrides 解析回原版本，
-# 合进去也不改变安装树——留着它只会造出「看起来升了、实际没升」的 PR。要升这些版本只能在
-# 伞根改真源，再投影下来。
+# 这里刻意**没有** npm/pnpm 更新块，但理由要按现状写，别建立在一条不成立的前提上：
+# 一是工具链与大部分宿主依赖写成 catalog:，取值真源在伞根（`scripts/seed-root.mjs` 的表渲染出
+# 根 pnpm-workspace.yaml，再由 `pnpm run sync` 投影到本仓的生成物）。单仓里机器人提的那一类 PR
+# 会在下一次投影时被伞根的值覆盖，留下「改了又改不动」的循环。
+# 二是写成字面版本的依赖。**其中被本仓 overrides 钉住的那些**（宿主族那一整条线，取值以根表的
+# `DSH_TARGET` / `FAMILY_TARGETS` 现量为准，本文件不写死版本号）确实改不动安装树：PR 合了也会被
+# overrides 解析回原版本。但**不是每一枚都被钉住**——`react` / `react-dom` 是浮动的 devDependencies，
+# 不在 overrides 里，机器人提的 PR 会真的改变 lockfile 与安装树。这两类的更新随伞根的 catalog 抬版
+# 一并核对（`node scripts/bump-manifests.mjs` 的计划里能看到全貌），所以仍不为它们单开一个生态：
+# 同一枚包被两个生态各盯一份，只会开出互相矛盾的 PR。
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 3
+    # 3 名额会把下面那个 minor/patch 分组饿死：major 按本文件的策略各自成 PR，同一周有三枚
+    # major 就把名额占满，分组那一发根本创建不出来；而安全相关的小版本最先被卡住。放宽到 6，
+    # 让「几个 major + 一个分组」能同时排队。上限本身不是判据，判据是分组不至于静默停更。
+    open-pull-requests-limit: 6
     groups:
       # 本仓引用的 action 全部放进一组，避免每个 action 各占一个 PR 去抢同一个名额。
       # 模式按 `<owner>/<repo>` 写：通配符覆盖该仓库下的全部条目（codeql-action 的 init、
@@ -26,6 +33,10 @@ updates:
           - "pnpm/*"
           - "github/codeql-action*"
           - "ossf/scorecard-action*"
+          # 兜底：以后引入别的 owner 的 action（docker/*、softprops/* 一类）时默认也进这一组。
+          # 少了这一条，新 owner 不匹配任何 pattern，会各自开一个 PR 去抢同一个名额，
+          # 与上面「本仓引用的 action 放进一组」的意图相反。
+          - "*"
         # 只把 minor/patch 折进这一组：major 升级可能带破坏性变更（action 的大版本经常改
         # 输入名或权限面），跟 patch 挤在同一个 PR 里时，要么为了修一处而重跑全部，要么
         # 整组被推迟到没人再看得懂它改了什么。它们各自单独成一个 PR。

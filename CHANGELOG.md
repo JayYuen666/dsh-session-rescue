@@ -1,7 +1,57 @@
 # Changelog
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，版本号遵循
-[语义化版本](https://semver.org/lang/zh-CN/)。
+[语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
+各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
+
+## 0.1.7
+
+一轮围绕「记录被淘汰后状态仍然成立」的加固：调度器把配额记忆留在淘汰之外，回合读面统一按最后一次结果；
+客户端重试档位不再把 always 显示成次数上限；发布链把守卫前移、产物改为 tarball 交棒，
+测试补上 SEED 解析、文档同源与工作流钉版三道门禁。
+
+### Changed
+
+- **宿主开发线抬到 `0.2.2-alpha.3`**：devDependencies 与 catalog/overrides 同值；`engines.dsh` 与
+  `@deepseek-ai/dsh*` peer 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 的并集窗口；cordis 家族与
+  schemastery 同步抬到 `*-alpha.2` 线。
+- **调度器配额跨淘汰保留**（`lib/resume-scheduler.ts`）：新增 `quotaMemo`，记录因容量闸门被淘汰时
+  记下三档 `counts`，重建时接回原计数；`hasCapacity` / `evictIdleSessions` 接受 `protect` 参数，
+  为当前会话腾位时不挤掉它自己的配额。`onSuccess` / `onTodosClosed` 改走 `quotaOf()`，记录已被
+  淘汰时仍能复位或递增。`MAX_RESUMES_REASON` 导出，调用方与测试不再抄字面量。
+- **`restorePending` 只接受挂起来源**：记录必须处于 `suspended` 且当前没有 pending，否则快照作废；
+  脏快照不再覆盖正常记录。
+- **回合读面 last-wins**（`lib/turn-facts.ts`、`lib/turn-scope.ts`）：opener 查找改 `findLast`；
+  中断助手消息与 `turn-error` 按 `seq` 取最后一条，不再依赖 nodes 排列顺序。
+  `TranscriptView.running` / `removed` 改为只读，客户端不再有写回宿主快照位的口子。
+- **客户端重试档位**（`src/client-entry.ts`）：`always` 档显示 `unlimited`，不再把宿主兜底的
+  5 次显示成上限。
+- **发布链与 CI**：`publish.yml` 增加默认分支守护 job；`check` 用 `pnpm pack` 产出 tarball，
+  经 artifact 交给只持有 `id-token` 的 publish job；`ci.yml` 的 tracked-tree 门禁扩到全部 OS，
+  dependency-review 显式关闭 PR 评论，bundle patch 解析改为块内向下找 `name` 并在解析不出时点名。
+- **工作流钉版**：`pnpm/action-setup` 抬到 `6.1.1`、`github/codeql-action` 抬到 `4.39.2`，
+  `publish.yml` 的 `actions/download-artifact` 与 `ci.yml` 统一到 `8.0.2`。
+- **文档**：两份 README 的宿主窗口与徽章同步到 manifest；`cordis.patch.yml` 的说明改成
+  「操作列表 + insert 条目」的实际形态。
+
+### Fixed
+
+- **abort 监听残留**（`host.ts`）：`sleepWithAbort` 的卸载释放器先摘 `abort` 监听再结算。
+- **idle 清理多余守卫**（`host.ts`）：`requestRetryCounts.delete` 不再单设 `typeof` 守卫，
+  与同文件其他调用同一信任档。
+
+### Added
+
+- **SEED 解析门禁**（`test/property-seed.test.ts`）：只接受十进制非负、安全整数且 32 位宽度的种子；
+  十六进制、科学计数法、正号、小数、负数、超宽值全部拒绝，避免「换种子换序列」的假复现。
+- **文档与版本同源门禁**：`test/publish-manifest.test.ts` 新增三条断言——CHANGELOG 顶部条目必须
+  等于 `package.json` 的 version；两份 README 必须写明 `engines.dsh` 的完整窗口；README 的 `dsh`
+  徽章解码后必须等于窗口的第一条。
+- **工作流钉版门禁**（`test/workflow-pins.test.ts`）：同一 action 在本仓只允许一个 SHA 与一个版本
+  注释，且 `uses` 必须是 40 位 SHA 钉版；`publish.yml` 与 `ci.yml` 的 download-artifact 漂移由它兜住。
+- **工具链与构建**：`.gitattributes` 补 CRLF/二进制规则；`.gitignore` 放行 `.env.example` 与测试
+  证书夹具；property 层改为串行，integration/property 的 coverage 配置只留开关；dependabot
+  名额放宽到 6 并补 `*` 兜底分组。
 
 ## 0.1.6
 
@@ -12,10 +62,6 @@
 
 - **宿主开发线抬到 `0.2.2-alpha.2`**：devDependencies 与 catalog/overrides 同值；`engines.dsh` 与
   `@deepseek-ai/dsh*` peer 写支持窗口 `^0.2.1-rc.3`。
-- **客户端用例的 React 基线回到 `^19.3.0` / `^19.3.1`**：0.1.2 曾把 devDependencies 落回
-  `18.3.1` 并注明「宿主锁的是 React 18.3.1」，这一版按 `@types/react` 的 catalog 口径与客户端
-  代码使用的 API 面统一回 19。宿主运行期提供的仍是 18.x（`packages/client/*` 声明 `^18.2.0`），
-  客户端代码因此**不得**使用 React 19 独有 API——这条约束不变，只是验收环境与类型面回到同一 major。
 - **`prepack` 并入 `prepare`**：两段脚本内容逐字相同，而 pnpm 12 的 `pack` 与 `publish` 都会在
   `prepare` **之前**先跑 `prepack`（实测 `pnpm pack` 与 `pnpm publish --dry-run --no-git-checks`
   的回执里两段都出现），同一条发布因此把整套构建跑两遍。删掉 `prepack`——`prepare` 在两条路上
@@ -63,6 +109,10 @@
 - **dock 状态解析改 zod**：信封 `ok` 必须为字面量 true，`sessions` 保留原对象再逐条投影；坏形状降级成
   中性显示，原型链键不会被写进表。
 - **设置卡迁到 shared 组件与 zod**：时间输入按秒录入、按毫秒存，越界就地提示；保存条改整批拒绝文案。
+- **客户端用例的 React 基线回到 `^19.3.0` / `^19.3.1`**：0.1.2 曾把 devDependencies 落回
+  `18.3.1` 并注明「宿主锁的是 React 18.3.1」，这一版按 `@types/react` 的 catalog 口径与客户端
+  代码使用的 API 面统一回 19。宿主运行期提供的仍是 18.x（`packages/client/*` 声明 `^18.2.0`），
+  客户端代码因此**不得**使用 React 19 独有 API——这条约束不变，只是验收环境与类型面回到同一 major。
 - **构建与依赖**：client 产物按宿主 `PLATFORM_MODULES` 外置 zod；devDependencies 与 catalog/overrides
   抬到 `0.2.2-alpha.2`，`engines.dsh` 与 peer 保持 `^0.2.1-rc.3` 窗口，README 补滚动窗口说明。
 - **插件页展示面进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、`docs/DETAIL.zh.md`；
@@ -130,7 +180,7 @@
   客户端 bundle 又把 react 外部化，测试层跑在 19 上等于用产品从不运行的那个 major 验收 UI。整套
   客户端用例（含真实 happy-dom + react-dom 挂载）在 18.3.1 上重跑通过。`@types/react*` 仍随 catalog
   取 19.3.0——类型面比运行时新，故客户端代码不得使用 React 19 独有 API 与语法糖。
-  （更正：该回落未保留，0.1.5 已把 devDependencies 写回 `^19.3.0`/`^19.3.1`，见该版第一条 Changed；
+  （更正：该回落未保留，0.1.5 已把 devDependencies 写回 `^19.3.0`/`^19.3.1`，见该版 Changed 里的那一条；
   「客户端代码不得使用 React 19 独有 API」这条约束仍然有效。）
 - `engines.dsh` 从 `>=0.2.1-alpha.2` 改为与 peer 同一份范围（随宿主线升到 `^0.2.1-rc.2`）。宿主装插件时校验的是
   peer，`0.` 主版本上的 `^` 带上界（<0.3.0），而 `>=` 没有——旧写法等于对外宣称兼容 0.3/1.x，

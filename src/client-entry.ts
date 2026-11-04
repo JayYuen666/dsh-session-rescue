@@ -1374,7 +1374,12 @@ function retryRowElement(
   return createElement(SelectField, {
     key: row.provider,
     label: row.provider,
-    hint: `${row.mode} · max ${row.maxRetries} · QUOTA ${row.hasQuota ? "✓" : "✗"}`,
+    // always 档没有次数上限（官方语义 until success），落盘值里也没有 maxRetries 可读
+    // ——宿主兜底的 5 只是 normal 档的官方默认，显示出来会把「无限」读成「5 次上限」。
+    hint:
+      row.mode === "always"
+        ? `always · unlimited · QUOTA ${row.hasQuota ? "✓" : "✗"}`
+        : `${row.mode} · max ${row.maxRetries} · QUOTA ${row.hasQuota ? "✓" : "✗"}`,
     value: staged ?? presetOfRow(row),
     options,
     disabled,

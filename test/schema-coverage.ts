@@ -61,9 +61,10 @@ const isQuoteChar = (char: string): boolean => char === '"' || char === "'" || c
 /**
  * `index` 处若是字符串/注释的开头（或正处在字符串内部），交回它的跨度；否则交回 `null`。
  *
- * 取字段名、配括号、剥注释三处文本扫描要认同一套字面量边界，抄三份就会三处不同步，
- * 所以只在这里定义一次。转义只认反斜杠（模板串里的 `${}` 不需要特判：里面出现的括号
- * 属于表达式，本来该参与配对）。
+ * 取字段名、配括号、剥注释几处文本扫描要认同一套字面量边界，抄三份就会三处不同步，
+ * 所以只在这里定义一次。转义只认反斜杠。模板串按「反引号到下一个未被转义的反引号」整段认，
+ * 于是插值 `${…}` 里的括号**不**参与配平——普通插值这样正是对的（那些括号本来就不该影响外层），
+ * 但插值里再嵌一层反引号会在这里提前收尾，那种形状由 `nestedInterpolationAt` 点名交人确认。
  */
 function literalAt(text: string, index: number, quote: string): LiteralSpan | null {
   const char = text.charAt(index);
@@ -174,7 +175,20 @@ function bracketStep(
  * 一行 `// )` 就会提前收尾，块后半段的字段全被截掉，而唯一失败判据是「字段数为 0」，
  * 部分截断不会报错。
  */
-function sliceInside(text: string, open: number, openChar: string, closeChar: string): string {
+/**
+ * 从 `open` 处的括号起取配对区段，交回括号内的文本与收尾之后的下标；没配对上时 body 为空、
+ * `end` 为 -1。
+ *
+ * 字符串、模板串与注释里的括号不参与配对——按字符数深度时，块里只要出现 `")"` 或
+ * 一行 `// )` 就会提前收尾，块后半段的字段全被截掉，而唯一失败判据是「字段数为 0」，
+ * 部分截断不会报错。
+ */
+function sliceSpan(
+  text: string,
+  open: number,
+  openChar: string,
+  closeChar: string,
+): { body: string; end: number } {
   const state: BracketWalk = { started: false, depth: 0, out: "" };
   let quote = "";
   for (let index = open; index < text.length; index += 1) {
@@ -184,15 +198,151 @@ function sliceInside(text: string, open: number, openChar: string, closeChar: st
       ({ quote } = span);
       index = span.end - 1;
     } else if (bracketStep(state, text.charAt(index), openChar, closeChar)) {
-      return state.out;
+      return { body: state.out, end: index + 1 };
     }
   }
-  return "";
+  return { body: "", end: -1 };
 }
 
-/** 括号家族的两个便捷入口（花括号取对象字面量、圆括号取实参）。 */
+function sliceInside(text: string, open: number, openChar: string, closeChar: string): string {
+  return sliceSpan(text, open, openChar, closeChar).body;
+}
+
+/** 花括号区段的便捷入口（对象字面量体）；圆括号那一手由 sliceSpan 直接在块起点上用。 */
 const bracesAt = (text: string, open: number): string => sliceInside(text, open, "{", "}");
-const parensAt = (text: string, open: number): string => sliceInside(text, open, "(", ")");
+
+/** `Schema.object(` 的块起点标记（自带左括号，所以区段从那枚 `(` 起算）。 */
+const SCHEMA_MARKER = "Schema.object(";
+
+/**
+ * `text` 里出现在**代码位置**的 needle 下标（调用方须先剥注释）。
+ *
+ * 按 `indexOf` 找块起点会把字符串里的 `Schema.object({ … })` 也当成一处块——文档串、
+ * 报错文案里的示例都是这种字面形状，示例键会被并进字段全集，随后报成虚构的「卡片未暴露」。
+ */
+function codePositions(text: string, needle: string): number[] {
+  const out: number[] = [];
+  let quote = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const span = literalAt(text, index, quote);
+    if (span !== null) {
+      ({ quote } = span);
+      index = span.end - 1;
+    } else if (text.startsWith(needle, index)) {
+      out.push(index);
+      index += needle.length - 1;
+    }
+  }
+  return out;
+}
+
+/** 点名用的片段：折掉换行与缩进，让 unresolved 里一行放得下。 */
+function snippetAt(text: string, index: number): string {
+  return text.slice(index, index + 18).replaceAll(/\s+/gu, " ");
+}
+
+/** 括号对深度的影响：开括号 +1、闭括号 -1，其它字符不进这张表（查不到就是 0）。 */
+const BLOCK_DEPTH_DELTA = new Map<string, number>([
+  ["{", 1],
+  ["(", 1],
+  ["[", 1],
+  ["}", -1],
+  [")", -1],
+  ["]", -1],
+]);
+
+/**
+ * `${…}` 里再嵌一层反引号 —— 模板串的嵌套状态本扫描器没实现，插值里的反引号会让字符串
+ * 提前收尾，之后那段代码被当成字符串吃掉，括号因此走偏。
+ *
+ * 普通插值（`` `a${x}b` ``）不算：插值里的括号整个落在字符串跨度内，本来就不参与配平，
+ * 结果与实现一致。这里只点真正认不得的那一形。
+ */
+function nestedInterpolationAt(body: string, index: number): boolean {
+  const close = body.indexOf("}", index + 2);
+  return close !== -1 && body.slice(index + 2, close).includes("`");
+}
+
+/**
+ * 块体里本扫描器认不得的构造，逐条点名。
+ *
+ * 裸露的 `/` 意味着正则字面量（`/['"]/`、`/\d+/` 这类）：literalAt 只认引号与注释，
+ * 正则体里的引号会把它带进错误的字符串状态，之后 `//` 又被读成行注释——括号深度于是走偏，
+ * 字段全集静默缩成子集，而门禁只报「某个字段没绑定」。
+ * 这两种写法一律交人确认，而不是让扫描器猜。
+ */
+function lexerHazards(body: string): string[] {
+  const out: string[] = [];
+  let quote = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body.charAt(index);
+    if (
+      quote === "`" &&
+      char === "$" &&
+      body.charAt(index + 1) === "{" &&
+      nestedInterpolationAt(body, index)
+    ) {
+      out.push(`模板嵌套插值 ${snippetAt(body, index)}`);
+    }
+    const span = literalAt(body, index, quote);
+    if (span === null) {
+      if (char === "/") {
+        out.push(`正则字面量嫌疑 ${snippetAt(body, index)}`);
+      }
+    } else {
+      ({ quote } = span);
+      index = span.end - 1;
+    }
+  }
+  return out;
+}
+
+/** 按**深度 0 的逗号**把块体切成顶层元素：字符串、模板串与嵌套括号里的逗号不算分隔。 */
+function topLevelElements(body: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let depth = 0;
+  let quote = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const span = literalAt(body, index, quote);
+    if (span === null) {
+      const char = body.charAt(index);
+      if (char === "," && depth === 0) {
+        out.push(current);
+        current = "";
+      } else {
+        current += char;
+        depth += BLOCK_DEPTH_DELTA.get(char) ?? 0;
+      }
+    } else {
+      current += body.slice(index, span.end);
+      ({ quote } = span);
+      index = span.end - 1;
+    }
+  }
+  out.push(current);
+  return out;
+}
+
+/**
+ * 顶层元素里开头不是 `标识符:` 的那些：展开（`...base`）、计算键（`[k]:`）、引号键（`"k":`），
+ * 以及任何既不是「键」也不是「值」的裸表达式。
+ *
+ * `literalTopLevelKeys` 对这几形态都不产出键名，于是「解析出一部分」与「这个块本来就没字段」
+ * 在结果上分不开——字段全集缩小而 unresolved 为空，断言侧那句「解析失败必须判红」就失效了。
+ */
+function unrecognizedTopLevel(body: string): string[] {
+  const isPlainKey = /^[A-Za-z_$][\w$]*\s*:/u;
+  return topLevelElements(body)
+    .map((element) => element.trimStart())
+    .filter((element) => element !== "" && !isPlainKey.test(element))
+    .map((element) => `非标识符键 ${element.slice(0, 18).replaceAll(/\s+/gu, " ")}`);
+}
+
+/** 实参若是对象字面量，交回去掉最外层花括号的块体；标识符形式交回空串（回溯在别处）。 */
+function objectBodyOf(argument: string): string {
+  return argument.startsWith("{") ? argument.slice(1, -1) : "";
+}
 
 /** `Schema.object(` 的实参 → 字段名；字面量直取顶层键，标识符回溯到同名 const 字面量。 */
 function fieldsOfSchemaArgument(hostTs: string, argument: string): string[] {
@@ -238,38 +388,63 @@ function stripComments(src: string): string {
   return out;
 }
 
+/** 一个块的实参：先点名扫描器认不得的构造，再取字段并集；一个都没取到就记 unresolved。 */
+function readSchemaBlock(
+  hostTs: string,
+  body: string,
+  fields: Set<string>,
+  unresolved: string[],
+): void {
+  const argument = body.trim();
+  const objectBody = objectBodyOf(argument);
+  unresolved.push(...lexerHazards(argument), ...unrecognizedTopLevel(objectBody));
+  const parsed = argument === "" ? [] : fieldsOfSchemaArgument(hostTs, argument);
+  if (parsed.length === 0) {
+    unresolved.push(`${SCHEMA_MARKER}${argument.slice(0, 40)})`);
+  }
+  for (const field of parsed) {
+    fields.add(field);
+  }
+}
+
 /**
- * 从 host.ts 抽取**全部** `Schema.object(...)` 块内的字段名（并集），并交回解析不了的块。
+ * 从 host.ts 抽取**最外层** `Schema.object(...)` 块内的字段名（并集），并交回解析不了的块
+ * 与本扫描器认不得的构造。
  *
  * 只取第一处 `Schema.object(` 的旧写法有个静默洞：标记先出现在注释或文档字符串、
  * 或存在多个块时，取到的可能根本不是设置 schema——而"解析器少认了一种写法"与
- * "这个包没有设置"在旧结果上无法区分，门禁会悄悄缩小到一个子集上照绿。所以两种
- * 实参形态都收（字面量直取、标识符回溯 const），解析不了的块原样交回给断言侧点名。
+ * "这个包没有设置"在旧结果上无法区分，门禁会悄悄缩小到一个子集上照绿。所以实参形态都收
+ * （字面量直取、标识符回溯 const），并且三种「今天不可达但会把子集当成全集」的形状
+ * （字符串里的 marker、正则/模板插值、非标识符的顶层键、嵌套 Schema.object）一律
+ * 记进 unresolved 交断言侧点名，而不是硬猜。
  */
 function hostSchemaFields(source: string): { fields: string[]; unresolved: string[] } {
   // 先剥注释再找块：注释里写着的 `Schema.object({ legacy: 1 })` 也是一处字面匹配，
   // 拿它当块起点会把 `legacy` 收进字段全集，随后报成「卡片未暴露」——纯属虚构的漏项。
   const hostTs = stripComments(source);
-  const marker = "Schema.object(";
   const fields = new Set<string>();
   const unresolved: string[] = [];
-  let from = 0;
-  for (;;) {
-    const start = hostTs.indexOf(marker, from);
-    if (start === -1) {
-      break;
-    }
-    from = start + marker.length;
-    const open = hostTs.indexOf("(", start);
-    const argument = open === -1 ? "" : parensAt(hostTs, open);
-    const parsed = argument === "" ? [] : fieldsOfSchemaArgument(hostTs, argument);
-    if (parsed.length === 0) {
+  const blocks: { start: number; end: number }[] = [];
+  for (const start of codePositions(hostTs, SCHEMA_MARKER)) {
+    // marker 本身以 "(" 结尾：配对从那枚括号起算，不存在找不到 "(" 的分支。
+    const open = start + SCHEMA_MARKER.length - 1;
+    const nested = blocks.some((block) => open >= block.start && open < block.end);
+    const { body, end } = nested ? { body: "", end: -1 } : sliceSpan(hostTs, open, "(", ")");
+    if (nested) {
+      // 嵌套键永远不可能被卡片直接绑定，把它并进字段全集等于逼作者加一条假豁免。
+      unresolved.push(`嵌套的 ${SCHEMA_MARKER}…（只收最外层块，这一处要人工判）`);
+    } else if (end === -1) {
+      // 配不上对，最常见就是那两种认不得的写法把字符串状态带偏了：在块起点之后的一小段里
+      // 找嫌疑点名（扫到文件末尾会把无关代码也报成成因）。
+      const suspects = lexerHazards(hostTs.slice(open, open + 120));
       unresolved.push(
-        argument === "" ? `${marker}… 的括号没有配对` : `${marker}${argument.trim().slice(0, 40)})`,
+        `${SCHEMA_MARKER}… 的括号没有配对${
+          suspects.length === 0 ? "" : `（嫌疑写法：${suspects.join("；")}）`
+        }`,
       );
-    }
-    for (const field of parsed) {
-      fields.add(field);
+    } else {
+      blocks.push({ start, end });
+      readSchemaBlock(hostTs, body, fields, unresolved);
     }
   }
   return { fields: [...fields], unresolved };
@@ -325,10 +500,12 @@ function walk(dir: string): string[] {
     return out;
   }
   for (const entry of entries) {
-    const usable = entry.name !== "node_modules" && !entry.isSymbolicLink();
+    // 测试/规格/夹具里的字段名是期望值不是绑定面，算进来会把「卡片漏绑」洗成绿。
+    const isTestCase = /\.(?:test|spec)\.[^.]+$/u.test(entry.name) || entry.name === "__fixtures__";
+    const usable = entry.name !== "node_modules" && !entry.isSymbolicLink() && !isTestCase;
     const filePath = path.join(dir, entry.name);
     if (!usable) {
-      // 跳过依赖树与软链（后者可能自指，跟随就会无限递归）。
+      // 跳过依赖树、软链与测试面（软链可能自指，跟随就会无限递归）。
     } else if (entry.isDirectory()) {
       out.push(...walk(filePath));
     } else if (CLIENT_SOURCE_EXTENSIONS.some((ext) => entry.name.endsWith(ext))) {

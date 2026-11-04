@@ -12,6 +12,9 @@
 
 export type RescueKind = "resume" | "continue" | "unfinished";
 
+/** 配额用尽的拒因（onFailure 决策的 reason 位）；测试与调用方都按它认，不抄字面量。 */
+export const MAX_RESUMES_REASON = "max-resumes";
+
 /** 跨版本脏快照的 kind 可能是空串（见 `PendingRecord` 的注释）：快照读面、结算与
  *  恢复路径共用这一条回落，别在三处各写一遍。 */
 export function rescueKindOf(kind: RescueKind | ""): RescueKind {
@@ -121,6 +124,10 @@ export const MAX_SESSIONS = 200;
 
 export class ResumeScheduler {
   private readonly sessions = new Map<string, SessionRecord>();
+  /** 被淘汰记录留下的配额记忆：记录可以遗忘，`max*` 这道防失控闸门不能随记录一起消失——
+   *  否则一个长驻 daemon 每填满 MAX_SESSIONS 个会话，就把此前烧掉的次数悄悄复位一次。
+   *  它同样会随会话数增长，所以按同一个天花板收着（丢最旧），别把无界膨胀挪个地方放。 */
+  private readonly quotaMemo = new Map<string, Record<RescueKind, number>>();
   private readonly now: () => number;
 
   public constructor({ now }: { now?: () => number } = {}) {
@@ -132,9 +139,13 @@ export class ResumeScheduler {
     if (rec !== undefined) {
       return rec;
     }
-    this.evictIdleSessions();
+    this.evictIdleSessions(sessionId);
+    const remembered = this.quotaMemo.get(sessionId);
+    if (remembered !== undefined) {
+      this.quotaMemo.delete(sessionId);
+    }
     rec = {
-      counts: { resume: 0, continue: 0, unfinished: 0 },
+      counts: remembered ?? { resume: 0, continue: 0, unfinished: 0 },
       lastFireAt: { resume: null, continue: null, unfinished: null },
       pending: null,
       disposeTimer: null,
@@ -147,11 +158,11 @@ export class ResumeScheduler {
 
   /** 还能不能为新会话建记录：满了先试淘汰空闲记录，仍满则拒绝。
    *  返回 false 时调用方必须跳过，而不是继续 `rec()` —— 那正是 Map 无界膨胀的入口。 */
-  private hasCapacity(): boolean {
+  private hasCapacity(creatingFor?: string): boolean {
     if (this.sessions.size < MAX_SESSIONS) {
       return true;
     }
-    this.evictIdleSessions();
+    this.evictIdleSessions(creatingFor);
     return this.sessions.size < MAX_SESSIONS;
   }
 
@@ -159,12 +170,30 @@ export class ResumeScheduler {
    *  直到未超限。挂起中的记录绝不淘汰——它欠着一次补发，被 `restorePending()` 重建时
    *  会拿到一枚 counts 全 0 的新记录，等于把 `maxResumes` 这道防失控闸门静默清零
    *  （长跑 daemon 每满 MAX_SESSIONS 个会话就复位一次）。 */
-  private evictIdleSessions(): void {
+  /** 记下即将被丢弃记录的配额，并把记忆表按「最近被淘汰的留在后面」排好——Map 的 set 对已存在的
+   *  键不改变插入位置，所以先删再写，让超限时要丢的那一枚真是最旧的。 */
+  private rememberQuota(sessionId: string, rec: SessionRecord, protect?: string): void {
+    this.quotaMemo.delete(sessionId);
+    this.quotaMemo.set(sessionId, { ...rec.counts });
+    // 按插入序丢最旧的，直到回到天花板。`protect` 那一格让开：它正是此刻要登座的那个会话，
+    // 为了给它腾位而把它自己的配额挤掉，等于这次修复自己关掉自己——宁可临时多留一格。
+    for (const key of this.quotaMemo.keys()) {
+      if (this.quotaMemo.size <= MAX_SESSIONS) {
+        return;
+      }
+      if (key !== protect) {
+        this.quotaMemo.delete(key);
+      }
+    }
+  }
+
+  private evictIdleSessions(protect?: string): void {
     if (this.sessions.size < MAX_SESSIONS) {
       return;
     }
     for (const [key, rec] of this.sessions) {
       if (rec.pending === null && rec.disposeTimer === null && !rec.suspended) {
+        this.rememberQuota(key, rec, protect);
         this.sessions.delete(key);
       }
       if (this.sessions.size < MAX_SESSIONS) {
@@ -190,7 +219,7 @@ export class ResumeScheduler {
     if (typeof sessionId !== "string" || sessionId === "") {
       return { action: "skip", reason: "invalid-session" };
     }
-    if (!this.sessions.has(sessionId) && !this.hasCapacity()) {
+    if (!this.sessions.has(sessionId) && !this.hasCapacity(sessionId)) {
       return { action: "skip", reason: "capacity" };
     }
     const rec = this.rec(sessionId);
@@ -198,7 +227,7 @@ export class ResumeScheduler {
       return { action: "skip", reason: "pending" };
     }
     if (rec.counts[kind] >= maxResumes) {
-      return { action: "skip", reason: "max-resumes" };
+      return { action: "skip", reason: MAX_RESUMES_REASON };
     }
     const nowTime = this.now();
     const firedAt = rec.lastFireAt[kind];
@@ -302,12 +331,12 @@ export class ResumeScheduler {
    * 清掉的记录。
    */
   public onSuccess(sessionId: string): void {
-    const rec = this.sessions.get(sessionId);
-    if (rec === undefined) {
+    const counts = this.quotaOf(sessionId);
+    if (counts === undefined) {
       return;
     }
-    rec.counts.resume = 0;
-    rec.counts.continue = 0;
+    counts.resume = 0;
+    counts.continue = 0;
     // 故意不重置 unfinished：它的触发条件本身就是「completed 且清单未闭合」，
     // 若成功回合也给它回满配额，就会形成 注入→仍带未完成清单完成→再注入 的
     // 无限循环。它的配额只能由 onTodosClosed() 恢复。
@@ -318,11 +347,22 @@ export class ResumeScheduler {
    * 语义：只有"确实做完了"才重新给补跑机会；注入后仍带未完成清单时配额消耗。
    */
   public onTodosClosed(sessionId: string): void {
-    const rec = this.sessions.get(sessionId);
-    if (rec === undefined) {
+    const counts = this.quotaOf(sessionId);
+    if (counts === undefined) {
       return;
     }
-    rec.counts.unfinished = 0;
+    counts.unfinished = 0;
+  }
+
+  /** 配额读写的落点：记录在位就是记录上的 counts，记录已被淘汰就是记忆里那一份。
+   *  少了这一层，「先被淘汰、之后才来一次成功」的会话会被记忆里的旧计数锁住——
+   *  成功复位不掉，下次重建记录又把它当成烧满配额的会话接回去。 */
+  private quotaOf(sessionId: string): Record<RescueKind, number> | undefined {
+    const rec = this.sessions.get(sessionId);
+    if (rec !== undefined) {
+      return rec.counts;
+    }
+    return this.quotaMemo.get(sessionId);
   }
 
   /** JSON 安全快照，供 state 读面序列化。 */
@@ -380,7 +420,7 @@ export class ResumeScheduler {
     // Map 只增不减——注释声明的「防无界膨胀」只在排期那一侧成立。
     // 该会话这一轮仍按「新回合」交回 true：它的水位与配额记不下，但它此后同样不会被
     // 排期（schedule 的容量判据会跳过），少了这枚记录不改变注入判据。
-    if (!this.sessions.has(sessionId) && !this.hasCapacity()) {
+    if (!this.sessions.has(sessionId) && !this.hasCapacity(sessionId)) {
       return true;
     }
     const rec = this.rec(sessionId);
@@ -412,15 +452,18 @@ export class ResumeScheduler {
 
   /**
    * 恢复一个此前被挂起的待办：重新登记 pending（保原 fireAt），
-   * 由调用方挂上新定时器。返回 false = 这份快照就此作废（该会话此刻已有别的待办，
-   * 或它已不再被调度器记录——dispose/淘汰过）。
+   * 由调用方挂上新定时器。返回 false = 这份快照就此作废（该会话此刻已有别的待办、
+   * 已不再被调度器记录（dispose/淘汰过），或它此刻根本没有挂起在等这次补发）。
    */
   public restorePending(sessionId: string, pending: PendingRecord): boolean {
     // 绝不凭空造记录：走 `rec()` 会为未知会话新建一枚 counts 全 0 的记录，于是
     // 「恢复一条已被 dispose/淘汰的挂起待办」拿到的是满额配额——`maxResumes` 这道
     // 防失控闸门被静默复位，且没有任何日志说为什么（属性层给的反例）。
     const rec = this.sessions.get(sessionId);
-    if (rec === undefined || rec.pending !== null) {
+    // 挂起是唯一合法来源：没挂起过的记录要么此刻正有空 pending（不该被快照覆盖），
+    // 要么从未走过 suspendSession（交回的快照没有出处，可能是脏数据）。
+    // fireAt 过期不在此拦截：恢复路径本来就允许立即补发，remainingMsFor 钳 0 由调用方定时。
+    if (rec === undefined || !rec.suspended || rec.pending !== null) {
       return false;
     }
     rec.pending = { ...pending };

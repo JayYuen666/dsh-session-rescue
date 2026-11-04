@@ -16,12 +16,14 @@ on:
   workflow_dispatch: {}
   schedule:
     - cron: "23 4 * * 1"
-  push:
-    branches: [main]
-# 四个入口（push / schedule / branch_protection_rule / workflow_dispatch）会撞在一起：
-# main 上的一次 push 与周度 cron 各跑同一份 analysis、往 code scanning 传同名 category 的
-# 结果，后传的覆盖前一份。所以按事件名分组、且不取消——体检结果不该因为又一次运行被判成
-# 「没量过」。口径与 ci.yml / codeql.yml 一致，只是这里不取消在飞的运行。
+# 入口只留 branch_protection_rule / workflow_dispatch / schedule。原先还挂了 push:[main]：
+# 官方模板没有这一条，而 scorecard 的依赖钉版、分支保护、CI-Tests 都是按周期数据算的检查，
+# main 上每合并一次就跑一遍完整体检、以同名 category 覆盖上一份 code scanning 结果（与 cron
+# 那一轮谁后完成谁生效）、再往 OpenSSF 公有 API 发一次，换来的增量信息接近零，还带限流风险。
+# concurrency 的真实语义写在这里，别按字面期待：cancel-in-progress: false 只保住**在跑**的那一轮，
+# 同组里已排队的 pending 运行仍会被新进入的那一个取消（官方文档：any existing pending job or
+# workflow in the same concurrency group will be canceled and the new queued job takes its place）。
+# 按事件名分组的作用是让 schedule 与 workflow_dispatch 各占一组、互不覆盖，不是「同组排队全保」。
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
@@ -35,6 +37,11 @@ jobs:
     timeout-minutes: 15
     # publish_results: true 只在默认分支生效，所以在非默认分支上不跑这条。
     if: github.event.repository.default_branch == github.ref_name
+    # 这个 job 的步骤清单是一条约束，不是一段说明：`id-token: write` 在 GitHub 的权限模型里
+    # 只能声明到 job 级，于是组内每一步都拿得到 OIDC 身份，`security-events: write` 同理。
+    # 现在四枚 action 全部按 commit SHA 钉版、checkout 关掉了 persist-credentials，风险由这两条压住；
+    # 往后往这里追加任何 `run` 步骤都会自动继承这两项写权限，等于把 OIDC 换到的身份交给仓库脚本。
+    # 要加步骤就一并把它钉成 SHA 并说清它为什么需要写权限，别默认它能进来跑一段脚本。
     permissions:
       security-events: write
       id-token: write
@@ -56,13 +63,16 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
+      # SARIF 先上传：这是结论的落点（code scanning 面板）。留档那一步排在它后面，
+      # 这样 artifact 存储配额或并发写入限制挡住留档时，本轮体检结论已经交到面板上。
+      # 两步都不做 continue-on-error——留档失败也是一次真失败，只是不该由它决定结论有没有送到。
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          sarif_file: results.sarif
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: scorecard-sarif
           path: results.sarif
           retention-days: 5
-      - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
-        with:
-          sarif_file: results.sarif

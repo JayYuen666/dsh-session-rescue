@@ -129,17 +129,19 @@ export function profileBundleName(): string {
   return name;
 }
 
-/** 剥 YAML 标量的行尾注释（` #` 起到行尾）：引号内的 `#` 不算注释。 */
+/** 剥 YAML 标量的行尾注释（` #` 起到行尾）：引号内的 `#` 不算注释。
+ *  只在值**以引号开头**时进入引号状态：YAML plain scalar 里的撇号（`foo'bar`）不是
+ *  引号定界，任意位置起算会让引号态吞到行尾，注释剥不掉、id 带上注释。 */
 function stripYamlTrailingComment(raw: string): string {
-  let quote: string | null = null;
+  const first = raw.trimStart()[0] ?? "";
+  const quote: string | null = first === '"' || first === "'" ? first : null;
+  let inQuote = quote !== null;
   for (let i = 0; i < raw.length; i += 1) {
     const char = raw[i] ?? "";
-    if (quote !== null) {
+    if (inQuote) {
       if (char === quote) {
-        quote = null;
+        inQuote = false;
       }
-    } else if (char === '"' || char === "'") {
-      quote = char;
     } else if (char === "#" && i > 0 && /\s/u.test(raw[i - 1] ?? "")) {
       return raw.slice(0, i).trim();
     }

@@ -32,8 +32,8 @@ jobs:
     permissions:
       # 上传 SARIF 到 code scanning 面板所必需。
       security-events: write
-      # CodeQL 查询包要读 registry 上的 pack。
-      packages: read
+      # 不写 packages: read——本文件没有任何 packs / queries 输入，init 与 analyze 只用
+      # codeql-action 自带的默认套件，读 registry 上没有的东西这一步今天没有消费者。
       contents: read
     strategy:
       fail-fast: false
@@ -48,10 +48,16 @@ jobs:
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           languages: ${{ matrix.language }}
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           category: /language:${{ matrix.language }}
+        # fork 来的 pull_request 里 GITHUB_TOKEN 被强制降为只读，上面那项 security-events: write
+        # 拿不到，上传 SARIF 会以 `Resource not accessible by integration` 失败——那是仓库设置
+        # （Actions → General → Send write tokens to workflows from pull requests）的事，
+        # 不是贡献者的缺陷。所以这一支在 fork PR 上不阻塞合并，扫描结论仍从 cron 与 push 进面板。
+        # 对本仓自己的 pull_request（同仓库分支）仍然判红。
+        continue-on-error: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}

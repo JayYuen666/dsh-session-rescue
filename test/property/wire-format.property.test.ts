@@ -69,7 +69,8 @@ function parseWireSessions(sessions: unknown): RescueStateBody | null {
 function assertEntryShape(entry: RescueSessionState): void {
   assert.equal(typeof entry.count, "number");
   assert.ok(!Number.isNaN(entry.count), "count 不得是 NaN（渲染会写出 NaN 次）");
-  assert.equal(typeof entry.lastFireAt, "number");
+  // NaN/Infinity 都满足 typeof：解析侧的 preprocess 承诺的就是有限数，这里同口径。
+  assert.ok(Number.isFinite(entry.lastFireAt), "lastFireAt 必须是有限数");
   const { pending } = entry;
   if (pending !== null) {
     // pending 只认「四位齐全且类型正确」的形状：坏 pending 一律降级为 null，否则 dock
@@ -78,6 +79,13 @@ function assertEntryShape(entry: RescueSessionState): void {
     assert.equal(typeof pending.kind, "string");
     assert.equal(typeof pending.fireAt, "number");
     assert.equal(typeof pending.remainingMs, "number");
+    // NaN 漏过 typeof 守卫，而 dock 拿它渲染「NaN 秒」：四位数值都要是有限数。
+    assert.ok(
+      Number.isFinite(pending.turn) &&
+        Number.isFinite(pending.fireAt) &&
+        Number.isFinite(pending.remainingMs),
+      "pending 的数值位必须是有限数",
+    );
   }
 }
 
@@ -120,20 +128,76 @@ describe("/state 载荷解析（任意 JSON）", () => {
   });
 
   it("计数降级：非数字落回 0，但不被擅自取整", () => {
+    let rowsSeen = 0;
     fc.assert(
       fc.property(wireSessionsArbitrary, (sessions) => {
         const parsed = parseWireSessions(sessions);
+        const entries = Object.values(parsed?.sessions ?? {});
+        rowsSeen += entries.length;
         // 判据收在「是个数、且不是 NaN」：解析器承诺的是「非数字落回 0」，它没承诺取整，
         // 也不该被断言取整（`5e-324` 那样的正当数字不是缺陷——本层第一版就在这里误判过）。
-        for (const entry of Object.values(parsed?.sessions ?? {})) {
+        for (const entry of entries) {
           assertEntryShape(entry);
         }
-        // 无效载荷也要留下一次断言：`{ok:true}` 之外的表形都该被整体拒收，
-        // 而不是半张表进快照。
-        assert.ok(parsed === null || parsed.ok, "解析结果要么 null、要么 ok:true");
       }),
       { numRuns: 500 },
     );
+    assert.ok(rowsSeen > 0, "随机表形里一行都没出现过 ⇒ 这条属性只在空集上成立");
+  });
+
+  it("定向：非有限数在 count/lastFireAt 落 0、在 pending 整位降级", () => {
+    // 随机形态只能观察「是个非 NaN 的数」，观察不到「恰是 0」：定向输入把
+    // 「落回 0」这条承诺钉死。
+    const bads: readonly (readonly [string, unknown])[] = [
+      ["字符串", "3"],
+      ["布尔", true],
+      ["null", null],
+      ["对象", {}],
+      ["数组", []],
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+    ];
+    for (const [label, bad] of bads) {
+      const parsed = parseWireSessions({ s1: { count: bad, lastFireAt: 0, pending: null } });
+      assert.ok(parsed !== null, "外形合法的载荷必须解析成功");
+      const row = parsed.sessions?.["s1"];
+      assert.ok(row !== undefined, "合法外形的行保留");
+      assert.equal(row.count, 0, `count=${label} 落 0`);
+    }
+    // 标题的后半句「但不被擅自取整」要有等值判据：随机形态只看得到「是个非 NaN 的数」，
+    // 观察不到 1.5 被悄悄压成 1。
+    const keeps: readonly (readonly [string, number])[] = [
+      ["非整数 1.5", 1.5],
+      ["最小正规数", Number.MIN_VALUE],
+    ];
+    for (const [label, good] of keeps) {
+      const parsed = parseWireSessions({ s1: { count: good, lastFireAt: 0, pending: null } });
+      assert.ok(parsed !== null, "外形合法的载荷必须解析成功");
+      assert.equal(parsed.sessions?.["s1"]?.count, good, `count=${label} 不该被改动`);
+    }
+    // 同样的定向输入要给 lastFireAt 与 pending 的数值位：`fc.jsonValue()` 造不出
+    // NaN/Infinity（JSON 里没有这两个字面量），所以属性里那两条 isFinite 断言只有在这一面
+    // 才有可证伪性——实测过：撤掉实现的守卫，随机面 9 条全绿。
+    const nonFinite: readonly (readonly [string, number])[] = [
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+    ];
+    for (const [label, bad] of nonFinite) {
+      const fireAtRow = parseWireSessions({
+        s1: { count: 1, lastFireAt: bad, pending: null },
+      })?.sessions?.["s1"];
+      assert.ok(fireAtRow !== undefined, "合法外形的行保留");
+      assert.equal(fireAtRow.lastFireAt, 0, `lastFireAt=${label} 落 0`);
+      const pendingRow = parseWireSessions({
+        s1: {
+          count: 1,
+          lastFireAt: 0,
+          pending: { turn: 1, kind: "resume", fireAt: 0, remainingMs: bad },
+        },
+      })?.sessions?.["s1"];
+      assert.ok(pendingRow !== undefined, "合法外形的行保留");
+      assert.equal(pendingRow.pending, null, `pending 含 ${label} 时整位降级为 null`);
+    }
   });
 });
 
@@ -152,6 +216,11 @@ describe("轮询档位与退避（数值面）", () => {
         let previous = backoffMs(base, streaks[0] ?? 0);
         for (const streak of streaks) {
           const next = backoffMs(base, streak);
+          // 0/1 跳按**原档**是标题承诺的判据：只断单调不减时，实现把首档抬到
+          // 2×base 这条用例照样绿。
+          if (streak <= 1) {
+            assert.equal(next, base, `streak=${String(streak)} 必须仍是原档`);
+          }
           assert.ok(next >= base, `退避不得低于原档（streak=${String(streak)}）`);
           assert.ok(next >= previous, "连跳越多间隔不得变短");
           previous = next;
@@ -191,11 +260,36 @@ describe("轮询档位与退避（数值面）", () => {
 describe("dock 渲染决策（信号组合）", () => {
   it("hasContent 恰等于「有区块要渲染」；toggle=unknown 恰等于「快照不在场」", () => {
     const flagsArbitrary = fc.array(fc.boolean(), { minLength: 6, maxLength: 6 });
-    const rescueArbitrary = fc.oneof(fc.constant(null), fc.constant({ ok: true } as const));
+    /** 三种快照形态各自被抽到的次数：漏抽一支，那一支的判据就是空转。 */
+    const seen = { absent: 0, empty: 0, pending: 0 };
+    const rescueArbitrary = fc.oneof(
+      fc.constant(null),
+      fc.constant({ ok: true } as const),
+      // 带 pending 的快照：pending 那一项的「容器必须显形」只有这种形态到得了
+      // （pending 依附于会话行，快照不在场时 pending 恒 null）。
+      fc.constant({
+        ok: true,
+        sessions: {
+          s1: {
+            count: 1,
+            lastFireAt: 0,
+            pending: { turn: 2, kind: "resume", fireAt: 1, remainingMs: 50 },
+          },
+        },
+      } as const),
+    );
     fc.assert(
       fc.property(flagsArbitrary, rescueArbitrary, (flags, rescue) => {
         const actions = actionsOf(flags);
         const decision = decideDockState(actions, rescue, "s1");
+        const withPending = rescue !== null && "sessions" in rescue;
+        if (rescue === null) {
+          seen.absent += 1;
+        } else if (withPending) {
+          seen.pending += 1;
+        } else {
+          seen.empty += 1;
+        }
         const anyBlock =
           decision.pending !== null ||
           decision.showToggleRow ||
@@ -211,8 +305,15 @@ describe("dock 渲染决策（信号组合）", () => {
         assert.equal(decision.toggle === "unknown", rescue === null);
         assert.equal(decision.showToggleRow, rescue !== null);
         assert.equal(decision.rescueKnown, rescue !== null);
+        // 快照里真有 pending 时，渲染面必须拿到它：抽样若永远抽不到这一支，上一行的
+        // hasContent 判据就只在「pending 恒 null」的形态下成立。
+        assert.equal(withPending, decision.pending !== null, "快照里的 pending 要原样交回渲染面");
       }),
       { numRuns: 100 },
+    );
+    assert.ok(
+      seen.absent > 0 && seen.empty > 0 && seen.pending > 0,
+      `三种快照形态都要被抽到，实测 ${JSON.stringify(seen)}`,
     );
   });
 

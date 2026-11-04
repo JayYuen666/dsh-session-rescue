@@ -18,8 +18,19 @@ import type { RescueFacts } from "../lib/turn-facts.ts";
  * 但 `as never` 也让**签名漂移**不可见——`init` 改成收三个参数、`apply` 改名或换形状，
  * 这里照样编译通过，只在运行时折出不一样的状态。所以在绕过类型之前先做一次形状探针：
  * 拿到的不是函数就立刻点名，而不是把「注册表接口变了」表现成「折叠结果不对」。
+ * 绕过只发生在本文件：用例改用 `initFacts` / `applyOnce`，不再自己写 `as never`。
  */
-export function foldEvents(events: readonly unknown[]): RescueFacts {
+/** 最小形状判据：init/apply 交回的必须还是 RescueFacts 的骨架（apply 改成原地
+ *  mutate 返回 void 时，这里当场点名，而不是让后续折叠以莫名的读数漂下去）。 */
+function isFacts(value: unknown): boolean {
+  return (
+    typeof value === "object" && value !== null && "openers" in value && "latestTurnStart" in value
+  );
+}
+
+/** 折叠口的形状探针：`init`/`apply` 只要有一个不再是函数就点名，不往下走。
+ *  返回整个单元而不是拆出的方法——宿主那侧的教训是拆方法会丢接收者。 */
+function requireUnit(): typeof rescueFactsProjection {
   if (
     typeof rescueFactsProjection.init !== "function" ||
     typeof rescueFactsProjection.apply !== "function"
@@ -28,9 +39,33 @@ export function foldEvents(events: readonly unknown[]): RescueFacts {
       "turn-facts 投影缺 init 或 apply：ProjectionDefinition 的形状变了，折叠替身要先跟上",
     );
   }
-  let state = rescueFactsProjection.init({} as never, 0 as never);
+  return rescueFactsProjection;
+}
+
+/** 投影的首值（空日志初态；夹具不带官方 SessionHeader）。 */
+export function initFacts(): RescueFacts {
+  const state = requireUnit().init({} as never, 0 as never);
+  if (!isFacts(state)) {
+    throw new TypeError("init 交回的不是 RescueFacts 形状（缺 openers/latestTurnStart）");
+  }
+  return state;
+}
+
+/** 一条事件的一次转移；`cause` 带着那条事件，所以不必再报第几位（折叠在首个坏位即停）。 */
+export function applyOnce(state: RescueFacts, event: unknown): RescueFacts {
+  const next = requireUnit().apply(state, event as never);
+  if (!isFacts(next)) {
+    throw new TypeError("apply 交回的不是 RescueFacts 形状（缺 openers/latestTurnStart）", {
+      cause: event,
+    });
+  }
+  return next;
+}
+
+export function foldEvents(events: readonly unknown[]): RescueFacts {
+  let state = initFacts();
   for (const event of events) {
-    state = rescueFactsProjection.apply(state, event as never);
+    state = applyOnce(state, event);
   }
   return state;
 }

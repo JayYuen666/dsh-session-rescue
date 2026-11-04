@@ -21,6 +21,8 @@ import type { ConfigureCall, SchemaNode } from "./config-refs.ts";
 const TURN_START_EVENT = "turn/start";
 const USER_MESSAGE_EVENT = "user/message";
 const AGENT_ERROR_EVENT = "agent/error";
+const AGENT_REQUEST_ERROR_EVENT = "agent/request-error";
+const AGENT_DISPOSED_EVENT = "agent/disposed";
 /** 设置文档变更事件名：locale 偏好缓存据此失效，宿主按命名空间逐条推送。 */
 const SETTINGS_UPDATED = "settings/document-updated";
 /** 本包的 locale 命名空间（官方 client-locale 那条设置行投影出来的 ns）。 */
@@ -241,6 +243,9 @@ function createMockCtx(): MockCtx {
       };
     },
     stateOf(session, key) {
+      // key 硬校验：注册键与查询键不同源（或 RESCUE_FACTS_KEY 改名）时，仅靠一条
+      // reads 深比较兜底会让其余投影用例照绿——键漂移必须在每次读数上现红。
+      assert.equal(key, RESCUE_FACTS_KEY, "投影查询键与本包注册键漂移");
       reads.push({ session, key });
       const fold = foldOverride.value ?? foldEvents;
       return fold(session.evs);
@@ -360,7 +365,10 @@ function createMockCtx(): MockCtx {
       handlers[event]?.(data);
     },
     tick() {
-      for (const entry of timers) {
+      // 先快照再触发：触发回调里链式排出的新定时器属下一轮，当场执行会把
+      // 「重复调度/多枚定时器」这类回归并进同一次 tick 掩盖掉。
+      const snapshot = [...timers];
+      for (const entry of snapshot) {
         if (!entry.fired && !entry.cancelled) {
           entry.fired = true;
           entry.fn();
@@ -528,14 +536,15 @@ function evTurnEnd(turn: number, kind: string): unknown {
   return { type: "turn/end", seq: turn * 10, time: turn * 10, data: { turn, reason: { kind } } };
 }
 
-/** 整表替换事件流（mock 的 evs 由 makeAgent 恒提供）。 */
-function replaceAllEvents(agent: { session: { evs?: unknown[] } }, events: unknown): void {
+/** 整表替换事件流（mock 的 evs 由 makeAgent 恒提供）。单数：本替身把入参整条 push，
+ *  传数组会得到嵌套数组并被 fold 静默跳过——复数名字会诱导后来者那么传。 */
+function replaceEvent(agent: { session: { evs?: unknown[] } }, event: unknown): void {
   const { evs } = agent.session;
   if (evs === undefined) {
     throw new Error("mock session.evs missing");
   }
   evs.length = 0;
-  evs.push(events);
+  evs.push(event);
 }
 
 describe("settings 隐式注册（0.1.7：命名空间 = profile 条目 id）", () => {
@@ -1481,7 +1490,7 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
     register(ctx, agent);
     // 打满 3 次 resume（每次 fire 后推进回合，避开 newer-turn 否决）
     for (let i = 1; i <= 3; i += 1) {
-      replaceAllEvents(agent, evTurnEnd(i, "error"));
+      replaceEvent(agent, evTurnEnd(i, "error"));
       ctx.fire(AGENT_ERROR_EVENT, {
         agent,
         turn: i,
@@ -1492,7 +1501,7 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
     }
     assert.equal(ctx.timers.length, 3, "前置：应已 fire 满 3 次");
     // 第 4 次瞬时失败：修复前会被 max-resumes 静默拦掉
-    replaceAllEvents(agent, evTurnEnd(4, "error"));
+    replaceEvent(agent, evTurnEnd(4, "error"));
     ctx.fire(AGENT_ERROR_EVENT, {
       agent,
       turn: 4,
@@ -1501,9 +1510,9 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
     });
     assert.equal(ctx.timers.length, 3, "满额后应无新定时器");
     // 一次成功回合 → 配额恢复
-    replaceAllEvents(agent, evTurnEnd(5, "completed"));
+    replaceEvent(agent, evTurnEnd(5, "completed"));
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
-    replaceAllEvents(agent, evTurnEnd(6, "error"));
+    replaceEvent(agent, evTurnEnd(6, "error"));
     ctx.fire(AGENT_ERROR_EVENT, {
       agent,
       turn: 6,
@@ -1539,7 +1548,7 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
 
   /** 记一次「某条线路的请求失败了」：窗口内只有这条事件带得出实际线路。 */
   async function failRequest(agent: MockAgent, provider: string): Promise<void> {
-    const handler = ctx.handlers["agent/request-error"] as unknown as (
+    const handler = ctx.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as (
       payload: unknown,
       next: () => Promise<unknown>,
     ) => Promise<unknown>;
@@ -1593,7 +1602,7 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
     await failRequest(agent, "beta");
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(lessons.length, 1);
-    replaceAllEvents(agent, evTurnEnd(2, "completed"));
+    replaceEvent(agent, evTurnEnd(2, "completed"));
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(passes.length, 1, "成功回合兑一条 pass");
     assert.match(String(passes[0]?.["signature"]), /^beta\b/u, "兑的是失败请求 B，不是待选 C");
@@ -1611,7 +1620,7 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
       },
     });
     register(ctx, agent);
-    const handler = ctx.handlers["agent/request-error"] as unknown as (
+    const handler = ctx.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as (
       payload: unknown,
       next: () => Promise<unknown>,
     ) => Promise<unknown>;
@@ -1726,7 +1735,7 @@ describe("agent/request-error 请求级 429 重试", () => {
 
   /** 取 request-error 监听器（waterfall 形态：payload+next → Promise<action>）。 */
   function reListener(box: MockCtx): REListener {
-    const handler = box.handlers["agent/request-error"] as unknown as REListener;
+    const handler = box.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as REListener;
     assert.ok(typeof handler === "function", "agent/request-error 监听器已注册");
     return handler;
   }
@@ -1743,7 +1752,7 @@ describe("agent/request-error 请求级 429 重试", () => {
    *  「真的重发」时才占用，先 ++ 再判 abort 会白烧一次配额）。写成递归而非 for+await，避开
    *  no-await-in-loop。 */
   async function fireSequence(box: MockCtx, evt: unknown, times: number): Promise<unknown[]> {
-    const listener = box.handlers["agent/request-error"] as unknown as (
+    const listener = box.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as (
       payload: unknown,
       next: () => Promise<unknown>,
     ) => Promise<unknown>;
@@ -1930,6 +1939,48 @@ describe("agent/request-error 请求级 429 重试", () => {
       assert.deepEqual(act, retryAction, `第 ${index + 1} 次退避后放行`);
     }
     assert.deepEqual(delays, [2000, 5000, 10_000, 20_000, 30_000], "阶梯逐级拉长且封顶 30s");
+  });
+
+  it("退避等待的两条收台路径都成对撤掉 abort 监听", async () => {
+    // 监听登记时带 once，但「计时到点」与「卸载释放器」两支若不主动 removeEventListener，
+    // 监听本体要一直挂到 signal 真中止或整条链被回收——在长驻宿主手里的那枚 signal 上就是
+    // 一段无谓保留。桩件按引用计数，所以「撤没撤」在这里是读得出来的事实，不是读注释。
+    const counts = { added: 0, removed: 0 };
+    const stub = {
+      aborted: false,
+      addEventListener: (): void => {
+        counts.added += 1;
+      },
+      removeEventListener: (): void => {
+        counts.removed += 1;
+      },
+    } as unknown as AbortSignal;
+    const armed = (sessionId: string): unknown => ({
+      agent: makeAgent(sessionId, "sensenova"),
+      turn: 1,
+      step: 1,
+      provider: "sensenova",
+      failure: { code: "QUOTA", message: QUOTA_EXCEEDED_TEXT },
+      retryPolicy: undefined,
+      signal: stub,
+    });
+    // 到点一支：退避定时器触发 → 摘监听，再委托 next()。
+    const first = reListener(ctx)(armed("lk-fire"), nextNoop);
+    assert.equal(counts.added, 1, "武装退避时登记一枚 abort 监听");
+    ctx.tick();
+    await first;
+    assert.equal(counts.removed, 1, "计时到点这一支主动摘掉监听");
+    // 卸载一支：effect 的释放器（runtime.backoffs 里那位）被调用时同样要摘。
+    const second = reListener(ctx)(armed("lk-dispose"), nextNoop);
+    assert.equal(counts.added, 2, "第二次武装又登记一枚");
+    const live = remoteOf(ctx) as unknown as { runtime: { backoffs: Set<() => void> } };
+    assert.ok(live.runtime.backoffs.size > 0, "在途的退避等待把释放器登记进了 backoffs");
+    // 直接迭代这个 Set：释放器会把自己从集合里摘掉，Set 的迭代器对被删的那一枚本就不再访问。
+    for (const release of live.runtime.backoffs) {
+      release();
+    }
+    assert.equal(counts.removed, 2, "卸载这一支也成对摘掉监听");
+    await second;
   });
 
   it("退避等待中 signal 已中止 → 委托 next() 终结，不重发", async () => {
@@ -2365,10 +2416,7 @@ describe("state 路由：调度器记录被淘汰后挂起快照仍如实可见"
     assert.equal(keptRow.count, 0);
     assert.equal(keptRow.lastFireAt, 0);
     assert.equal(keptRow.disabled, false);
-    assert.ok(
-      Object.hasOwn(st.sessions, "kept"),
-      "挂起中的记录不得被淘汰：它欠着一次补发，counts 也是有效的防失控闸门",
-    );
+    // kept 在表里这件事上面已经断言过（keptRow 的读取本身就以它为前提）。
     assert.equal(st.sessions["filler-0"], undefined, "被挤掉的是已 settle 的空闲记录");
     assert.equal(
       (st.sessions["filler-199"] as { count: number }).count,
@@ -2383,7 +2431,7 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
     const localCtx = createMockCtx();
     applyPlugin(localCtx);
     const agent = makeAgent("dx1", "sensenova");
-    const listener = localCtx.handlers["agent/request-error"] as unknown as (
+    const listener = localCtx.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as (
       result: unknown,
       next: () => Promise<unknown>,
     ) => Promise<unknown>;
@@ -2406,7 +2454,7 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
     await step(1);
     assert.equal(results[5], "NEXT");
     // agent/disposed → 计数清零；同会话再次失败回到重试路径（若未清理则仍是耗尽）
-    localCtx.handlers["agent/disposed"]?.({ agent });
+    localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
     await step(1);
     assert.deepEqual(results[6], { kind: "retry" });
   });
@@ -2419,7 +2467,7 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
     remoteOf(localCtx).toggle({ sessionId: "dx2" });
     localCtx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(localCtx.timers.length, 0, "toggle 关闭期间不调度");
-    localCtx.handlers["agent/disposed"]?.({ agent });
+    localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
     localCtx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(localCtx.timers.length, 1, "dispose 清理开关后同 id 新会话恢复调度");
   });

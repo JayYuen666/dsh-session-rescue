@@ -11,12 +11,47 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+# 与 ci.yml 同一枚取值：门禁 certify 的那棵树与发布装的树要由同一个 pnpm 解出。GitHub Actions 没有
+# 跨文件的 env，抬版本时与 ci.yml 那份一起动。
+env:
+  PNPM_VERSION: 12.11.2
 jobs:
-  # 检查与发布是两个 job，只有 publish 持有 id-token: write。install 与 pnpm run check
-  # （以及它们执行的依赖安装脚本）因此拿不到任何 OIDC token——在那个 job 里它们本来不需要
-  # 发布能力。publish job 内仍有一次 install：pnpm publish 的 prepack 要重建产物，那条链离
-  # 不开 node_modules。这层暴露是发布本身固有的，拆 job 消不掉它，只能在注释里写清。
+  # 守卫要排在最前面：它原来坐在 publish job 的第一步，而 publish needs: check——从功能分支或
+  # tag 派发时，install、三次构建与三套测试（job 上限 45 分钟）已经在那个 ref 上跑完了，
+  # 「只从默认分支发布」在时间顺序上根本没起作用。tag 派发时 github.ref_name 是标签名，
+  # 那条守卫只会给一句与成因无关的红，所以这里把成因写进判据本身。
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: 确认发布只发生在默认分支
+        env:
+          TARGET_REF: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error::发布不能从 tag 派发：当前 ref 类型是 $REF_TYPE（$TARGET_REF）。要在 Settings → Actions → Workflow runs 里选默认分支重新触发。"
+            exit 1
+          fi
+          if [ "$TARGET_REF" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::发布只能从默认分支（$DEFAULT_BRANCH）派发，当前是 $TARGET_REF。要发版请先把改动合进默认分支再 dispatch。"
+            exit 1
+          fi
+  # 三个 job：guard（守卫）→ check（装依赖、跑完整检查、打包）→ publish（只发布那枚 tarball）。
+  # id-token: write 只挂在 publish 上，而 publish 里不再有 pnpm install：那一步会跑本包 prepare
+  # 与依赖的安装脚本，它们同进程能读到 runner 注入的 ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN，等于把
+  # 「换一枚短期发布凭据」的能力交给全部 devDependencies 的代码。产物由 check job（只有 contents: read）
+  # 用 pnpm pack 打出来，经 artifact 交给 publish，发布命令直接吃 tarball。
+  # 已证到的部分：本机 pnpm 12 对 `pnpm publish <tarball> --access public --provenance --dry-run`
+  # 回 0 并正确认出那枚 tarball（/tmp 探针）。**没证到**的是这条路径上的 provenance 签名——dry-run
+  # 不申请签名。第一次真发若败在 attestation，就把发布步回退成「publish job 内 install + 目录发布」，
+  # 并回到本注释说明这条路径为什么走不通，别把它改成不带 --provenance。
   check:
+    needs: guard
     runs-on: ubuntu-latest
     # 完整 check 要跑 typecheck / lint / 三次构建 / 三套测试 / 格式这几段。
     # 不设上限的话，卡住的那一步会烧满 runner 的上限才被杀，期间没有任何信号。
@@ -31,17 +66,35 @@ jobs:
           # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
+      # 产物在这里打包：install 已经跑过 prepare（三次构建的落点），pack 只归档，
+      # 所以这枚 tarball 与「publish job 内 install + publish 目录」那条旧路产出的是同一份出货面。
+      - name: 打包发布产物
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist-tarball"
+          pnpm pack --pack-destination "$RUNNER_TEMP/dist-tarball"
+          ls -l "$RUNNER_TEMP/dist-tarball"
+      - name: 传 artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publish-tarball
+          path: ${{ runner.temp }}/dist-tarball/*.tgz
+          retention-days: 1
+          # 只留一份、也不许压缩：publish 步按 glob 取那唯一一枚，压缩与多份都会让「发出去的是
+          # 刚才检过的那枚包」这件事失去可核对性。
+          if-no-files-found: error
+          compression-level: 0
   publish:
-    needs: check
+    needs: [guard, check]
     runs-on: ubuntu-latest
     # 发布链里有 install ；发布后由 registry 逐步可见。
     timeout-minutes: 45
@@ -58,29 +111,15 @@ jobs:
       # 只挂在这个 job 上：上面的 check job 不持有它，那里的脚本申请不到 OIDC token。
       id-token: write
     steps:
-      # 发布只允许从默认分支派发：workflow_dispatch 能在任意分支/tag 上触发，而 publish 会把
-      # 检出时刻的那棵树原样推到 registry——版本号一旦占用就撤不回，只能弃号再发新版。
-      # 用「失败」而不是 job 级 `if:` 跳过：跳过在结论上是绿的，误点的人只会看到工作流"成功"。
-      - name: 确认发布只发生在默认分支
-        env:
-          TARGET_REF: ${{ github.ref_name }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          if [ "$TARGET_REF" != "$DEFAULT_BRANCH" ]; then
-            echo "::error::发布只能从默认分支（$DEFAULT_BRANCH）派发，当前是 $TARGET_REF。要发版请先把改动合进默认分支再 dispatch。"
-            exit 1
-          fi
-      # action 按 tag 引用意味着上游动 tag 就等于本仓换了构建器。钉 commit SHA，
-      # tag 版本写在同行注释里，升级时照着改这一行即可。
+      # 检出只为了下面预检要读的 package.json / pnpm-workspace.yaml 两份文本；本 job 不装依赖，
+      # 所以这里跑不到任何 node_modules 里的脚本。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
-          # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
+          # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -104,19 +143,25 @@ jobs:
           fi
           if [ "$TOKEN" != "$TOKEN_TIDY" ]; then echo "注意：secret 里含空白/换行，已剔除后使用"; fi
           echo "::add-mask::$TOKEN_TIDY"
+          usable=true
           case "$TOKEN_TIDY" in
             npm_*) echo "token 形态：npm access token";;
-            ghp_*|github_pat_*) echo "这是 GitHub token——发到公共 npm 需要 npm 站点自己的 token（www.npmjs.com → Access Tokens），GH 的 token 对 npmjs 无效"; exit 1;;
+            ghp_*|github_pat_*)
+              # 判红会把本来能走 OIDC 的主路一起挡掉，而这一条与「能不能发布」无关：与下面 whoami
+              # 的 401/403 同一档处置——点名、不启用这枚静态 token，发布继续走 OIDC。
+              echo "::warning::这是一枚 GitHub token（对 npmjs 无效，npm 要 www.npmjs.com → Access Tokens 那枚）——本次不启用静态 token，按 OIDC 发布"
+              usable=false;;
             *) echo "注意：前缀不是 npm_，请确认它确实是 npm 的 access token";;
           esac
           junk=$(printf %s "$TOKEN_TIDY" | tr -d "A-Za-z0-9_-" | wc -c | tr -d " ")
           # 只报「有没有杂质」，不报长度：凭据的字符数是关于凭据本身的信息，CI 日志会长期留存。
           echo "token 度量：非法字符数=$junk"
           if [ "$junk" != "0" ]; then
-            echo "凭据里混进了非 token 字符（引号、说明文字之类）——请只贴 npm_ 开头那一串，不要带引号"
-            exit 1
+            echo "::warning::凭据里混进了非 token 字符（引号、说明文字之类）——本次不启用静态 token，请按 npmjs 生成的原样重贴；发布仍走 OIDC"
+            usable=false
           fi
-          # 只交出形态合格的结论；凭据本身留在本步骤，不写进任何可跨步骤读取的介质。
+          # 只交出「可用与否」这一个布尔；凭据本身留在本步骤，不写进任何可跨步骤读取的介质。
+          printf 'usable=%s\n' "$usable" >> "$GITHUB_OUTPUT"
       # 静态 token 只是兜底，所以这里判的是「还能不能用」，不是「必须有效」：
       #   · 200      → 原样传给发布步
       #   · 401/403  → 告警并清空，让发布步走 OIDC。凭据失效不是工作流该红的理由，
@@ -127,15 +172,22 @@ jobs:
         id: precheck
         env:
           TOKEN: ${{ secrets.NPM_TOKEN }}
+          TOKEN_USABLE: ${{ steps.norm.outputs.usable }}
         run: |
           set -euo pipefail
+          # curl 一律带上时限与重试：registry 半开连接或不响应时，这一步原本会一直挂到 45 分钟的
+          # job 上限才被杀，而 -s 连进度都不留，排查时看不出卡在哪一条。000（curl 自己失败）与真实
+          # HTTP 状态分开判读——网络故障不该被读成 registry 判否。
+          CURL_FLAGS=(--silent --show-error --connect-timeout 5 --max-time 15 --retry 2 --retry-delay 2)
           USE_STATIC=false
           PASS_TOKEN="$(printf '%s' "${TOKEN:-}" | tr -d '\r\n[:space:]')"
           if [ -n "$PASS_TOKEN" ]; then echo "::add-mask::$PASS_TOKEN"; fi
+          # 上一步判过形态：混进杂质或是一枚 GitHub token 时，这一路不再用它，直接按 OIDC 走。
+          if [ "$TOKEN_USABLE" != "true" ]; then PASS_TOKEN=""; fi
 
           if [ -n "$PASS_TOKEN" ]; then
             body="$(mktemp)"
-            code=$(curl -s -o "$body" -w "%{http_code}" -H "Authorization: Bearer $PASS_TOKEN" "https://registry.npmjs.org/-/whoami")
+            code=$(curl "${CURL_FLAGS[@]}" -o "$body" -w "%{http_code}" -H "Authorization: Bearer $PASS_TOKEN" "https://registry.npmjs.org/-/whoami")
             case "$code" in
               200)
                 login=$(sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$body")
@@ -149,37 +201,92 @@ jobs:
                 echo "::warning::静态 token 被 registry 拒（HTTP $code）——本次不启用它，按 OIDC 发布。这枚 secret 已失效，用完请到 Settings → Secrets 删掉，否则每次发布都留一条本行告警。"
                 PASS_TOKEN=""
                 ;;
+              000)
+                rm -f "$body"
+                echo "::error::whoami 请求本身没发出去（curl 失败，多半是网络或半开连接）——不是 registry 判否，先重试再判"
+                exit 1
+                ;;
               *)
                 rm -f "$body"
                 echo "whoami 返回 HTTP $code——既不是 200 也不是凭据被拒的 401/403，属 registry 侧异常，先查状态页再发"
                 exit 1
                 ;;
             esac
+          elif [ -n "${TOKEN:-}" ]; then
+            echo "whoami: 跳过——静态 token 形态不合格（见上面那条告警），按 OIDC 发布"
           else
             echo "whoami: 跳过——本次没有静态 token，按 OIDC 发布"
           fi
-          # 本包自身也要查：只查依赖的话，「版本号没进 main 就触发 workflow」这个最常见的
-          # 失败模式预检根本发现不了，只能等 publish 自己以版本冲突收尾。
-          # 包名从 manifest 现读而不是抄在这里：改名时抄写的那一份不会跟着变，预检就会去查
+          # 包名与版本都从 manifest 现读：抄在 workflow 里的那一份不会跟着改名走，预检就会去查
           # 一个已经不是本包的路径，404 被判成「首发（正常）」——预检在最需要它的那次静默放行。
-          self_name=$(node -p "require('./package.json').name.replace('/', '%2f')")
-          self=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${self_name}")
-          echo "读本包 ${self_name}：HTTP $self"
+          # 路径段用 encodeURIComponent 整串编码：`replace('/', '%2f')` 只替换第一处，名字一旦不是
+          # 「恰好一个斜杠」那种形态，查到的就不是目标包。
+          self_name=$(node -p "require('./package.json').name")
+          self_version=$(node -p "require('./package.json').version")
+          self_encoded=$(node -p "encodeURIComponent(require('./package.json').name)")
+          self=$(curl "${CURL_FLAGS[@]}" -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/${self_encoded}")
+          # 版本级预检：只看包根 200 判不出「本地版本号没抬」这一最常见失败——registry 上已有同号时
+          # 要等 publish 自己撞冲突，而那一跑已经把 install 之外的步骤都走完了。npm view 在
+          # setup-node 之后就可用，不需要装依赖。
+          published=$(npm view "$self_name" version 2>/dev/null || true)
           case "$self" in
-            404) echo "判读：首发（正常）";;
-            200) echo "判读：已发过——确认 package.json 的 version 比 registry 上的新，否则 publish 会撞版本冲突";;
+            000) echo "::error::本包读取连不出去（curl 失败）——网络问题，不是 registry 判否"; exit 1;;
+            404)
+              if [ -n "$published" ]; then
+                echo "::error::包根返回 404 但 npm view 给出 $published——两条读数互相矛盾，先确认包名与 registry 状态"
+                exit 1
+              fi
+              echo "本包 $self_name：registry 没有它（HTTP 404、npm view 无输出）——判读为首发（正常）";;
+            200)
+              if [ -z "$published" ]; then
+                echo "::error::包根 200 而 npm view 取不到版本——registry 侧读数不一致，先人工确认再发"; exit 1
+              fi
+              if [ "$published" = "$self_version" ]; then
+                echo "::error::版本号没抬：package.json 是 $self_version，registry 上已经是 $published。先把 version 改上去再发。"
+                exit 1
+              fi
+              # 「本地低于已发布」这里不做比较：那需要 semver 语义（预发布段的先后不是字符串序），
+              # 本步不手写一套比较器——同号与非更高版本由 registry 在 publish 时自己拒。
+              echo "本包 $self_name：本地 $self_version，registry 最新 $published——不相等，以 publish 自己的判据为准";;
             *) echo "预检失败：本包读取返回 $self"; exit 1;;
           esac
-          code=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@jayyuen66%2fdsh-plugin-shared")
-          echo "读 @jayyuen66/dsh-plugin-shared：HTTP $code"
-          echo "判读：200=依赖库已公开，可以发；404=shared 还没发到 npmjs，先发它（本包 pnpm install 会因此取不到依赖）"
-          [ "$code" = "200" ] || exit 1
+          # shared 按**本仓实际声明的那一版**查，而不是只查包根 200：包根在而版本低于声明值时预检放行，
+          # 症状落到消费者侧（`does not provide an export named …`、装得上却不生效）。
+          # 取值来源是投影下来的 pnpm-workspace.yaml：manifest 里那一格写的是 catalog:，只有这里给得出色值。
+          shared_range=$(node -p "require('./package.json').dependencies['@jayyuen66/dsh-plugin-shared']")
+          shared_spec=$(sed -n 's|^[[:space:]]*"@jayyuen66/dsh-plugin-shared":[[:space:]]*\([^[:space:]]*\).*|\1|p' pnpm-workspace.yaml | head -1)
+          if [ "$shared_range" = "catalog:" ] && [ -z "$shared_spec" ]; then
+            echo "::error::pnpm-workspace.yaml 的 catalog 里读不到 @jayyuen66/dsh-plugin-shared 的版本——预检没有可比对的目标版本"
+            exit 1
+          fi
+          shared_version=${shared_spec:-$shared_range}
+          shared_code=$(curl "${CURL_FLAGS[@]}" -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@jayyuen66%2Fdsh-plugin-shared")
+          shared_hit=$(npm view "@jayyuen66/dsh-plugin-shared@$shared_version" version 2>/dev/null || true)
+          if [ "$shared_code" = "000" ]; then
+            echo "::error::shared 的包根读取连不出去（curl 失败）——网络问题，不是依赖库缺失"; exit 1
+          fi
+          if [ -z "$shared_hit" ]; then
+            echo "::error::依赖库 @jayyuen66/dsh-plugin-shared@$shared_version 在 registry 上取不到（本包声明的就是这一版；包根 HTTP $shared_code）——先发 shared 再发本包，否则消费者装不到它。"
+            exit 1
+          fi
+          echo "依赖库 @jayyuen66/dsh-plugin-shared@$shared_version：registry 回 $shared_hit，可满足"
           # 只交结论、不交凭据：发布步据此决定导不导出 NODE_AUTH_TOKEN。
           printf 'use_static=%s\n' "$USE_STATIC" >> "$GITHUB_OUTPUT"
-      # 装依赖是为了让 prepack 里的三次构建有东西可用（rolldown / typescript 都在 devDependencies）。
-      # 这里不再跑 pnpm run check：它已在 check job 里跑过，而这个 job 持有 id-token，
-      # 少执行一遍仓库与依赖里的脚本就少一条能碰到发布能力的路径。
-      - run: pnpm install --frozen-lockfile
+      # 发布物来自 check job 的 pnpm pack：本 job 不 install、不构建，因此这个持有 id-token 的
+      # job 里没有进程能碰到 runner 注入的 OIDC 申请端点。
+      - name: 取回发布用的 tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: publish-tarball
+          path: ${{ runner.temp }}/publish-tarball
+      - name: 核对只有一枚 tarball
+        run: |
+          set -euo pipefail
+          count=$(find "$RUNNER_TEMP/publish-tarball" -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')
+          if [ "$count" != "1" ]; then
+            echo "::error::期望恰好一枚待发布的 tarball，实际 $count 枚——artifact 名字或 pnpm pack 的落点变了"
+            exit 1
+          fi
       # prepack 会重建 host.js / client.js / types/，产物不入库也发得出去。
       # 凭据优先级：OIDC 在前，这枚 NODE_AUTH_TOKEN 在后（pnpm 的 publish_options.rs 原话
       # "OIDC takes precedence over a configured static token"）。trusted publisher 配好时
@@ -218,4 +325,7 @@ jobs:
           else
             echo "凭据：OIDC trusted publishing"
           fi
-          pnpm publish --no-git-checks --access public --provenance
+          # tarball 由 check job 产出（见上），这里只发布它，不再构建任何东西。
+          tarball=$(find "$RUNNER_TEMP/publish-tarball" -maxdepth 1 -name '*.tgz' -print -quit)
+          echo "发布物：$tarball"
+          pnpm publish "$tarball" --no-git-checks --access public --provenance

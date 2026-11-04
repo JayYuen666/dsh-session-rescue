@@ -41,16 +41,20 @@ const BUDGETS: readonly (readonly [string, number])[] = [
  * 单独走这一步而不是直接 readFileSync：`vitest run` 单跑时产物可能压根不存在，
  * ENOENT 那条系统错误看不出是谁的责任，而这道门的正确用法永远是「先 build」。
  *
+ * 返回 Buffer 而不是解码后的字符串：按字节计量是这道门的本体，先按 utf8 解码会把
+ * 非法序列折成 U+FFFD，`Buffer.byteLength` 重新编码后量出的字节数变少，超预算的产物
+ * 会被放过。
+ *
  * @param file - 相对包根的产物路径
- * @returns 产物正文
+ * @returns 产物字节
  */
-function readArtifact(file: string): string {
+function readArtifact(file: string): Buffer {
   const full = path.join(pkgDir, file);
   assert.ok(
     existsSync(full),
     `${file} 不存在：这道门读的是 build 的产出，请先 npm run build:client && npm run build`,
   );
-  return readFileSync(full, "utf8");
+  return readFileSync(full);
 }
 
 /**
@@ -65,15 +69,20 @@ function readArtifact(file: string): string {
 function entryDeclarationBytes(): number {
   const dir = path.join(pkgDir, "types");
   assert.ok(existsSync(dir), "types/ 不存在：请先 npm run build:types");
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".d.ts"))
-    .reduce((sum, name) => sum + readFileSync(path.join(dir, name)).byteLength, 0);
+  const entries = readdirSync(dir).filter((name) => name.endsWith(".d.ts"));
+  // 空匹配 ⇒ 求和 0 ⇒ 断言恒真：入口声明的扩展名或落点一变（如 .d.mts、types/lib/），
+  // 这道门就该当场红，而不是安静地量了个零。
+  assert.ok(
+    entries.length > 0,
+    "types/ 顶层没有 .d.ts 声明：入口声明改名或挪位了，请修这条过滤再量，别让闸门量空转绿",
+  );
+  return entries.reduce((sum, name) => sum + readFileSync(path.join(dir, name)).byteLength, 0);
 }
 
 describe("产物体积", () => {
   // 用 it.each 而不是手写循环：两条预算断言形状完全相同，而新增一条预算时手写循环容易漏。
   it.each(BUDGETS)("%s 不超过 %s 字节预算", (file, budget) => {
-    const bytes = Buffer.byteLength(readArtifact(file), "utf8");
+    const bytes = readArtifact(file).byteLength;
     assert.ok(
       bytes <= budget,
       `${file} 实测 ${bytes.toLocaleString("en-US")} B，超出预算 ${budget.toLocaleString("en-US")} B：` +

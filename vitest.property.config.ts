@@ -19,6 +19,10 @@ export default defineConfig({
     // 30s 已是它的七倍。给到 60s 的代价是一次死循环要等满一分钟才报错，而这一层跑的是
     // 「任意输入」，死循环正是它最可能的坏法——反馈时间比余量值钱。
     testTimeout: 30_000,
-    coverage: { reporter: ["text"], enabled: false },
+    // 串行：最慢一条 4.3s 是按独占 CPU 量的，多 worker 争抢时「七倍余量」会被吃掉，
+    // 超时红与「真的找到反例」不可区分（integration 层出于同一理由已串行）。
+    fileParallelism: false,
+    // reporter 在 enabled:false 下永不生效，只留开关与意图（覆盖率由 vitest.config.ts 的 100% 负责）。
+    coverage: { enabled: false },
   },
 });

@@ -52,56 +52,70 @@ let rig: Rig | undefined;
 async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
   vi.stubEnv("DEEPSEEK_API_KEY", "mock-key");
   const server = await startMockLlmServer({ sequence, apiKey: "mock-key" });
-  const ctx = new Context();
-  ctx.provide("settings", {
-    describe: () => [],
-    mutate: async (): Promise<void> => undefined,
-    configure: () => (): void => {
-      void 0;
-    },
-  });
-  await ctx.plugin(TimerPlugin);
-  await mountAgentLoopTestDependencies(ctx);
-  await ctx.plugin(DeepSeekAdapter, {
-    baseURL: server.baseURL,
-    retryPolicy: {
-      mode: "normal",
-      maxRetries: 0,
-      backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
-    },
-  });
-  await ctx.plugin(AgentLoop, { agents: [] });
-  await ctx.plugin(
-    plugin as never,
-    {
+  // 装配中途任一步抛错时，已建出的 server / ctx 必须就地回收，否则 afterEach
+  // 看 rig === undefined 什么都不撤，悬挂的 socket 会污染后续用例。
+  let ctx: Context | undefined;
+  try {
+    ctx = new Context();
+    ctx.provide("settings", {
+      describe: () => [],
+      mutate: async (): Promise<void> => undefined,
+      configure: () => (): void => {
+        void 0;
+      },
+    });
+    await ctx.plugin(TimerPlugin);
+    await mountAgentLoopTestDependencies(ctx);
+    await ctx.plugin(DeepSeekAdapter, {
+      baseURL: server.baseURL,
+      retryPolicy: {
+        mode: "normal",
+        maxRetries: 0,
+        backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      },
+    });
+    await ctx.plugin(AgentLoop, { agents: [] });
+    // 这份 config 刻意不写 `as never`：cordis 的 config 参数是开放对象，改名后的键
+    // （resumeCooldownXXX 一类）加不加 cast 都不会被 tsc 拦住；但数值写成字符串会红，
+    // 那份判据只有不加 cast 才拿得到。
+    await ctx.plugin(plugin, {
       resumeDelayMs: 1000,
       resumeCooldownMs: 5000,
       continueDelayMs: 500,
       continueCooldownMs: 5000,
       unfinishedDelayMs: 1000,
       unfinishedCooldownMs: 5000,
-    } as never,
-  );
-  const agent = await ctx.agentLoop.create(brandString<SessionId>("rescue-abort"), {
-    provider: "deepseek-official",
-    model: "mock-model",
-  });
-  const errors: { turn: number | undefined; name: string | undefined }[] = [];
-  ctx.on("agent/error", (payload: { turn?: number; error?: unknown }) => {
-    const error = payload.error as { name?: string } | null;
-    errors.push({ turn: payload.turn, name: error?.name });
-  });
-  const turnEnds: { turn: number | undefined; reasonKind: string | undefined }[] = [];
-  // 终态从 `session/event` 上读（官方 goal-round-driver 也用这一位）：
-  // `turn/end` 的 reason.kind 是唯一权威面，不猜宿主的事件顺序，也不碰
-  // `session.snapshotEvents()`（官方已标 @deprecated，新调用是禁的）。
-  ctx.on("session/event", (_session: unknown, event: unknown) => {
-    const record = event as { type?: string; data?: { turn?: number; reason?: { kind?: string } } };
-    if (record.type === "turn/end") {
-      turnEnds.push({ turn: record.data?.turn, reasonKind: record.data?.reason?.kind });
+    });
+    const agent = await ctx.agentLoop.create(brandString<SessionId>("rescue-abort"), {
+      provider: "deepseek-official",
+      model: "mock-model",
+    });
+    const errors: { turn: number | undefined; name: string | undefined }[] = [];
+    ctx.on("agent/error", (payload: { turn?: number; error?: unknown }) => {
+      const error = payload.error as { name?: string } | null;
+      errors.push({ turn: payload.turn, name: error?.name });
+    });
+    const turnEnds: { turn: number | undefined; reasonKind: string | undefined }[] = [];
+    // 终态从 `session/event` 上读（官方 goal-round-driver 也用这一位）：
+    // `turn/end` 的 reason.kind 是唯一权威面，不猜宿主的事件顺序，也不碰
+    // `session.snapshotEvents()`（官方已标 @deprecated，新调用是禁的）。
+    ctx.on("session/event", (_session: unknown, event: unknown) => {
+      const record = event as {
+        type?: string;
+        data?: { turn?: number; reason?: { kind?: string } };
+      };
+      if (record.type === "turn/end") {
+        turnEnds.push({ turn: record.data?.turn, reasonKind: record.data?.reason?.kind });
+      }
+    });
+    return { ctx, agent, server, errors, turnEnds };
+  } catch (error: unknown) {
+    if (ctx !== undefined) {
+      await ctx.fiber.dispose();
     }
-  });
-  return { ctx, agent, server, errors, turnEnds };
+    await server.close();
+    throw error;
+  }
 }
 
 /** 发一条用户消息（不等 idle：`stall` 那一轮不会自己结束）。 */
@@ -114,16 +128,17 @@ function send(agent: Agent, text: string): void {
   );
 }
 
-/** 等一个条件在真事件流里成立。 */
-async function waitFor(predicate: () => boolean, deadlineAt: number): Promise<boolean> {
+/** 等一个条件在真事件流里成立；超时抛点名错误，而不是让调用方的
+ *  `expected false to be true` 藏掉「哪个环节没等到」。 */
+async function waitFor(predicate: () => boolean, deadlineAt: number, label: string): Promise<void> {
   if (predicate()) {
-    return true;
+    return;
   }
   if (Date.now() >= deadlineAt) {
-    return predicate();
+    throw new Error(`等待超时（${label}）：时限内未成立`);
   }
   await sleep(POLL_STEP_MS);
-  return waitFor(predicate, deadlineAt);
+  return waitFor(predicate, deadlineAt, label);
 }
 
 function within(ms: number): number {
@@ -140,6 +155,21 @@ function rescueMessages(agent: Agent): number {
     ).length;
 }
 
+/** stall 序列下的用户中止：请求进到流中段时 cancel，等到回合收口。
+ *  两条用例共用这段最时序敏感的编排，官方 cancel 语义一变只改这一处。 */
+async function abortDuringStall(text: string): Promise<Rig> {
+  const current = await boot(["stall", "rate_limit", "success"]);
+  rig = current;
+  const { agent, server } = current;
+  send(agent, text);
+  // 等这一轮真的进到模型请求里（server 侧收到请求 = 回合已开、正在读流）。
+  await waitFor(() => server.requests.length > 0, within(15_000), "模型请求到达");
+  // 官方 `agent.cancel()` 不返回 promise（取消是同步登记的，收尾走事件）。
+  agent.cancel({ kind: "user" });
+  await waitFor(() => agent.status === "idle", within(15_000), "status 回到 idle");
+  return current;
+}
+
 describe("真宿主下的用户中止：不 emit agent/error，也不消耗续跑配额", () => {
   afterEach(async () => {
     const current = rig;
@@ -152,42 +182,27 @@ describe("真宿主下的用户中止：不 emit agent/error，也不消耗续�
   });
 
   it("stall 中被 cancel ⇒ 无 agent/error、无救援注入，终态记为 aborted/interrupted", async () => {
-    rig = await boot(["stall", "rate_limit", "success"]);
-    const { agent } = rig;
-    send(agent, "hold the connection open");
-    // 等这一轮真的进到模型请求里（server 侧收到请求 = 回合已开、正在读流）。
-    await expect(waitFor(() => rig!.server.requests.length > 0, within(20_000))).resolves.toBe(
-      true,
-    );
-    // 官方 `agent.cancel()` 不返回 promise（取消是同步登记的，收尾走事件）。
-    agent.cancel({ kind: "user" });
-    await expect(waitFor(() => agent.status === "idle", within(20_000))).resolves.toBe(true);
+    const { agent, errors, turnEnds } = await abortDuringStall("hold the connection open");
 
     // ① 中止不产出 agent/error：本包若在这里判中止，就是在读一份不存在的记录。
-    expect(rig.errors).toStrictEqual([]);
+    expect(errors).toStrictEqual([]);
     // ② 也没有任何救援消息（既不为中止轮补跑，也不把它读成截断/未完成）。
     expect(rescueMessages(agent)).toBe(0);
-    // ③ 终态确实落了盘，且 kind 是本包认的那两个中止值之一。
-    const kinds = rig.turnEnds.map((end) => end.reasonKind);
-    expect(kinds).toContain("aborted");
+    // ③ 终态确实落了盘，且恰好一次、kind 是本包认的那两个中止值之一：
+    // 一次多余的 turn/end 就是救援轮偷偷多跑了一轮。
+    expect(turnEnds).toHaveLength(1);
+    expect(["aborted", "interrupted"]).toContain(turnEnds[0]?.reasonKind);
+    // 收口的就是被中止的那一轮。
+    expect(turnEnds[0]?.turn).toBe(1);
   }, 60_000);
 
   it("中止之后再来一次真瞬时失败 ⇒ 照常续跑（中止没有偷走配额）", async () => {
-    rig = await boot(["stall", "rate_limit", "success"]);
-    const { agent } = rig;
-    send(agent, "hold then abort");
-    await expect(waitFor(() => rig!.server.requests.length > 0, within(20_000))).resolves.toBe(
-      true,
-    );
-    // 官方 `agent.cancel()` 不返回 promise（取消是同步登记的，收尾走事件）。
-    agent.cancel({ kind: "user" });
-    await expect(waitFor(() => agent.status === "idle", within(20_000))).resolves.toBe(true);
+    const { agent } = await abortDuringStall("hold then abort");
 
     // 第二次请求走 rate_limit：真瞬时失败 ⇒ 本包必须还敢补一条。
     // 若中止被读成「消耗掉了一次机会」的形状（或 aborted 终态被当成截断），这里就收不到。
     send(agent, "now fail transiently");
-    const rescued = await waitFor(() => rescueMessages(agent) >= 1, within(30_000));
-    expect(rescued).toBe(true);
+    await waitFor(() => rescueMessages(agent) >= 1, within(20_000), "救援注入到达");
     await agent.whenIdle();
     expect(rescueMessages(agent)).toBe(1);
   }, 60_000);

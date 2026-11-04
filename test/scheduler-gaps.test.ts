@@ -1,12 +1,17 @@
 // scheduler 契约补充：挂起/恢复/剩余时间等 host 集成面（纯状态机单测缺口）。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { ResumeScheduler } from "../lib/resume-scheduler.ts";
+import { MAX_SESSIONS, ResumeScheduler } from "../lib/resume-scheduler.ts";
 import type { OnFailureInput } from "../lib/resume-scheduler.ts";
 // 待办在位/剩余时间改用调度器的公开快照形状读（原先那两条按会话的出口只被用例取用）。
 import { hasPending, remainingMs } from "./scheduler-snapshot.ts";
 
-function makeClock(start = 5_000_000): { now: () => number; advance: (ms: number) => void } {
+const CLOCK_START = 5_000_000;
+// fireAt = 起始时钟 + delayMs：三处断言与给 restorePending 的快照都从这里推，
+// 改起点或 delayMs 时不再手工同步魔数。
+const FIRE_AT = CLOCK_START + 10_000;
+
+function makeClock(start = CLOCK_START): { now: () => number; advance: (ms: number) => void } {
   let time = start;
   return {
     now: () => time,
@@ -40,27 +45,33 @@ describe("suspendSession（发送抛错时的挂起面）", () => {
       disposed += 1;
     });
     const pending = scheduler.suspendSession("s1");
-    // 首条 `pending?.turn` 经 node:assert 的 `asserts actual is T` 证明取出非空
-    //（suspendSession 返回 PendingRecord | null），之后的 `?.` 是冗余守卫；
-    // 副本可变性由下面 `pending.turn = 999` 那条断言链继续把守。
-    assert.equal(pending?.turn, 3);
+    assert.ok(pending !== null, "有待办的会话必须取出一枚待办");
+    assert.equal(pending.turn, 3);
     assert.equal(pending.kind, "resume");
-    assert.equal(pending.fireAt, 5_010_000);
+    assert.equal(pending.fireAt, FIRE_AT);
     assert.equal(disposed, 1, "挂起必须释放宿主定时器");
     assert.equal(hasPending(scheduler, "s1"), false);
-    // 返回的是副本：外部改它不影响调度器
-    pending.turn = 999;
+    // 已登记但无待办的会话再挂起：返回 null（不臆造）。
     assert.equal(scheduler.suspendSession("s1"), null);
+    // 返回的是副本：挂起已把内部待办收走，副本语义的可观测路径在恢复——恢复后
+    // 改外部对象，不得污染已武装的记录（restorePending 存的是展开副本）。
+    assert.equal(scheduler.restorePending("s1", pending), true);
+    pending.turn = 999;
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.turn, 3, "外部改副本不污染已武装的记录");
   });
 
   it("定时器 disposer 抛错不阻断挂起", () => {
     const scheduler = new ResumeScheduler({ now: makeClock().now });
     scheduler.onFailure(base);
+    let disposeCalls = 0;
     scheduler.attachTimer("s1", () => {
+      disposeCalls += 1;
       throw new Error("dispose boom");
     });
     const pending = scheduler.suspendSession("s1");
     assert.ok(pending !== null, "disposer 抛错后仍应取出待办");
+    assert.equal(disposeCalls, 1, "disposer 确实被调用过（而不是压根没调）");
+    assert.equal(hasPending(scheduler, "s1"), false, "disposeTimer 已收走待办");
   });
 });
 
@@ -79,6 +90,26 @@ describe("restorePending / remainingMs（重连恢复面）", () => {
     assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.turn, 3, "已武装的待办不被覆盖");
   });
 
+  it("挂起位还在、期间又排上新的待办：旧快照不得覆盖新待办", () => {
+    // suspendSession 只置 suspended、不清 pending 判据；冷却过后再次 onFailure 会在
+    // suspended 仍为真时排上新的待办。此时重连拿旧快照来恢复，restorePending 的三道守卫里
+    // 只有 `rec.pending !== null` 能挡住（另两道此时都放行）——摘掉它，旧快照会把刚排上的
+    // 续跑覆盖掉，而调用方拿到的是 true。
+    const clock = makeClock();
+    const scheduler = new ResumeScheduler({ now: clock.now });
+    scheduler.onFailure(base);
+    const snapshot = scheduler.suspendSession("s1");
+    assert.ok(snapshot !== null, "挂起要交回快照");
+    clock.advance(200_000);
+    assert.equal(
+      scheduler.onFailure({ ...base, turn: 5 }).action,
+      "schedule",
+      "冷却已过：新待办排上",
+    );
+    assert.equal(scheduler.restorePending("s1", snapshot), false, "已有新待办 ⇒ 旧快照就此作废");
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.turn, 5, "新排上的待办不被旧快照覆盖");
+  });
+
   it("restorePending 成功：恢复原 fireAt，remainingMs 反映剩余时间", () => {
     const clock = makeClock();
     const scheduler = new ResumeScheduler({ now: clock.now });
@@ -87,8 +118,30 @@ describe("restorePending / remainingMs（重连恢复面）", () => {
     assert.ok(pending !== null);
     clock.advance(3000);
     assert.equal(scheduler.restorePending("s1", pending), true);
-    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.fireAt, 5_010_000, "保留原 fireAt");
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.fireAt, FIRE_AT, "保留原 fireAt");
     assert.equal(remainingMs(scheduler, "s1"), 7000, "剩余 = fireAt - now");
+    // 恢复 ⇒ 待办可武装：restorePending 的语义是调用方随即 attachTimer，
+    // 恢复出无法挂载的状态（或 suspended 未落回）时这里必须红。
+    let reattached = 0;
+    assert.equal(
+      scheduler.attachTimer("s1", () => {
+        reattached += 1;
+      }),
+      true,
+      "恢复后的待办可重新挂定时器",
+    );
+    assert.equal(reattached, 0, "挂上的只是释放钩子，不该立刻被调");
+    // 恢复还要把 `suspended` 落回 false：没落回的记录在台账淘汰那一判据里永远算「欠着补发」，
+    // 长跑进程里永久占位（resume-scheduler.ts 那条注释自己写明这一点）。可观测面只有淘汰：
+    // 结算后把台账灌满，这条记录必须出局。
+    scheduler.attachTimer("s1", null);
+    scheduler.settle("s1", "fired");
+    for (let index = 0; index < MAX_SESSIONS; index += 1) {
+      scheduler.onFailure({ ...base, sessionId: `f${String(index)}` });
+      scheduler.settle(`f${String(index)}`, "fired");
+    }
+    assert.equal(scheduler.stateSnapshot()["s1"], undefined, "恢复并结算过的记录要重新可淘汰");
+    assert.equal(reattached, 1, "换挂 null 时旧释放钩子被调用");
   });
 
   it("restorePending：会话已不被记录（dispose/淘汰过）⇒ 拒绝，且不凭空造出一枚满额记录", () => {
@@ -98,7 +151,7 @@ describe("restorePending / remainingMs（重连恢复面）", () => {
     // 防失控闸门在这条会话上被静默复位，日志里一个字都不会提。
     const clock = makeClock();
     const scheduler = new ResumeScheduler({ now: clock.now });
-    const pending = { turn: 7, kind: "resume" as const, fireAt: 5_010_000, announcedAt: 1 };
+    const pending = { turn: 7, kind: "resume" as const, fireAt: FIRE_AT, announcedAt: 1 };
     assert.equal(scheduler.restorePending("never-seen", pending), false, "无记录 ⇒ 快照作废");
     assert.deepEqual(scheduler.stateSnapshot(), {}, "拒绝不得留下任何记录");
     // 记录被 disposeAll 清空后同样拒绝（重连台账里残留的旧快照不能复活配额）。
@@ -124,10 +177,13 @@ describe("cancel 边界", () => {
   it("定时器 disposer 抛错不阻断取消", () => {
     const scheduler = new ResumeScheduler({ now: makeClock().now });
     scheduler.onFailure(base);
+    let disposeCalls = 0;
     scheduler.attachTimer("s1", () => {
+      disposeCalls += 1;
       throw new Error("dispose boom");
     });
     assert.deepEqual(scheduler.cancel("s1"), { cancelled: true, turn: 3 });
+    assert.equal(disposeCalls, 1, "disposer 确实被调用过");
     assert.equal(hasPending(scheduler, "s1"), false);
   });
 });

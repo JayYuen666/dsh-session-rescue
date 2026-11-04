@@ -21,13 +21,13 @@ export interface UiMessages {
   readonly bannerResume: string;
   /** 输出截断待办横幅模板。 */
   readonly bannerContinue: string;
-  /** 待办未闭合待办横幅模板。 */
+  /** 待办未闭合横幅模板。 */
   readonly bannerUnfinished: string;
   /** 瞬时失败待办横幅（连接中断、挂起待重连）。 */
   readonly bannerSuspendedResume: string;
   /** 输出截断待办横幅（挂起态）。 */
   readonly bannerSuspendedContinue: string;
-  /** 待办补跑待办横幅（挂起态）。 */
+  /** 待办补跑横幅（挂起态）。 */
   readonly bannerSuspendedUnfinished: string;
   // ── 业务动作失败面（host/dock 共用） ──
   /** 会话绑定缺失。 */
@@ -83,7 +83,6 @@ export interface UiMessages {
   // ── 设置卡：字段与保存条 ──
   /** 宿主拒绝整批写入时的原因（作保存条的明细）。 */
   readonly saveRejected: string;
-  /** 保存失败前缀（后接逐字段原因）。 */
   /** 前缀 + 失败明细。明细走 `{detail}` 占位符而不是靠尾部空白拼接：靠空白意味着任何一次
    *  本地化改写（换全角冒号、去掉尾空格）都会让下一段粘上去，而那种错在类型系统里看不出来。 */
   readonly saveFailed: string;

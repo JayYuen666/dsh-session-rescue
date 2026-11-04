@@ -1,7 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { MAX_SESSIONS, ResumeScheduler } from "../lib/resume-scheduler.ts";
-import type { OnFailureInput, RescueKind } from "../lib/resume-scheduler.ts";
+import { MAX_RESUMES_REASON, MAX_SESSIONS, ResumeScheduler } from "../lib/resume-scheduler.ts";
+import type { OnFailureInput, PendingRecord } from "../lib/resume-scheduler.ts";
 // 待办在位/剩余时间改用调度器的公开快照形状读（原先那两条按会话的出口只被用例取用）。
 import { hasPending, remainingMs } from "./scheduler-snapshot.ts";
 
@@ -15,8 +15,13 @@ function makeClock(start = 1_000_000): { now: () => number; advance: (ms: number
   };
 }
 
-/** 调度器「次数已满」闸门的拒因（decision.reason 的期望值，测试作者自持一份）。 */
-const MAX_RESUMES_REASON = "max-resumes";
+/** 拒因 token 是对外契约（卡片与日志按它匹配）。用例改从产品导入同一枚常量之后，
+ *  「常量值被动过而所有断言跟着一起走」就没有东西兜住，所以在这里把值本身钉住。 */
+describe("拒因 token 的字面值（MAX_RESUMES_REASON）", () => {
+  it("仍是 max-resumes（其余四条拒因在产品里都是裸字面量）", () => {
+    assert.equal(MAX_RESUMES_REASON, "max-resumes");
+  });
+});
 
 const base: OnFailureInput = {
   sessionId: "s1",
@@ -222,7 +227,7 @@ describe("onFailure 调度决策", () => {
     assert.equal(decision.reason, MAX_RESUMES_REASON);
   });
 
-  it("冷却外的普通失败不受 chainDelayMs 语义影响（延迟仍取大，但 chained 标记如实）", () => {
+  it("冷却外的普通失败同样取 max(delayMs, chainDelayMs) 并如实标记 chained", () => {
     const clock = makeClock();
     const scheduler = new ResumeScheduler({ now: clock.now });
     scheduler.onFailure(base);
@@ -355,7 +360,7 @@ describe("attachTimer", () => {
     );
   });
 
-  it("无待办时立即释放（竞态守卫）", () => {
+  it("无待办时立即释放（竞态守卫）：未登记与已 settle 两种形状", () => {
     const scheduler = new ResumeScheduler({ now: makeClock().now });
     let disposed = 0;
     assert.equal(
@@ -365,6 +370,16 @@ describe("attachTimer", () => {
       false,
     );
     assert.equal(disposed, 1);
+    // 已 settle 的会话（有记录、无待办）同判：attachTimer 的守卫看 pending，不看记录在不在。
+    scheduler.onFailure({ ...base });
+    scheduler.settle("s1", "fired");
+    assert.equal(
+      scheduler.attachTimer("s1", () => {
+        disposed += 1;
+      }),
+      false,
+    );
+    assert.equal(disposed, 2);
   });
 });
 
@@ -517,7 +532,13 @@ describe('onSuccess 重置连续失败计数（长跑会话不得"用完即哑"�
       scheduler.settle("s2", "fired");
       clock.advance(200_000);
     }
+    // s1 必须是**已登记且烧掉配额**的会话：未登记的 s1 走的是未知会话 no-op 分支，
+    // 那条路隔离与否都绿，本用例就退化成上一条的重复。
+    scheduler.onFailure({ ...base, sessionId: "s1" });
+    scheduler.settle("s1", "fired");
+    assert.equal(scheduler.stateSnapshot()["s1"]?.counts.resume, 1, "s1 已有一笔计数");
     scheduler.onSuccess("s1");
+    assert.equal(scheduler.stateSnapshot()["s1"]?.counts.resume, 0, "A 的成功只清 A 自己");
     const s2Decision = scheduler.onFailure({ ...base, sessionId: "s2" });
     assert.equal(s2Decision.action, "skip");
     assert.equal(s2Decision.reason, MAX_RESUMES_REASON);
@@ -587,14 +608,97 @@ describe("MAX_SESSIONS：会话记录上限（防长驻 Map 无界膨胀）", ()
       // 立即结算 → 记录回到空闲态
       scheduler.settle(`s${i}`, "fired");
     }
-    const size = Object.keys(scheduler.stateSnapshot()).length;
-    assert.ok(size <= 200, `记录数 ${size} 应被压回 MAX_SESSIONS(200) 以内`);
+    const snapshot = scheduler.stateSnapshot();
+    const size = Object.keys(snapshot).length;
+    // 等值而不是上界：过度淘汰（清到更少甚至清空）在「<=」下照样绿。
+    assert.equal(size, MAX_SESSIONS, `记录数应恰为 MAX_SESSIONS(${MAX_SESSIONS})`);
+    // 淘汰顺序：最旧的空闲记录出局，最新的留在表里。
+    assert.equal(snapshot["s0"], undefined, "最旧的空闲记录被淘汰");
+    assert.ok(snapshot["s259"] !== undefined, "最新的记录保留");
   });
 
-  it("有 pending（含定时器）的记录绝不淘汰：新记录把空闲记录挤掉，活动记录保留", () => {
+  it("被淘汰的会话重新出现时，配额记忆把它当烧过的那一份接回来", () => {
+    // 只把记录丢掉、把计数留在记忆表里：否则长驻 daemon 每填满 MAX_SESSIONS 个会话，
+    // 就给此前烧满配额的会话发一张全新的额度——那正是 max-resumes 要挡住的那类失控。
+    const clock = makeClock();
+    const scheduler = new ResumeScheduler({ now: clock.now });
+    const burned = { ...entryBase, sessionId: "s0", maxResumes: 1 };
+    assert.equal(scheduler.onFailure(burned).action, "schedule", "第一次烧掉唯一那次额度");
+    assert.equal(scheduler.settle("s0", "fired"), true);
+    const capped = scheduler.onFailure(burned);
+    assert.equal(capped.action, "skip", "同一会话已到顶");
+    assert.equal(capped.reason, MAX_RESUMES_REASON);
+    for (let i = 1; i <= MAX_SESSIONS; i += 1) {
+      const key = `x${String(i)}`;
+      assert.equal(scheduler.onFailure({ ...entryBase, sessionId: key }).action, "schedule");
+      assert.equal(scheduler.settle(key, "fired"), true);
+      clock.advance(2000);
+    }
+    assert.equal(scheduler.stateSnapshot()["s0"], undefined, "s0 的记录已被挤出去");
+    const again = scheduler.onFailure(burned);
+    assert.equal(again.action, "skip", "重新出现的仍是烧满配额的会话，不是新会话");
+    assert.equal(again.reason, MAX_RESUMES_REASON);
+  });
+
+  it("成功可以把「已被淘汰」那份记忆里的配额一起复位", () => {
+    const clock = makeClock();
+    const scheduler = new ResumeScheduler({ now: clock.now });
+    const burned = { ...entryBase, sessionId: "s0", maxResumes: 1 };
+    assert.equal(scheduler.onFailure(burned).action, "schedule");
+    assert.equal(scheduler.settle("s0", "fired"), true);
+    for (let i = 1; i <= MAX_SESSIONS; i += 1) {
+      const key = `y${String(i)}`;
+      assert.equal(scheduler.onFailure({ ...entryBase, sessionId: key }).action, "schedule");
+      assert.equal(scheduler.settle(key, "fired"), true);
+      clock.advance(2000);
+    }
+    assert.equal(scheduler.stateSnapshot()["s0"], undefined, "s0 的记录已被挤出去");
+    // 记录不在位不等于会话没有配额：成功那一次必须把记忆里的那份也清掉，
+    // 否则一次真实的成功永远复位不掉，会话被记忆锁死在「已烧满」。
+    scheduler.onSuccess("s0");
+    assert.equal(scheduler.onFailure(burned).action, "schedule", "成功后额度恢复，可再排一次");
+  });
+
+  it("配额记忆同受 MAX_SESSIONS 封顶：装不下的最旧那份让位", () => {
+    const clock = makeClock();
+    const scheduler = new ResumeScheduler({ now: clock.now });
+    // 要的是 201 次**淘汰**，不是 201 枚会话：记录表每满一次只挤掉最旧那一条空闲记录，
+    // 所以登记 2×MAX_SESSIONS + 1 枚会话才会往记忆表里写 201 份——超出天花板的最旧那份
+    // （a0）让位，紧随其后的 a1 仍留着记忆。
+    for (let i = 0; i <= 2 * MAX_SESSIONS; i += 1) {
+      const key = `a${String(i)}`;
+      assert.equal(
+        scheduler.onFailure({ ...entryBase, sessionId: key, maxResumes: 1 }).action,
+        "schedule",
+      );
+      assert.equal(scheduler.settle(key, "fired"), true);
+      clock.advance(2000);
+    }
+    assert.equal(scheduler.stateSnapshot()["a0"], undefined, "a0 的记录早已被淘汰");
+    assert.equal(scheduler.stateSnapshot()["a1"], undefined, "a1 的记录也已被淘汰");
+    assert.equal(
+      scheduler.stateSnapshot()[`a${String(2 * MAX_SESSIONS)}`] !== undefined,
+      true,
+      "最新那枚仍在表里",
+    );
+    const remembered = scheduler.onFailure({ ...entryBase, sessionId: "a1", maxResumes: 1 });
+    assert.equal(remembered.action, "skip", "较新的那份记忆仍生效");
+    assert.equal(remembered.reason, MAX_RESUMES_REASON);
+    const forgotten = scheduler.onFailure({ ...entryBase, sessionId: "a0", maxResumes: 1 });
+    assert.equal(forgotten.action, "schedule", "最旧那份已让位，按新会话重新计");
+  });
+
+  it("有 pending（真实挂上定时器）的记录绝不淘汰：新记录把空闲记录挤掉，活动记录保留", () => {
     const scheduler = new ResumeScheduler();
-    // s-active 有待办
+    // s-active 有待办，并真实挂上定时器（evictIdleSessions 的 disposeTimer 判据由此走到）
     scheduler.onFailure({ ...entryBase, sessionId: "s-active" });
+    let activeDisposes = 0;
+    assert.equal(
+      scheduler.attachTimer("s-active", () => {
+        activeDisposes += 1;
+      }),
+      true,
+    );
     assert.equal(hasPending(scheduler, "s-active"), true);
     // 再灌满大量空闲会话
     for (let i = 0; i < 220; i += 1) {
@@ -604,6 +708,7 @@ describe("MAX_SESSIONS：会话记录上限（防长驻 Map 无界膨胀）", ()
       }
     }
     assert.equal(hasPending(scheduler, "s-active"), true, "活动会话记录保留");
+    assert.equal(activeDisposes, 0, "定时器从未被淘汰逻辑释放（保活不是靠事后补挂）");
     // 活动会话仍可正常 settle
     scheduler.settle("s-active", "fired");
     assert.equal(hasPending(scheduler, "s-active"), false);
@@ -636,16 +741,11 @@ describe("MAX_SESSIONS：会话记录上限（防长驻 Map 无界膨胀）", ()
 });
 
 describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
-  it("attachTimer：会话未知 → 传入的定时器立刻释放；dispose 非函数也只返回 false", () => {
+  it("attachTimer：会话未知且 dispose 不是函数 → 只返回 false，不去调用它", () => {
+    // 「未登记」与「已 settle」两种无待办形状都真的释放 disposer，那条判据在
+    // 「无待办时立即释放（竞态守卫）」用例里；这里只留 `dispose` 非函数这一手
+    // （releaseDisposer 的 typeof 判据为假那一侧）。
     const scheduler = new ResumeScheduler();
-    let released = 0;
-    assert.equal(
-      scheduler.attachTimer("ghost", () => {
-        released += 1;
-      }),
-      false,
-    );
-    assert.equal(released, 1, "无待办即释放，不留孤儿定时器");
     assert.equal(scheduler.attachTimer("ghost", null), false);
   });
 
@@ -666,7 +766,9 @@ describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
     // 调度+挂起把它留成「有记录、无待办」的形状——那正是重连台账里残留快照的来路。
     scheduler.onFailure({ ...base });
     assert.ok(scheduler.suspendSession("s1") !== null);
-    const dirty = { turn: 9, kind: "" as RescueKind, fireAt: 5, announcedAt: 1 };
+    // kind 的声明就是 RescueKind | ""（实现有意承认跨版本脏快照的空串）：
+    // 这里如实写空串并交 PendingRecord 类型收口，不做伪装成合法 RescueKind 的断言。
+    const dirty: PendingRecord = { turn: 9, kind: "", fireAt: 5, announcedAt: 1 };
     assert.equal(scheduler.restorePending("s1", dirty), true);
     assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.kind, "resume", "快照回落 resume");
     assert.equal(scheduler.settle("s1", "fired"), true);
@@ -683,33 +785,31 @@ describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
     );
     assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.turn, 3, "原待办保留");
   });
+
+  it("restorePending：此刻并不欠它补发 → 拒绝（挂起是唯一合法出处）", () => {
+    const scheduler = new ResumeScheduler();
+    scheduler.onFailure({ ...base });
+    // 用户取消：待办清空、没有挂起位。此后拿着一份陈旧快照回来补发，等于把用户刚取消
+    // 的那次注入重新武装——宿主侧的 dropSuspended 也拦不住这一条，因为快照可能在别处。
+    assert.equal(scheduler.cancel("s1").cancelled, true);
+    assert.equal(
+      scheduler.restorePending("s1", { turn: 9, kind: "resume", fireAt: 5, announcedAt: 1 }),
+      false,
+    );
+    assert.equal(scheduler.stateSnapshot()["s1"]?.pending, null, "没有凭空多出的待办");
+
+    // 宿主已丢弃挂起快照并释放记账（releaseSuspended）后再恢复：同样拒绝。
+    scheduler.onFailure({ ...base });
+    assert.ok(scheduler.suspendSession("s1") !== null);
+    scheduler.releaseSuspended("s1");
+    assert.equal(
+      scheduler.restorePending("s1", { turn: 9, kind: "resume", fireAt: 5, announcedAt: 1 }),
+      false,
+    );
+  });
 });
 
 describe("已了结会话上的重复动作（host 竞态：定时器先跑完，dispose/settle 才到）", () => {
-  it("attachTimer：已无待办时不许把 host 定时器挂上去，且要立刻释放 disposer", () => {
-    const scheduler = settled();
-    let released = 0;
-    assert.equal(
-      scheduler.attachTimer("s1", () => {
-        released += 1;
-      }),
-      false,
-    );
-    assert.equal(released, 1, "挂不上就必须释放，否则 host 的定时器句柄会泄漏");
-  });
-
-  it("attachTimer：会话从未登记过同样返回 false，并释放 disposer", () => {
-    const scheduler = new ResumeScheduler({ now: makeClock().now });
-    let released = 0;
-    assert.equal(
-      scheduler.attachTimer("ghost", () => {
-        released += 1;
-      }),
-      false,
-    );
-    assert.equal(released, 1);
-  });
-
   it("settle：没有待办时二次 settle 返回 false（幂等，不重复计数）", () => {
     const scheduler = settled();
     assert.equal(scheduler.settle("s1", "fired"), false);
