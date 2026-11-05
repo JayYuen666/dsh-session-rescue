@@ -19,5 +19,8 @@
 # 行按裸包名引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
 # 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
 - insert:
+    # 故意不写 id：shared 是本包 patch 启用的内部组件行，不是用户可停用的独立组件；
+    # 写 id 会让插件页出现一个可关闭的组件，关闭后本包设置卡会失去组件供应。
+    - name: "@jayyuen66/dsh-plugin-shared"
     - id: session-rescue
       name: "@jayyuen66/dsh-session-rescue"

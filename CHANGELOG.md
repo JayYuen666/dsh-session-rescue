@@ -4,6 +4,18 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.8
+
+宿主开发基线抬到 `0.2.2-rc.1`（支持窗口 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 未变），`engines.node` 地板抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。调度、恢复与投影的判定逻辑不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
+
+### Changed
+
+- **shared 抬到 0.2.4**：catalog、生成物与 lockfile 随之同步；shared 新增的普通依赖 `@deepseek-ai/dsh-fs-patch` 由 shared 自己安装，本包不重复声明。
+- **宿主开发基线**：`devDependencies` 的 dsh 家族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，cordis 插件组四枚分别抬到 `1.1.0`（timer 为 `1.2.0`），`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。`engines.dsh` 与三枚 `@deepseek-ai/dsh*` peer 保持 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 未动；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐——写确切值会在另一条线上被 npm 的严格 peer 解析拦在 `ERESOLVE`。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`，取值取自宿主自己的地板。
+- **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 与 `src/remote.ts` 的运行期值导入迁到 `./client`（只换说明符，没有逻辑改动），`package.json` 新增 `dsh.bundle.client.external`，`build-client.mjs` 的外置清单同步；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行（写 id 会在插件页多出一个可关闭的组件，关掉后设置卡失去组件供应）。
+- **CI 的 node 矩阵收敛**：`ci.yml` 的 `node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，两份 workflow 的 `node-version` 由 `24` 改为 `24.9`，与 `engines.node` 同值。
+- **文档纠偏**：README 的 shared 值导入名单原列 `lib/card-apply` 与 `lib/card-diff`，这两位在产物里已不存在——按 `host.js` / `client.js` 现量改为四枚 `lib/*`（host 侧）加 `client`（client 侧）；`host.js` 值导入的宿主包由「两枚」改为三枚（原文漏了 `@deepseek-ai/dsh-typert-protocol`）；`insert:` 块由「本包那一行」改为「两条条目」并写明 shared 那行为何不写 id；门禁职责那句把两条规则写反了——精确钉版那条扫的是 **devDependencies**，peer 那条要求的是与 `engines.dsh` 同一条窗口范围，原文说成「peer 精确钉且同范围」。
+
 ## 0.1.7
 
 一轮围绕「记录被淘汰后状态仍然成立」的加固：调度器把配额记忆留在淘汰之外，回合读面统一按最后一次结果；

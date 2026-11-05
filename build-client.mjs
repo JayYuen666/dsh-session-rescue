@@ -20,7 +20,7 @@ const root = import.meta.dirname;
 // 外置清单 = 既有 react 家族 + zod（宿主 `PLATFORM_MODULES` 里本卡值导入的第三方运行时）。
 // 不复用 shared 的默认清单、也不 import 它的新导出：消费者 CI 装的是 registry 上那份 shared，
 // 新导出在它发布之前不存在。zod 内联会打进每份 client.js，并让同一页面出现两份 zod 身份。
-const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
+const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod", "@jayyuen66/dsh-plugin-shared/client"];
 
 /**
  * 取出 `src/client-entry.ts` 里 `const BUNDLE_PKG = "…"` 的取值。

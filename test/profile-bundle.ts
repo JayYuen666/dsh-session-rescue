@@ -170,13 +170,15 @@ function patchEntryId(): string {
       }
     }
   }
-  assert.notEqual(ids.length, 0, "cordis.patch.yml 里没有裸 `- id:` 条目");
+  // shared 是卡片组件行，不是本包的 settings 命名空间；只收本包自己的裸条目。
+  const ownIds = ids.filter((id) => id !== "shared");
+  assert.notEqual(ownIds.length, 0, "cordis.patch.yml 里没有本包的裸 `- id:` 条目");
   assert.equal(
-    ids.length,
+    ownIds.length,
     1,
-    `cordis.patch.yml 里有 ${ids.length} 条裸 \`- id:\`（${ids.join(", ")}）：无法断定哪条是本包的 settings 命名空间`,
+    `cordis.patch.yml 里有 ${ownIds.length} 条本包裸 \`- id:\`（${ownIds.join(", ")}）：无法断定哪条是本包的 settings 命名空间`,
   );
-  return ids[0] ?? "";
+  return ownIds[0] ?? "";
 }
 
 /** 产物里 `const <name> = "<字面量>"` 的值；取不到即抛（漂移针不许静默放过）。

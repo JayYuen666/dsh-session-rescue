@@ -69,10 +69,7 @@ import { decideDockState, parseStateBody } from "../lib/dock-state.ts";
 import type { RescuePending, RescueStateBody, ToggleState } from "../lib/dock-state.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
-import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { z } from "zod";
-import { claimApply } from "@jayyuen66/dsh-plugin-shared/lib/card-apply";
-import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
 import {
   CARD_UI_CSS,
   CardForm,
@@ -82,9 +79,13 @@ import {
   SelectField,
   TextField,
   ToggleField,
+  claimApply,
+  diffTouched,
+  fieldOf,
+  isRecord,
   splitHint,
-} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
-import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
+} from "@jayyuen66/dsh-plugin-shared/client";
+import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
 import { createRescueReader } from "./remote.ts";
 import type { RescueReader } from "./remote.ts";
 

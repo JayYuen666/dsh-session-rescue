@@ -16,6 +16,11 @@ const PKG_NAME = (
   }
 ).name;
 
+/** shared 客户端行在冒烟测试里的替身：任何成员都映射到同一个空实现。 */
+function sharedStubMember(): null {
+  return null;
+}
+
 // buildClient() 每调用一次就是一遍完整 rolldown；本文件多处断言看的都是同一份当期产物，
 // 故模块级只构建一次再复用：既省掉重复打包，也保证各断言落在同一份字节上。
 let builtOnce: Promise<string> | undefined;
@@ -227,6 +232,9 @@ describe("client.js 冒烟（stub ModuleLoader + stub react）", () => {
       }
       if (name === "zod") {
         return { z };
+      }
+      if (name === "@jayyuen66/dsh-plugin-shared/client") {
+        return new Proxy({}, { get: () => sharedStubMember });
       }
       throw new Error(`unexpected require in client factory: ${name}`);
     });
