@@ -16,11 +16,6 @@ const PKG_NAME = (
   }
 ).name;
 
-/** shared 客户端行在冒烟测试里的替身：任何成员都映射到同一个空实现。 */
-function sharedStubMember(): null {
-  return null;
-}
-
 // buildClient() 每调用一次就是一遍完整 rolldown；本文件多处断言看的都是同一份当期产物，
 // 故模块级只构建一次再复用：既省掉重复打包，也保证各断言落在同一份字节上。
 let builtOnce: Promise<string> | undefined;
@@ -233,9 +228,10 @@ describe("client.js 冒烟（stub ModuleLoader + stub react）", () => {
       if (name === "zod") {
         return { z };
       }
-      if (name === "@jayyuen66/dsh-plugin-shared/client") {
-        return new Proxy({}, { get: () => sharedStubMember });
-      }
+      // shared 的 `./client` 不再是可满足的请求：卡片组件已内联进产物（build-client.mjs 的
+      // 外置清单只留 react / zod）。工厂真发起这个 require 时按「未知请求」抛出，把外置回流
+      // 挡在这里——宿主页面上的同款失败是启动期的 "missed the module table"
+      // （dsh-ocr-review 仓 issue #2）。
       throw new Error(`unexpected require in client factory: ${name}`);
     });
     const exports = mod as { apply?: unknown; inject?: unknown };

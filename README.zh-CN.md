@@ -111,7 +111,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，内容是一串操作项，其 `insert:` 块带**两条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件）与 `- id: session-rescue`、`name: "@jayyuen66/dsh-session-rescue"`——宿主只对裸包名条目扫描 `dsh.client`。`dsh plugin add/remove` 维护装配层。
+- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，内容是一串操作项，其 `insert:` 块只有一条 `- id: session-rescue`、`name: "@jayyuen66/dsh-session-rescue"`——宿主只对裸包名条目扫描 `dsh.client`。卡片组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不依赖第二份包被装载。`dsh plugin add/remove` 维护装配层。
 - host 半硬依赖 `timer` 与 `settings`（`inject: ["timer", "settings"]`）；读取接口经注入子 fiber 注册进宿主 `remote` 网关。不依赖 `webServer`，没有该服务的宿主（TUI）自动续跑照常、只是设置卡读不到数据那一栏。
 - 设置卡在插件页的 `plugins.bundle.config`，按 **bundle 包名** keyed；`configForms.get()` 与 settings 命名空间仍是裸条目 id `session-rescue`。改动点「保存」才写 settings、「撤销」丢弃。
 - 不开 UI 时，部署默认值写在注册行 `config:` 上；优先级 = 卡运行时值 > 行 `config` > schema `.default()`，配置非法则插件加载失败（响亮报错）。

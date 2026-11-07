@@ -170,8 +170,7 @@ function patchEntryId(): string {
       }
     }
   }
-  // shared 是卡片组件行，不是本包的 settings 命名空间；只收本包自己的裸条目。
-  const ownIds = ids.filter((id) => id !== "shared");
+  const ownIds = ids;
   assert.notEqual(ownIds.length, 0, "cordis.patch.yml 里没有本包的裸 `- id:` 条目");
   assert.equal(
     ownIds.length,
