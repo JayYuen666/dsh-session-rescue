@@ -3,8 +3,8 @@ import { logged } from "./setup-logs.ts";
 import assert from "node:assert/strict";
 import plugin, { RESCUE_REMOTE_NAMESPACE, SessionRescueRemoteService } from "../host.ts";
 import { Context } from "@deepseek-ai/cordis";
-// 投影替身按读点现折会话事件流（真注册表增量折叠，同串事件同值）。折叠口在测试树，
-// 折的是生产那份 rescueFactsProjection 单元——替身与生产共用同一套 init/apply。
+// 投影替身按读点现折会话事件流：真注册表逐事件增量折叠，同一串事件下与测试树的折叠入口
+// `foldEvents` 同值；它折的是生产那份 rescueFactsProjection 单元——替身与生产共用同一套 init/apply。
 import { RESCUE_FACTS_KEY, rescueFactsProjection } from "../lib/turn-facts.ts";
 import { foldEvents } from "./turn-facts-fold.ts";
 import {
@@ -41,8 +41,8 @@ const CARRIER_DOWN_MESSAGE = "carrier down";
 const QUOTA_EXCEEDED_TEXT = "Allocated quota exceeded";
 const QUOTA_EXCEEDED_FULL_TEXT = "Allocated quota exceeded, please increase your quota limit.";
 
-// ── 轻量宿主替身：只实现本插件用到的服务面（settings/timer/agents）
-//    与 cordis ctx 面（on/effect/get）。类型上以真实 cordis Context 接收。 ──
+// ── 轻量宿主替身：只实现本插件用到的宿主服务（settings/timer/agents）
+//    与 cordis ctx 面（on/effect/get）。类型声明上以真实 cordis Context 接收。 ──
 
 interface TimerEntry {
   fn: () => void;
@@ -65,16 +65,16 @@ interface MockInjectCtx {
   effect: (factory: () => (() => void) | undefined) => void;
   get: (name: string) => unknown;
   reflect: MockCtx["reflect"] | undefined;
-  /** cordis 的注入子上下文同样带着依赖服务的读面（本包用它调 settings.configure）。 */
+  /** cordis 的注入子上下文同样带着依赖服务的读取接口（本包用它调 settings.configure）。 */
   settings: MockCtx["settings"];
-  /** 投影注册表（按 unknown 收——真身只在 host.ts 的守卫面里被点名）。 */
+  /** 投影注册表（按 unknown 收——真身只在 host.ts 的守卫里被点名）。 */
   sessionProjections?: unknown;
 }
 
 /**
  * `ctx.sessionProjections` 替身：`register` 收下单元，`stateOf` 按该会话当前的
  * `evs` 现折一份状态。真注册表是**增量**折叠，同一串事件下折叠结果与 `foldEvents`
- * 逐字同值（等价面见 test/turn-facts.test.ts），故这里按读点现折即可。
+ * 逐字同值（等价见 test/turn-facts.test.ts），故这里按读点现折即可。
  * `foldOverride` 让用例交出坏形状/不可采信的状态，用来钉回退扫描那一条支。
  */
 interface MockProjections {
@@ -109,7 +109,7 @@ interface MockCtx {
     roots: () => { id: string }[];
     get: (id: string) => MockAgent | undefined;
   };
-  /** 0.1.7 的 settings 服务面：`register`/`get`/`installSection` 已被宿主移除，
+  /** 0.1.7 的 settings 宿主服务：`register`/`get`/`installSection` 已被宿主移除，
    *  只剩 describe（跨命名空间读）+ mutate（路径级写入）+ configure（页面策略）。 */
   settings: {
     describe: () => { ns: string; value: unknown }[];
@@ -120,9 +120,9 @@ interface MockCtx {
   localePreference: string | undefined;
   /** llm-pi-ai describe() 的返回值（retry-providers 路由的数据源）；undefined = 服务不可读。 */
   piAiDescribeValue: { ns: string; value: unknown; revision?: number }[] | undefined;
-  /** settings.mutate 调用记录（retry-policy 路由的写入断言面）。 */
+  /** settings.mutate 调用记录（retry-policy 路由的写入断言记录）。 */
   mutations: { ns: string; ops: unknown[] }[];
-  /** settings.configure 调用记录（页面策略：{ auto:false } + owner=fiber 的断言面）。 */
+  /** settings.configure 调用记录（页面策略：{ auto:false } + owner=fiber 的断言内容）。 */
   configureCalls: { presentation: { auto?: boolean }; owner: unknown }[];
   /** 本插件 fiber（configure 的 owner 必须是它）。 */
   fiber: { id: string };
@@ -173,7 +173,7 @@ function createMockCtx(): MockCtx {
   const holder: { ctx: MockCtx | null } = { ctx: null };
   const settingsService = {
     // 0.1.7 唯一的跨命名空间读：locale 偏好与 llm-pi-ai 都从这张表单投影里挑。
-    // localePreference 未设 = 官方 client-locale 那条目没被投影 → 行不存在 → 中文默认。
+    // localePreference 未设 = 官方 client-locale 那个条目没被投影 → 行不存在 → 中文默认。
     describe(): { ns: string; value: unknown }[] {
       const rows = holder.ctx?.piAiDescribeValue ?? [];
       const preference = holder.ctx?.localePreference;
@@ -314,9 +314,9 @@ function createMockCtx(): MockCtx {
             },
             xkiro: {},
             aihubmix: {},
-            // 白名单闸门（见 test/host-contract.test.ts）之后，POST 的 provider 必须是
-            // pi-ai 已声明的那几个；这几条用例测的是 preset→ops 的映射与写侧失败面，
-            // 不是拒收面，所以把用例里出现的名字都在这份 fixture 里声明出来。
+            // 白名单检查（见 test/host-contract.test.ts）之后，POST 的 provider 必须是
+            // pi-ai 已声明的那几个；这几条用例测的是 preset→ops 的映射与写侧失败，
+            // 不是拒收，所以把用例里出现的名字都在这份 fixture 里声明出来。
             tokenrouter: {},
             openrouter: {},
             x: {},
@@ -474,7 +474,7 @@ const settle = (): Promise<unknown> => {
 };
 
 function applyPlugin(ctx: MockCtx, rowConfig?: Record<string, unknown>): void {
-  // mock ctx 是 host 服务面的结构替身，与真实 cordis Context 仅接口上兼容。
+  // mock ctx 是 host 宿主服务的结构替身，与真实 cordis Context 仅接口上兼容。
   if (rowConfig !== undefined) {
     ctx.scope.set(
       Object.fromEntries(Object.entries(rowConfig).filter(([, value]) => value !== undefined)),
@@ -483,7 +483,7 @@ function applyPlugin(ctx: MockCtx, rowConfig?: Record<string, unknown>): void {
   applyRescue(ctx, () => ctx.scope.get());
 }
 
-// ── 官方 Typert Remote 读面 ──────────────────────────────────────────────
+// ── 官方 Typert Remote 读取接口 ──────────────────────────────────────────────
 interface RescueRemote {
   state: () => { ok: true; sessions: Record<string, unknown> };
   cancel: (request: { sessionId: string }) => Record<string, unknown>;
@@ -710,7 +710,7 @@ describe("调度与触发", () => {
     // 0.1.7 的 V4 准入（session-format-v3-to-v4/src/message-sources.ts）对每个
     // 持久消息位拒收退役包装 `{ kind: 'plugin', plugin }`，抛
     // "format v4 message requires a producer-owned source kind" —— 一条这样的
-    // 续跑消息会直接把整个会话的落盘拒绝掉。
+    // 续跑消息会直接把整个会话的写到磁盘拒绝掉。
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
@@ -770,7 +770,7 @@ describe("调度与触发", () => {
   });
 
   it("缺席不缓存：locale 条目迟到时每趟都重读，语言不会被永久钉死", () => {
-    // localePreference 未设 = 官方 client-locale 那条目没被投影 → find 取不到行。
+    // localePreference 未设 = 官方 client-locale 那个条目没被投影 → find 取不到行。
     // 缓存一次缺席会把语言跟随永久钉死成中文，故缺席期间每趟都重读。
     let describeCalls = 0;
     const base = ctx.settings.describe;
@@ -1030,7 +1030,7 @@ describe("触发前校验否决", () => {
   });
 });
 
-describe("remote 读面的业务结果", () => {
+describe("remote 读取接口的业务结果", () => {
   let ctx: MockCtx;
   beforeEach(() => {
     ctx = createMockCtx();
@@ -1523,7 +1523,7 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
   });
 });
 
-// ── 模型线路来源（计划四行矩阵）─────────────────────────────────────────
+// ── 模型线路来源（计划里那张四行规则表）─────────────────────────────────
 // 排期读会话活线（current()），失败归因与 pass 兑换读「本次失败请求的实际线路」
 // （agent/request-error 的 provider）。两侧分开，才不会被旧 options 或下一步待选吞掉。
 describe("模型线路来源：排期、归因与 pass 各用各的来源", () => {
@@ -1710,7 +1710,7 @@ describe("max-tokens 自动继续（agent/status→idle 检测）", () => {
   });
 });
 
-// ── agent/request-error：请求级 429 自动重试（口径：
+// ── agent/request-error：请求级 429 自动重试（规则：
 //    所有平台 429 限流都要自动重试、不打断模型运行；waterfall 返回
 //    {kind:'retry'} 触发同回合重发，与 agent/error 回合级续跑互补） ──
 const quotaEvt = (agentId: string): Record<string, unknown> => ({
@@ -1883,7 +1883,7 @@ describe("agent/request-error 请求级 429 重试", () => {
     assert.equal(act6[0], undefined, "超上限不再重试");
   });
 
-  it("回合收口（status→idle）重置请求级重试计数：零星 429 不跨回合累加到永久失效", async () => {
+  it("回合统一处理（status→idle）重置请求级重试计数：零星 429 不跨回合累加到永久失效", async () => {
     // 同一 agent 实例（计数键是 session.id）贯穿全程，才能验到"跨回合累加"。
     const agent = makeAgent("re-reset", "sensenova");
     const evt: Record<string, unknown> = { ...quotaEvt("re-reset"), agent };
@@ -1892,7 +1892,7 @@ describe("agent/request-error 请求级 429 重试", () => {
     for (const [index, act] of round1.entries()) {
       assert.deepEqual(act, retryAction, `回合1第${index + 1}次重试`);
     }
-    // 回合收口 → idle：重置该会话计数（旧实现从不重置 → 累加到 5 后第 6 次永久放行给 llm-retry）
+    // 回合统一处理 → idle：重置该会话计数（旧实现从不重置 → 累加到 5 后第 6 次永久放行给 llm-retry）
     ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     const round2 = await fireSequence(ctx, useAgent(), 5);
     for (const [index, act] of round2.entries()) {
@@ -1944,7 +1944,7 @@ describe("agent/request-error 请求级 429 重试", () => {
   it("退避等待的两条收台路径都成对撤掉 abort 监听", async () => {
     // 监听登记时带 once，但「计时到点」与「卸载释放器」两支若不主动 removeEventListener，
     // 监听本体要一直挂到 signal 真中止或整条链被回收——在长驻宿主手里的那枚 signal 上就是
-    // 一段无谓保留。桩件按引用计数，所以「撤没撤」在这里是读得出来的事实，不是读注释。
+    // 一段无谓保留。测试替身按引用计数，所以「撤没撤」在这里是读得出来的事实，不是读注释。
     const counts = { added: 0, removed: 0 };
     const stub = {
       aborted: false,
@@ -2036,8 +2036,8 @@ describe("agent/request-error 请求级 429 重试", () => {
   });
 });
 
-// ── 429 重试策略配置通道（llm-pi-ai retryPolicy 读面）─────────────────────
-describe("retry-providers / retry-policy 读面 - 官方 llm-retry 策略读写", () => {
+// ── 429 重试策略配置通道（llm-pi-ai retryPolicy 读取接口）─────────────────────
+describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略读写", () => {
   let ctx: MockCtx;
   beforeEach(() => {
     ctx = createMockCtx();
@@ -2232,7 +2232,7 @@ const retryEvt = (agent: unknown): unknown => ({
   signal: undefined,
 });
 
-/** 契约急停用例的占位方法：这些面只用于让 isHostCtx 的「对象在但方法缺」形态
+/**契约急停用例的占位方法：这些位置只用于让 isHostCtx 的「对象在但方法缺」形态
  *  成立，急停发生在任何调用之前——抛错体既满足 no-empty-function，也证明
  *  「契约未过就绝不会用到它们」。 */
 const unreachableMethod = (): never => {
@@ -2260,7 +2260,7 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
   /** 守卫不过时 apply 绝不会碰第二参（config 只在事件里经 settingsOf 读），
    *  故这里给占位空对象即可——真正被考察的是 ctx 面。 */
   const uncheckedConfig = {} as never;
-  /** 除被考察那一面外全部齐备的宿主 ctx：其它项不得替被考察项挡下急停。 */
+  /** 除被考察的那一项外全部齐备的宿主 ctx：其它项不得替被考察项挡下急停。 */
 
   it("ctx 不是对象 → 抛错，不在半路上炸", () => {
     assert.throws(() => {
@@ -2296,14 +2296,14 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
     }, contractError);
   });
 
-  it("timer / settings 面不完整（对象在但方法缺、或整个服务面非对象）→ 抛错", () => {
+  it("timer / settings 面不完整（对象在但方法缺、或整个宿主服务非对象）→ 抛错", () => {
     assert.throws(() => {
       plugin.apply({ ...coreHost(), timer: null } as never, uncheckedConfig);
     }, contractError);
     assert.throws(() => {
       plugin.apply({ ...coreHost(), timer: { timeout: 42 } } as never, uncheckedConfig);
     }, contractError);
-    // 0.1.7 的 settings 面只探 describe（跨命名空间读）+ mutate（retry-policy 落盘）：
+    // 0.1.7 的 settings 面只探 describe（跨命名空间读）+ mutate（retry-policy 写到磁盘）：
     // 缺任一即急停，两条各自必须是充分条件。
     assert.throws(() => {
       plugin.apply({ ...coreHost(), settings: {} } as never, uncheckedConfig);
@@ -2322,7 +2322,7 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
     }, contractError);
     // ⚠ 反向锁：0.1.7 已移除 settings.register/settings.get —— 真宿主不会再提供它们，
     // 把它们当硬前置会让每一条真宿主都急停（设置面连同三类注入一起静默失效）。
-    // 故"只有新面"的 ctx 必须放行。
+    // 故"只有新类型"的 ctx 必须放行。
     const good = createMockCtx();
     assert.doesNotThrow(() => {
       applyPlugin(good);
@@ -2369,9 +2369,9 @@ describe("0.1.7 隐式注册验收（volatile 字段投影）", () => {
 });
 
 describe("state 路由：调度器记录被淘汰后挂起快照仍如实可见", () => {
-  it("本包 Config 不含 secret 字段 ⇒ 桩件读 raw meta.default 与宿主 plainSchema 同解", () => {
+  it("本包 Config 不含 secret 字段 ⇒测试替身读 raw meta.default 与宿主 plainSchema 同解", () => {
     // 见 test/config-refs.ts 的 secretBearingFields：宿主对 meta.role==="secret"
-    // 会抹掉 default/required，本桩件不抹。今天没有这类字段，所以两条路同解。
+    // 会抹掉 default/required，本测试替身不抹。今天没有这类字段，所以两条路同解。
     assert.deepEqual(secretBearingFields(), []);
   });
 
@@ -2499,7 +2499,7 @@ function countScans(agent: MockAgent): { value: number } {
   return counter;
 }
 
-/** 一条由 `kind` 消息开启、尚未收口的回合（agent/error 时刻的日志形态）。 */
+/** 一条由 `kind` 消息开启、尚未统一处理的回合（agent/error 时刻的日志形态）。 */
 function openedTurn(turnNo: number, kind: string): unknown[] {
   return [
     { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: turnNo } },
@@ -2697,7 +2697,7 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
   });
 });
 
-describe("官方 Typert Remote 读面", () => {
+describe("官方 Typert Remote 读取接口", () => {
   it("state/cancel/toggle/resume：与 HTTP 路由同一份运行时", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);

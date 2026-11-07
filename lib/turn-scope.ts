@@ -44,7 +44,7 @@ export interface TranscriptNode {
    *  `'scheduled' | 'started' | 'cancelled'`）。写成 `string` 时
    *  `transcript.ts` 里 `retryState === "started"` 这类比较拼错也能编译，
    *  而拼错的表现是「不在重试中」——续跑判定会漏掉正在重试的那一轮。
-   *  这里从官方类型派生而不是手抄三个串：手抄一份就多一处会与宿主脱钩的真值。 */
+   *  这里从官方类型派生而不是自己抄三个串：自己抄一份就多一处会与宿主脱钩的真值。 */
   retryState?: Extract<ConversationNode, { kind: "model-retry" }>["retryState"];
 }
 
@@ -115,7 +115,7 @@ export function interruptedAssistantInTurn(
   view: TranscriptView,
   turn: number,
 ): TranscriptNode | null {
-  // 与 turnErrorInTurn 同一条口径：同一轮可能有多条中断记录（宿主重试、重跑），投影要的是
+  // 与 turnErrorInTurn 同一条规则：同一轮可能有多条中断记录（宿主重试、重跑），投影要的是
   // 最后一次的结果。按 seq 显式比大小，不依赖 nodes 的排列顺序。
   let latest: TranscriptNode | null = null;
   for (const node of view.nodes) {

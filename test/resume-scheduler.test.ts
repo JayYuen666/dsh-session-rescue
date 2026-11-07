@@ -15,10 +15,10 @@ function makeClock(start = 1_000_000): { now: () => number; advance: (ms: number
   };
 }
 
-/** 拒因 token 是对外契约（卡片与日志按它匹配）。用例改从产品导入同一枚常量之后，
+/** 拒因 token 是对外声明（卡片与日志按它匹配）。用例改从产品导入同一枚常量之后，
  *  「常量值被动过而所有断言跟着一起走」就没有东西兜住，所以在这里把值本身钉住。 */
 describe("拒因 token 的字面值（MAX_RESUMES_REASON）", () => {
-  it("仍是 max-resumes（其余四条拒因在产品里都是裸字面量）", () => {
+  it("仍是 max-resumes（其余四条拒因在产品里都是写成字面量）", () => {
     assert.equal(MAX_RESUMES_REASON, "max-resumes");
   });
 });
@@ -723,7 +723,7 @@ describe("MAX_SESSIONS：会话记录上限（防长驻 Map 无界膨胀）", ()
     assert.equal(before, MAX_SESSIONS);
     assert.equal(scheduler.noteTurnHandled("extra", 5), true);
     assert.equal(Object.keys(scheduler.stateSnapshot()).length, before);
-    // 该会话此后同样不会被排期：容量判据拦住新建记录（与上面同一个结论面）。
+    // 该会话此后同样不会被排期：容量判据拦住新建记录（与上面同一个结论）。
     assert.equal(scheduler.onFailure({ ...entryBase, sessionId: "extra" }).action, "skip");
   });
 
@@ -744,7 +744,7 @@ describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
   it("attachTimer：会话未知且 dispose 不是函数 → 只返回 false，不去调用它", () => {
     // 「未登记」与「已 settle」两种无待办形状都真的释放 disposer，那条判据在
     // 「无待办时立即释放（竞态守卫）」用例里；这里只留 `dispose` 非函数这一手
-    // （releaseDisposer 的 typeof 判据为假那一侧）。
+    // （releaseDisposer 的 typeof 判断为假的那条分支）。
     const scheduler = new ResumeScheduler();
     assert.equal(scheduler.attachTimer("ghost", null), false);
   });
@@ -767,7 +767,7 @@ describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
     scheduler.onFailure({ ...base });
     assert.ok(scheduler.suspendSession("s1") !== null);
     // kind 的声明就是 RescueKind | ""（实现有意承认跨版本脏快照的空串）：
-    // 这里如实写空串并交 PendingRecord 类型收口，不做伪装成合法 RescueKind 的断言。
+    // 这里如实写空串并交 PendingRecord 类型统一处理，不做伪装成合法 RescueKind 的断言。
     const dirty: PendingRecord = { turn: 9, kind: "", fireAt: 5, announcedAt: 1 };
     assert.equal(scheduler.restorePending("s1", dirty), true);
     assert.equal(scheduler.stateSnapshot()["s1"]?.pending?.kind, "resume", "快照回落 resume");
@@ -798,7 +798,7 @@ describe("定时器挂载面与脏 kind 降级（审计补漏）", () => {
     );
     assert.equal(scheduler.stateSnapshot()["s1"]?.pending, null, "没有凭空多出的待办");
 
-    // 宿主已丢弃挂起快照并释放记账（releaseSuspended）后再恢复：同样拒绝。
+    // 宿主已丢弃挂起快照并释放记录下来（releaseSuspended）后再恢复：同样拒绝。
     scheduler.onFailure({ ...base });
     assert.ok(scheduler.suspendSession("s1") !== null);
     scheduler.releaseSuspended("s1");

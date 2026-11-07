@@ -1,4 +1,4 @@
-// scheduler 契约补充：挂起/恢复/剩余时间等 host 集成面（纯状态机单测缺口）。
+// scheduler契约补充：挂起/恢复/剩余时间等 host 集成层（纯状态机单测缺口）。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { MAX_SESSIONS, ResumeScheduler } from "../lib/resume-scheduler.ts";
@@ -132,7 +132,7 @@ describe("restorePending / remainingMs（重连恢复面）", () => {
     );
     assert.equal(reattached, 0, "挂上的只是释放钩子，不该立刻被调");
     // 恢复还要把 `suspended` 落回 false：没落回的记录在台账淘汰那一判据里永远算「欠着补发」，
-    // 长跑进程里永久占位（resume-scheduler.ts 那条注释自己写明这一点）。可观测面只有淘汰：
+    // 长跑进程里永久占位（resume-scheduler.ts 那条注释自己写明这一点）。可记录点只有淘汰：
     // 结算后把台账灌满，这条记录必须出局。
     scheduler.attachTimer("s1", null);
     scheduler.settle("s1", "fired");

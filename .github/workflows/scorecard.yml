@@ -63,7 +63,7 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
-      # SARIF 先上传：这是结论的落点（code scanning 面板）。留档那一步排在它后面，
+      # SARIF 先上传：结论显示在这里（code scanning 面板）。留档那一步排在它后面，
       # 这样 artifact 存储配额或并发写入限制挡住留档时，本轮体检结论已经交到面板上。
       # 两步都不做 continue-on-error——留档失败也是一次真失败，只是不该由它决定结论有没有送到。
       - name: Upload to code-scanning

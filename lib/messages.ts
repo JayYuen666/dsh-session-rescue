@@ -2,7 +2,7 @@
 //
 // 只管 host 半：设置卡与 dock 的 UI 文案走官方 @deepseek-ai/dsh-client-locale
 // （client 侧 `ctx.locale.register(ns, locale, dict)` + `bind`/`t`，见 src/client-entry.ts）。
-// host 侧没有官方 i18n 面，注入给模型的文本与沉淀给 lesson-loop 的 detail 只能自带字典；
+// host 侧没有官方 i18n 面，注入给模型的文本与写入给 lesson-loop 的 detail 只能自带字典；
 // 语言取官方 settings 的 `locale.preference`（shared 的 resolveLocalePreference），未注册即中文。
 //
 // 键集一致由 tsc 保证：zh / en 两份都标注同一个 Messages 类型，少键多键都在编译期红。

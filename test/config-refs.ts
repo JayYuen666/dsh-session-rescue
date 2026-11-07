@@ -1,4 +1,4 @@
-// test/config-refs.ts —— 0.1.7 隐式注册的测试桩件（本包两个 host 测试共用）。
+// test/config-refs.ts —— 0.1.7 隐式注册的测试替身（本包两个 host 测试共用）。
 //
 // 背景：0.1.7 删掉了 `settings.register(ns, schema, { base })`（连同 `settings.get` 与
 // `installSection`）。命名空间变成**隐式**的（= profile 条目 id，见 cordis.patch.yml），
@@ -16,12 +16,12 @@ import { fileURLToPath } from "node:url";
 import plugin from "../host.ts";
 
 /** 宿主判 volatile 用的是**真值**（settings/src/schema.ts:38 `if (schema.meta?.volatile)`），
- *  不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本桩件里被判成
+ *  不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本测试替身里被判成
  *  非 volatile，而宿主照样把它投影进表单 ⇒ 测试绿、卡片少一项。 */
 function isVolatileField(node: SchemaNode): boolean {
   // 直接问真值，不自己拼一个"排除 undefined 与 false"的近似：宿主那句 `if (meta?.volatile)`
   // 把 null / 0 / "" / NaN 一律当假，而近似式把它们全当真有 ⇒ 那些 schema 在宿主里不进表单、
-  // 在本桩件里被判 volatile，测试绿而卡片少一项。
+  // 在本测试替身里被判 volatile，测试绿而卡片少一项。
   return Boolean(node.meta?.["volatile"]);
 }
 
@@ -53,7 +53,7 @@ export function configDict(): Record<string, SchemaNode> {
   );
   // 解构而不是直接取成员：`plugin.Config.dict` 这条读法被判 prefer-destructuring，
   // 而这里要的也只是 dict 一个字段。dict 缺失与空字典分开报：前者是形状变了，
-  // 后者会让「每个 schema 字段都被覆盖」的断言在零个字段上恒真。
+  // 后者会让「每个 schema 字段都被覆盖」的断言在零个字段上永远成立。
   const { dict } = config;
   assert.ok(
     dict !== undefined && dict !== null,
@@ -74,7 +74,7 @@ export function configDict(): Record<string, SchemaNode> {
  */
 /** 两条分支共用的读取器：缺键（undefined）回落 schema default，显式 null 原样保留。
  *  真宿主在装载期已按 `.default()` 填满（host.ts settingsOf 的注释「故交进来的引用
- *  恒有值」），桩件的 read 表漏键时读 undefined 却照绿，正是本文件要防的漂移形态。
+ *  恒有值」），测试替身的 read 表漏键时读 undefined 却照绿，正是本文件要防的漂移形态。
  *  `??` 做不到这件事——它会把显式 null 也当成缺省换掉。 */
 function readField(read: () => Record<string, unknown>, key: string, fallback: unknown): unknown {
   const value = read()[key];
@@ -87,7 +87,7 @@ function refsOf(read: () => Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(configDict()).map(([key, field]) =>
       // 宿主判的是**真值**（settings/src/schema.ts:38 `if (schema.meta?.volatile)`），
-      // 不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本桩件里
+      // 不是 `=== true`：写窄了会让「meta.volatile 是别的真值」那种 schema 在本测试替身里
       // 被判成非 volatile，而宿主照样把它投影进表单 ⇒ 测试绿、卡片少一项。
       isVolatileField(field)
         ? [key, { get: () => readField(read, key, field.meta?.["default"]) }]
@@ -101,7 +101,7 @@ export function applyRescue(ctx: unknown, read: () => Record<string, unknown>): 
   plugin.apply(ctx as never, refsOf(read) as never);
 }
 
-/** 本桩件的读法与宿主 `plainSchema` 的分歧点，用一条断言钉住：宿主对
+/** 本测试替身的读法与宿主 `plainSchema` 的分歧点，用一条断言钉住：宿主对
  *  `meta.role === "secret"` 的字段会**抹掉 default/required**（settings/src/schema.ts:22-24），
  *  而 `schemaDefaults()` 读的是 raw `meta.default`。本包 Config 里没有任何 secret 字段，
  *  所以两份默认值今日同解；将来谁加了 secret 字段，这条就会红着提醒改读法。 */

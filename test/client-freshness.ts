@@ -1,4 +1,4 @@
-// test/client-freshness.ts —— 产物新鲜度指纹门禁（多包共用）。
+// test/client-freshness.ts —— 产物一致性指纹门禁（多包共用）。
 // 本包副本形态：只提供**证据**（磁盘产物 vs 内存构建产物 + 包名），用例注册留在
 // test/build-client.test.ts 的 describe 里。共享夹具一旦自行 it()，它就变成用例文件，
 // vitest 的结构类规则（require-hook / consistent-test-it / valid-title）全部落到夹具上。
@@ -10,7 +10,7 @@
 // client.js 按 **Buffer 逐字节**比对（不是 utf8 字符串比较：非法 UTF-8 字节会被
 // 解码成 U+FFFD 从而掩盖真实差异）。src 任何变更未重建 → 字节必差 → 红。
 // 行尾由仓根 .gitattributes 的 `* text=auto eol=lf` 钉住，所以真机上不会出现
-// 「只有换行符不同」的假红；万一哪天那条规则被删，这里按字节仍会红——那是文件
+// 「只有换行符不同」的误报；万一哪天那条规则被删，这里按字节仍会红——那是文件
 // 真的不一样，不是测量的锅。
 //
 // 用法（各包 test/build-client.test.ts 的指纹用例里）：
@@ -36,7 +36,7 @@ export interface FreshnessEvidence {
   readonly builtBytes: number;
 }
 
-/** 只认形如 { buildClient(): Promise<string> } 的模块面：改名、只 default 导出或仍是
+/** 只认形如 { buildClient(): Promise<string> } 的模块导出：改名、只 default 导出或仍是
  *  CJS 时，门禁要给出可操作诊断而不是把 TypeError 原样抛给读测试的人。 */
 const isBuildClientModule = (
   value: unknown,
@@ -83,8 +83,8 @@ export async function clientFreshnessEvidence(testFileUrl: string): Promise<Fres
   const testDir = path.dirname(fileURLToPath(testFileUrl));
   const pkgDir = findPkgDir(testDir);
   const pkgName = readPkgName(pkgDir);
-  // 动态导入 .mjs 对 TS 为 any，先收窄到调用面再 await（避免 no-unsafe-*）。
-  // import() 只收 URL 或说明符，不收裸文件系统路径：Windows 上 `C:\…\build-client.mjs`
+  // 动态导入 .mjs 对 TS 为 any，先收窄到调用处再 await（避免 no-unsafe-*）。
+  // import() 只收 URL 或说明符，不收没有 file: 前缀的系统路径：Windows 上 `C:\…\build-client.mjs`
   // 会被当成协议 `c:` 解析而抛 ERR_UNSUPPORTED_ESM_URL_SCHEME；POSIX 的 `/…` 只是恰好能过。
   const buildScript = path.resolve(pkgDir, "build-client.mjs");
   let mod: unknown;

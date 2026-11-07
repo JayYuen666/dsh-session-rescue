@@ -41,7 +41,7 @@ const GOAL_KIND = "goal";
 const MAX_GOAL_ROUNDS = 5;
 /** 观测轮询的最小步长（毫秒）。 */
 const POLL_STEP_MS = 20;
-/** 真会话 id（幻影品牌串：构造口只有官方 `brandString`）。 */
+/** 真会话 id 的常量（`SessionId` 是带官方 `brand` 标记的字符串类型：普通串要经 `brandString` 标成它）。 */
 const GOAL_SESSION_ID = "rescue-goal";
 
 /** 官方包交回 `{ name, inject, apply }` 三件（无 default 导出），按官方用法显式拼装配对象。 */
@@ -70,7 +70,7 @@ let rig: Rig | undefined;
 
 /** boot 的装配体（server 之外的全部插件注册与事件挂接）。 */
 async function bootInto(ctx: Context, server: MockLlmServer): Promise<void> {
-  // settings 用记账替身（真 SettingsForms 要 loader+profileContext，属装配面的另一层）；
+  // settings 用记录下来替身（真 SettingsForms 要 loader+profileContext，属装配的另一层）；
   // goal 服务、round driver、agent-loop、llm 适配器全是真身。
   ctx.provide("settings", {
     describe: () => [],
@@ -253,7 +253,7 @@ describe("真 goal + 真 round driver 下的接管", () => {
       ),
     ).resolves.toBe(true);
     expect(kindCount(agent, RESCUE_KIND), "救援一条都不发：续跑归 driver").toBe(0);
-    // driver 自己把下一轮开起来了——这正是让路要保住的那一侧。
+    // driver 自己把下一轮开起来了——这正是让路要保住的那个结果。
     expect(kindCount(agent, GOAL_KIND)).toBeGreaterThanOrEqual(2);
   }, 60_000);
 });

@@ -15,7 +15,7 @@
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { z } from "zod";
 
-/** host 状态快照的最小投影（来自官方 Remote 的 state 读面）。
+/** host 状态快照的最小投影（来自官方 Remote 的 state 读取接口）。
  *  `ok` 写死 `true`：host 侧只产出成功形状，失败走 Remote 的 rejection 通道
  *  （见 `STATE_SCHEMA` 的 `z.literal(true)` 与 `parseStateBody` 的唯一出口）。
  *  写宽成 `boolean` 会让下游多出一个「ok:false 该怎么办」的不可测分支。 */
@@ -128,7 +128,7 @@ const STATE_SCHEMA = z.object({
  *      「没读到有效快照」退避。若也折成 `{ ok: true }`，dock 会把它读成一份**确信的**
  *      空快照——开关行照常显示，每个会话都按「没关过」判成 on。把「读坏了」显示成
  *      「读到了，一切正常」是最难查的那类失败。
- *  wire 是本包唯一的外部输入面，读法因此住在这里而不是渲染侧。 */
+ *  wire 是本包唯一的外部输入，读法因此定义在这里而不是渲染侧。 */
 export function parseStateBody(parsed: Record<string, unknown>): RescueStateBody | null {
   const envelope = STATE_SCHEMA.safeParse(parsed);
   if (!envelope.success) {

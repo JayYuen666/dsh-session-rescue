@@ -150,7 +150,7 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
     assert.equal(body.ok, true);
     assert.equal(body.sessions, undefined, "缺位不补一张空表：补了就无法与「真的没有会话」区分");
     // 旧载荷的下游语义一并钉住：就绪快照 + 无该会话记录 ⇒ 开关行在场、按没关过判 on、
-    // 区域有内容（showToggleRow 进 hasContent）。这一组默认值是本模块最易漂移的面。
+    // 区域有内容（showToggleRow 进 hasContent）。这一组默认值是本模块最容易漂移的地方。
     const decision = decideDockState(NO_ACTIONS, body, sessionId);
     assert.equal(decision.rescueKnown, true);
     assert.equal(decision.showToggleRow, true);

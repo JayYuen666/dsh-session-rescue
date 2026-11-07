@@ -25,7 +25,7 @@ function placeholders(template: string): Set<string> {
   );
 }
 
-/** 只投影 hostMessages 真正用到的那一个成员（其余服务面与本用例无关）。
+/** 只投影 hostMessages 真正用到的那一个成员（其余宿主服务与本用例无关）。
  *  0.1.7 的跨命名空间读只剩 `describe()`：installed
  *  dsh-settings/lib/types/index.d.ts:96 的签名是 `describe(options?): SettingsDescriptor[]`
  *  ——**恒回一个数组**（`register`/`get` 连同"按命名空间回单个 value"那层一起被宿主移除），

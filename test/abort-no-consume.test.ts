@@ -28,7 +28,7 @@ interface MockAgent {
   followup: (message: unknown) => void;
   followupCalls: unknown[];
 }
-/** 0.1.7 的 settings 服务面（installed dsh-settings/lib/types/index.d.ts）：
+/** 0.1.7 的 settings 宿主服务（installed dsh-settings/lib/types/index.d.ts）：
  *  `register`/`get`/`installSection` 已被宿主移除（命名空间改按 profile 条目 id
  *  隐式注册），只剩 describe(:96) / mutate(:114) / configure(:80) 三件。 */
 interface MockSettings {
@@ -39,7 +39,7 @@ interface MockSettings {
 interface MockInjectCtx {
   effect: (factory: () => (() => void) | undefined) => void;
   get: (name: string) => unknown;
-  /** cordis 的注入子上下文同样带着被注入服务的读面（settings.configure 走这条路：
+  /** cordis 的注入子上下文同样带着被注入服务的读取接口（settings.configure 走这条路：
    *  apply 里 `svc.inject(['settings'], child => child.effect(() => child.settings
    *  .configure({ auto: false }, svc.fiber)))`）。缺这个成员，替身在激活时就少了
    *  宿主真正会调的那一手。 */
@@ -79,8 +79,8 @@ function createCtx(): MockCtx {
     assert.ok(key in defaults, `冷却覆写点名了 schema 里不存在的字段：${key}`);
   }
   const scopeValue: Record<string, unknown> = { ...defaults, ...cooldownOverrides };
-  // 桩件里没有宿主装载期那一步（宿主按 `.default()` 把 volatile 字段填满），所以这里判的是
-  // **取值**而不是键在不在：`key in scopeValue` 恒真——名单与内置默认同出一个 schema，
+  // 测试替身里没有宿主装载期那一步（宿主按 `.default()` 把 volatile 字段填满），所以这里判的是
+  // **取值**而不是键在不在：`key in scopeValue` 永远成立——名单与内置默认同出一个 schema，
   // 展开之后每个字段名都必然在位，漏配与拼错都拦不住（实测把覆写名改成不存在的
   // `resumeCooldownM`，六条用例仍全绿）。取值落到 undefined 才是本文件真正会静默失效的形。
   for (const key of volatileFieldNames()) {
@@ -209,7 +209,7 @@ function countsOf(ctx: MockCtx): Record<string, number> {
 
 /**
  * 一轮 tick 只触发这一轮已经武装的定时器。回调里新排的那一要等下一轮——直接遍历
- * `ctx.timers` 时，push 进去的条目会被同一个 for 循环顺带吃掉，「同一轮里二次武装」
+ * `ctx.timers` 时，push 进去的条目会被同一个 for 循环顺带处理掉，「同一轮里二次武装」
  * 就成了测试替身独有的行为，与宿主的 timer 语义相反。
  */
 function tick(ctx: MockCtx): void {
@@ -226,7 +226,7 @@ function tick(ctx: MockCtx): void {
 describe("用户中止的回合不消耗续跑/继续配额", () => {
   let ctx: MockCtx;
 
-  /** 取 agent/status 处理器；apply 没注册时直接红，避免 `?.()` 让用例恒绿。 */
+  /** 取 agent/status 处理器；apply 没注册时直接红，避免 `?.()` 让用例永远通过。 */
   function idleHandler(context: MockCtx): (payload: unknown) => void {
     const handler = context.handlers["agent/status"];
     assert.ok(handler, "apply 必须注册 agent/status 处理器，否则本用例恒绿");
@@ -276,7 +276,7 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
     assert.equal(agent.followupCalls.length, 1, "interrupted 回合同样不得二次注入");
   });
 
-  it("aborted 回合带着未闭合 todo 与待投递 inbox → idle 也不按 unfinished 补跑", () => {
+  it("aborted 回合带着未闭合 todo 与待发送 inbox → idle 也不按 unfinished 补跑", () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(1, "error"));
     ctx.handlers["agent/error"]?.({
@@ -304,7 +304,7 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
   });
 
   it("tick 只触发本轮已武装的定时器：回调里新排的那一等下一轮", () => {
-    // 直接遍历数组时，回调里 push 进来的定时器会被同一个循环顺带吃掉——「同一轮里二次触发」
+    // 直接遍历数组时，回调里 push 进来的定时器会被同一个循环顺带处理掉——「同一轮里二次触发」
     // 就成了替身独有的行为，与宿主 timer 的语义相反，而 scheduleInjection 的回调正是会再排一发的形状。
     const order: string[] = [];
     ctx.timers.push({
@@ -359,7 +359,7 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
     });
     assert.equal(ctx.timers.length, 1, "瞬时失败已武装一个待办");
-    // 用户在倒计时内亲手开了 turn 2 又停掉它：turn/start 2 已落盘即代表"人在干活"。
+    // 用户在倒计时内亲手开了 turn 2 又停掉它：turn/start 2 已写到磁盘即代表"人在干活"。
     agent.session.evs?.push({ type: "turn/start", seq: 20, time: 20, data: { turn: 2 } });
     agent.session.evs?.push(turnEnd(2, "aborted"));
     tick(ctx);

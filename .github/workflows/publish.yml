@@ -47,7 +47,7 @@ jobs:
   # 「换一枚短期发布凭据」的能力交给全部 devDependencies 的代码。产物由 check job（只有 contents: read）
   # 用 pnpm pack 打出来，经 artifact 交给 publish，发布命令直接吃 tarball。
   # 已证到的部分：本机 pnpm 12 对 `pnpm publish <tarball> --access public --provenance --dry-run`
-  # 回 0 并正确认出那枚 tarball（/tmp 探针）。**没证到**的是这条路径上的 provenance 签名——dry-run
+  # 回 0 并正确认出那枚 tarball（/tmp 里的探测脚本）。**没证到**的是这条路径上的 provenance 签名——dry-run
   # 不申请签名。第一次真发若败在 attestation，就把发布步回退成「publish job 内 install + 目录发布」，
   # 并回到本注释说明这条路径为什么走不通，别把它改成不带 --provenance。
   check:
@@ -75,8 +75,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
-      # 产物在这里打包：install 已经跑过 prepare（三次构建的落点），pack 只归档，
-      # 所以这枚 tarball 与「publish job 内 install + publish 目录」那条旧路产出的是同一份出货面。
+      # 产物在这里打包：install 已经跑过 prepare（三次构建在 prepare 里跑完），pack 只归档，
+      # 所以这枚 tarball 与「publish job 内 install + publish 目录」那条旧路产出的是同一份出货内容。
       - name: 打包发布产物
         run: |
           set -euo pipefail
@@ -125,7 +125,7 @@ jobs:
           node-version: 24.9
           cache: pnpm
           registry-url: https://registry.npmjs.org
-      # 静态 token 是 OIDC 失败时的兜底，不是发布的前提：仓库里没有这枚 secret 是正常状态，
+      # 静态 token 是 OIDC 失败时的后备，不是发布的前提：仓库里没有这枚 secret 是正常状态，
       # 走 trusted publishing 的仓库本来就不该长期存它。所以这一步在值为空时放行，只把
       # 凭据本身不跨步骤传递：步骤输出会落成 RUNNER_TEMP 下的文件，同 job 后续步骤
       # （含 install 里跑的依赖脚本）都能枚举读到；写进 job 级环境同理。
@@ -162,7 +162,7 @@ jobs:
           fi
           # 只交出「可用与否」这一个布尔；凭据本身留在本步骤，不写进任何可跨步骤读取的介质。
           printf 'usable=%s\n' "$usable" >> "$GITHUB_OUTPUT"
-      # 静态 token 只是兜底，所以这里判的是「还能不能用」，不是「必须有效」：
+      # 静态 token 只是后备，所以这里判的是「还能不能用」，不是「必须有效」：
       #   · 200      → 原样传给发布步
       #   · 401/403  → 告警并清空，让发布步走 OIDC。凭据失效不是工作流该红的理由，
       #                OIDC 也没配好时发布步会在认证处以 ENEEDAUTH 红，那一步才是真判据。
@@ -290,7 +290,7 @@ jobs:
       # prepack 会重建 host.js / client.js / types/，产物不入库也发得出去。
       # 凭据优先级：OIDC 在前，这枚 NODE_AUTH_TOKEN 在后（pnpm 的 publish_options.rs 原话
       # "OIDC takes precedence over a configured static token"）。trusted publisher 配好时
-      # 它根本不参与认证，交换失败才轮到它——留着是兜底，不是主路。
+      # 它根本不参与认证，交换失败才轮到它——留着是后备，不是主路。
       # 注入方式只能是环境变量：setup-node 配了 registry-url 会把 `${NODE_AUTH_TOKEN}` 占位写进
       # RUNNER_TEMP/.npmrc 并用 NPM_CONFIG_USERCONFIG 指过去，$HOME/.npmrc 被忽略；真 token 留在
       # 环境变量里。别往仓库里的 .npmrc 写明文——pnpm 不展开仓库级 .npmrc 里的 `${...}` 占位

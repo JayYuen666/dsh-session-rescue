@@ -98,7 +98,7 @@ describe("共享夹具的三条门禁", () => {
       [],
       `[${pkgName}] allowUnbound 项缺少 reason：${noReason.map(([field]) => field).join(", ")}`,
     );
-    // 豁免必须仍指向 host 里存在的字段：host 删字段/改名后，这条记账既不 bound
+    // 豁免必须仍指向 host 里存在的字段：host 删字段/改名后，这条记录下来既不 bound
     //（stale 只看 bound）、也不在 missing 里，前两条判据都碰不到它——少了这一条，
     // 豁免表就会静默留下一行指向不存在字段的名目，覆盖门禁看起来还全绿。
     const dangling = [...exemptions.keys()].filter((field) => !hostFields.includes(field));
@@ -109,10 +109,10 @@ describe("共享夹具的三条门禁", () => {
     );
   });
 
-  // 漂移针（判据与真源读取见 test/profile-bundle.ts）：当期构建产物里
+  // 产物漂移检查（判据与唯一来源读取见 test/profile-bundle.ts）：当期构建产物里
   //   1. `plugins.bundle.config` 的 key === profile `dsh.profile.bundles` 中本包那条包名；
   //   2. `configForms.get()` 的入参 === cordis.patch.yml 的裸条目 id
-  //      （**没有**被顺手一起改成包名 —— 那会把 client 半的写入面再次弄坏）；
+  //      （**没有**被顺手一起改成包名 —— 那会把 client 半的写入路径再次弄坏）；
   //   3. 两个标识不同值（相等就说明本包恰好条目 id == 包名，那这一层的混用钉不住，直接红）。
   it("漂移针：槽位 key = profile 的 bundle 包名，configForms 入参 = patch 裸条目 id", async () => {
     const { bundle, entryId, slotKey, formsEntryId } = slotKeyEvidence(await builtClient());
@@ -249,7 +249,7 @@ describe("client.js 冒烟（stub ModuleLoader + stub react）", () => {
     // dsh-client-ui-settings/lib/types/client/config-form.d.ts:92-94（Context 增强）
     // 与 :137（get(entryId)）。
     // 注入清单元数据（injectServiceNames）的顺序不参与服务解析，故排序后比**精确集合**：
-    // 多一项/少一项都红，但单纯重排顺序不再假红，也不会因排序差异掩盖真正的增删。
+    // 多一项/少一项都红，但单纯重排顺序不再误报，也不会因排序差异掩盖真正的增删。
     assert.deepEqual(
       [...(exports.inject as string[])].toSorted((left, right) => left.localeCompare(right)),
       ["configForms", "locale", "sessions", "slots"],

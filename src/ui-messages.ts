@@ -29,7 +29,7 @@ export interface UiMessages {
   readonly bannerSuspendedContinue: string;
   /** 待办补跑横幅（挂起态）。 */
   readonly bannerSuspendedUnfinished: string;
-  // ── 业务动作失败面（host/dock 共用） ──
+  // ── 业务动作失败（host/dock 共用） ──
   /** 会话绑定缺失。 */
   readonly sessionUnavailable: string;
   /** 第一轮消息没有可 fork 的前序边界。 */
@@ -149,7 +149,7 @@ export interface UiMessages {
   readonly presetDirty: string;
   readonly retrySectionTitle: string;
   readonly retrySectionHint: string;
-  /** 远端面不可用（读不到命名空间或调用被拒），`{target}` 是「provider→preset」。 */
+  /** 远程通道不可用（读不到命名空间或调用被拒），`{target}` 是「provider→preset」。 */
   readonly remoteUnavailable: string;
   /** 远端返回了业务失败但没带原因，`{target}` 同上。 */
   readonly hostRejected: string;
@@ -169,7 +169,7 @@ export interface UiMessages {
  * type 'LocaleKeysOf<"session-rescue">'`）。merge 之后 `bind` 取在
  * `typeof NS` 上就是官方 `TranslateNS<'session-rescue'>`，本地不必再抄一份函数形状。
  * ⚠ interface 的键位必须是字面量，故下面的等式常量是本源，client-entry.ts 的 `NS` 按它的
- * 类型 `LocaleNs` 标注钉住（test/client-ui.test.ts 另断言注册时的 ns 与 cordis.patch.yml 的
+ * 类型 `LocaleNs` 标注钉住（test/client-ui.test.ts 另断言注册时的 ns 与 cordis.patch.yml
  * 裸 `- id:` 同源）。
  */
 declare module "@deepseek-ai/dsh-client-ui-slots" {
@@ -184,7 +184,7 @@ const LOCALE_NS_KEY = "session-rescue" as const;
 
 /**
  * 本源只以**类型**形态对外流通：`client-entry.ts` 的 `const NS: LocaleNs = "session-rescue"` 把条目
- * id 钉在本源上（分叉即编译期红），而产物漂移针仍要按字面量形状从 bundle 里抓 `NS`，所以那里
+ * id 钉在本源上（分叉即编译期红），而产物漂移检查仍要按字面量形状从 bundle 里抓 `NS`，所以那里
  * 保留字面量、只加类型标注——值导出不必存在（用例侧同理：要断言运行时那串就写字面量）。
  */
 export type LocaleNs = typeof LOCALE_NS_KEY;
@@ -192,9 +192,9 @@ export type LocaleNs = typeof LOCALE_NS_KEY;
 /**
  * 卡片与 dock 取文案的函数形状：官方 `TranslateNS<N> = Translate<LocaleKeysOf<N>>`
  * （installed `dsh-client-ui-slots/lib/types/index.d.ts:67`，而 `Translate<K> =
- * (key: K, params?: Record<string, unknown>) => string`，同文件 :45）。函数面归官方，
+ * (key: K, params?: Record<string, unknown>) => string`，同文件 :45）。函数类型归官方，
  * 键集就是上面 merge 的 `keyof UiMessages`（外加官方 `LocaleKeysOf` 一并放行的
- * `common` 命名空间键——那是宿主查不到键时的回落面，运行时行为见其 `lookup`）。
+ * `common` 命名空间键——那是宿主查不到键时的回落，运行时行为见其 `lookup`）。
  */
 export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 

@@ -18,7 +18,7 @@ import {
 import type { TranscriptNode, TranscriptView } from "../lib/turn-scope.ts";
 // 官方 `ToolCallHead.args`（installed dsh-client-ui-conversation 的
 // client/contract/records.d.ts:270）是必选位，类型 `ToolArgs` = `PartialArguments`——一个带
-// private 字段的**类**，造不出字面量，只能走静态工厂（测试期依赖，生产面不引）。
+// private 字段的**类**，造不出字面量，只能走静态工厂（测试期依赖，生产代码不引）。
 import { PartialArguments } from "@deepseek-ai/dsh-util-values";
 
 /** 投影里「本回合带模型错误」的节点 kind：fixture 与断言共用同一个字形。 */
@@ -316,7 +316,7 @@ describe("轮内失败节点识别", () => {
     // 该类型是 `PreparingToolCall | StartedToolCall`，判别字段 `phase` 必选
     //（带 argsRaw 的这一支是 'start'）；`args` 的类型是官方 `PartialArguments` 这个类，
     // 所以走静态工厂而不是字面量。
-    // 官方件再改形状，这条夹具就会红——那正是它该做的：生产面是原样透传 legacy.runningCalls，
+    // 官方件再改形状，这条夹具就会红——那正是它该做的：生产代码是原样透传 legacy.runningCalls，
     // 不构造这些对象（透传处见 src/client-entry.ts）。
     const v3 = mkView({
       runningCalls: [
@@ -537,7 +537,7 @@ describe("轮表非升序遍历（Map 插入序 ≠ turnId 序）的择优分支
 
   it("failureOfLastTurn：turn-error 缺 message/code → 双双归 null", () => {
     // 官方 TurnErrorNode.message 是必选，宿主交不出这种节点；这份裸夹具刻意保住
-    // `?? null` 的防御分支（类型面漂移时它才可达），覆盖率门也要求这条分支有判据。
+    // `?? null` 的防御分支（类型声明漂移时它才可达），覆盖率门也要求这条分支有判据。
     const bare = asNode({ kind: TURN_ERROR_KIND, seq: 21, time: 0, turn: 1, step: 0 });
     const view = mkView({ nodes: [bare], turnEnds: new Map([[1, 20]]) });
     const failure = failureOfLastTurn(view);

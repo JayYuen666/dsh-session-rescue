@@ -7,9 +7,9 @@
 import type { LlmFailure } from "@deepseek-ai/dsh-llm";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
-/** harness `LlmFailure` 的本插件读面子集：字段名与类型逐位取自官方声明
+/** harness `LlmFailure` 的本插件读取接口子集：字段名与类型逐位取自官方声明
  *  （`message`/`code`/`status`/`providerRetryAfterMs`/`requestId`/`offloadImages`），
- *  官方改名即在此编译失败，不再靠注释手抄源码行号。
+ *  官方改名即在此编译失败，不再靠注释抄写源码行号。
  *  按 `Partial` 取「逐位可缺」是有意为之：宿主侧任何缺字段形状都必须能进来并被
  *  降级（事件载荷来自宿主，运行时仍走守卫读取，类型只是文档）；原声明
  *  `FailureLike = unknown` 逼出调用方一堆 `as { message?: unknown }` 断言。 */
@@ -138,7 +138,7 @@ function providerSaidWhen(retryAfterMs: number | undefined): boolean {
  *  （集成用例实测 `{ code:"QUOTA", status:429, message:"…insufficient quota" }`；
  *  出处 llm-deepseek/src/transport.ts:30 的 `isQuotaExceededError(detail) || status === 402`）。
  *  让 `status===429` 那条捷径先命中，等于给一个重试绝不可能变好的失败反复补发回合，
- *  还会往 lesson-loop 沉淀一条「退避重试」的错误教训。
+ *  还会往 lesson-loop 写入一条「退避重试」的错误教训。
  *
  *  但 QUOTA@429 **不是一种失败，是两种**，只能按证据分：
  *    - 窗口型限流：百度 token plan 那句 `Allocated quota exceeded, please increase your
@@ -264,13 +264,13 @@ function verdictOf(info: FailureInfo): Verdict {
  *  `status===429 || 文本` 上另立内联判据，于是 QUOTA@429 在**没有重试策略的 provider**
  *  上仍被当限速连发，最多 requestRetryMax 次——回合级判序修好了，请求级还坏着。
  *  范围收在限速族：5xx / TIMEOUT / TRANSPORT 这些「瞬时但不是限速」的形状仍交回官方
- *  llm-retry 的策略面，本包的固定阶梯不越界去接。 */
+ *  llm-retry 的重试策略，本包的固定阶梯不越界去接。 */
 export function isRequestRetryWorthy(failure: FailureLike): boolean {
   if (!isRecord(failure)) {
     return false;
   }
   const { code, status, text, retryAfterMs } = fieldsOf(failure);
-  // 「绝不重发」这一侧与 classifyFailure 同知识：永久码、认证类状态。其余按证据判，
+  // 判「绝不重发」的这条路要与 classifyFailure 用同一套知识：永久码、认证类状态。其余按证据判，
   // 且判序与 verdictOf 逐支对齐——两条链路读同一份载荷，答案不该按调用路径分叉。
   if (PERMANENT_CODES.has(code) || status === 401 || status === 403) {
     return false;
@@ -324,7 +324,7 @@ export function isRequestRetryWorthy(failure: FailureLike): boolean {
   // 无状态码的形（官方 pi-ai 适配器实测会**丢掉 status**，见 host.test.ts 那条钉法）
   // 只能靠措辞：限速措辞或配额窗口措辞都值得等一等。
   // 5xx / TIMEOUT / TRANSPORT 这些「瞬时但不是限速」的形状仍交回官方 llm-retry 的
-  // 策略面，本包的固定阶梯不越界去接。
+  // 重试策略，本包的固定阶梯不越界去接。
   return (
     RATE_LIMIT_TEXT.test(text) || QUOTA_WINDOW_TEXT.test(text) || providerSaidWhen(retryAfterMs)
   );
@@ -346,7 +346,7 @@ export function looksRateLimitish(failure: FailureLike): boolean {
   }
   const { text } = fieldsOf(failure);
   // 余额耗尽已被 classifyFailure 判永久且理由明确（不是「匹配器不认识的限流」）：
-  // 再报一条「疑似限流」只会把告警变成噪声，还往 lesson 总线写一条假教训。
+  // 再报一条「疑似限流」只会多出一条无用的告警，还往 lesson 总线写一条假教训。
   if (isBalanceExhausted(text)) {
     return false;
   }

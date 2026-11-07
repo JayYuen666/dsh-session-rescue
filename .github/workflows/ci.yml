@@ -14,7 +14,7 @@ on:
   # 但「上周没跑」不等于「上周全绿」，读结论时别把它当连续证据。
   schedule:
     - cron: "37 3 * * 1"
-# 同一分支上后到的提交取消前一个。发布用的是另一套口径（publish.yml 的
+# 同一分支上后到的提交取消前一个。发布用的是另一套规则（publish.yml 的
 # cancel-in-progress: false）——发布不能中途取消。
 # 组的键里带 event_name：周度漂移检测与 main 上的 push 都落在 refs/heads/main 上，
 # 只按 ref 分组会让后到的把先到的取消掉，而周度那一跑是「上游变了没有」的唯一信号，
@@ -23,14 +23,14 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
-# 门槛只需要读代码。写成白名单而不是省略：省略会拿到仓库默认权限，而默认可能是读写。
+# 门槛只需要读代码。写成允许名单而不是省略：省略会拿到仓库默认权限，而默认可能是读写。
 permissions:
   contents: read
 # pnpm 取具体补丁版本而不是主版本 12：`version: 12` 让每次运行拿上游最新的 12.x，补丁差在安装树的
 # 解法上是可观察的行为差异（本族各仓 cordis.patch.yml 就记着 pnpm 某个小版本的 add 缺陷）。取值与
-# 伞根 packageManager 同源，也是各仓 lockfile 当期由之生成的那一枚。口径：九仓 CI 都在 workflow 级
+# 伞根 packageManager 同源，也是各仓 lockfile 当期由之生成的那一枚。规则：九仓 CI 都在 workflow 级
 # env 里写这枚字面值；唯一例外是 dsh-lesson-loop，它的 package.json 自带 packageManager，由
-# pnpm/action-setup 自己读，再写 env 就成了两份真源。
+# pnpm/action-setup 自己读，再写 env 就成了两份唯一来源。
 env:
   PNPM_VERSION: 12.11.2
 jobs:
@@ -69,17 +69,41 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
       # registry-url 留空：本仓 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
-      # 配上 registry-url 会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成和开发者不一样。
+      # 配上 registry-url 会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析规则改成和开发者不一样。
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
+      # Windows runner 的默认 shell 是 pwsh：pwsh 把 pnpm 解析成 .ps1 垫片时，pnpm 步会
+      # 零输出、秒退 0 而结论 success。本仓的 pnpm 步显式走 bash；这一步在每一格先把
+      # 解析到的 pnpm 路径与版本打出来，作为「工具就位」的正向证据。
+      - name: pnpm 可用性
+        shell: bash
+        run: |
+          command -v pnpm
+          pnpm --version
       # --frozen-lockfile：lockfile 与 package.json 不一致时直接失败，而不是在 CI 里静默改一份
       # lockfile 后继续跑——那样绿的是「CI 现场解出来的那棵树」，不是仓库里这一份。
-      - run: pnpm install --frozen-lockfile
-      # check 里已串起 test:integration 与 test:property 两条腿，等于完整门禁；CI 不另起一遍，
-      # 否则两处清单会各自漂移，而红的时候分不清是哪一份口径在判。
-      - run: pnpm run check
+      - shell: bash
+        run: pnpm install --frozen-lockfile
+      # check 里已串起 test:integration 与 test:property 两条链路，等于完整门禁；CI 不另起一遍，
+      # 否则两处清单会各自漂移，而红的时候分不清是哪一份规则在判。
+      - shell: bash
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -o pipefail
+          pnpm run check 2>&1 | tee "$RUNNER_TEMP/gate.log"
+      # 假绿的形态是「格子 success 但什么都没跑」（pwsh + pnpm 的历史实测）。判据落在门禁
+      # 本该产出的行上：没有 vitest 的测试汇总行就是没真跑，这里把红补上。不带 if：
+      # 门禁真红时本步不执行，不盖住真正的失败原因。
+      - name: 断言门禁真跑出测试
+        shell: bash
+        run: |
+          if ! grep -q "Test Files" "$RUNNER_TEMP/gate.log"; then
+            echo "::error::门禁日志里没有 vitest 测试汇总行——判定步骤可能没有真跑"
+            exit 1
+          fi
       # 门禁不该改写仓库内容。判据落在**跟踪文件**上：产物（host.js / client.js / types/）都在
       # .gitignore 里，所以「零」意味着构建没有回头动过被跟踪的字节。每一格都跑，不只 ubuntu：
       # 行尾（CRLF/LF）恰恰最容易在 Windows 那一格被工具写回，而 `.gitattributes` 只约束检出、不约束
@@ -120,7 +144,7 @@ jobs:
           if-no-files-found: warn
       # 运行页顶部的摘要：把结果留在这一页，不必点进每一步的日志里找。
       # 它必须排在 job 的最后一步：job.status 在执行到那一步时才求值，后面若还有判定步骤，
-      # 后续步骤失败而摘要早已写成 success——那一行会成为唯一的结论面，且是错的。
+      # 后续步骤失败而摘要早已写成 success——那一行会成为唯一的结论，且是错的。
       - name: 运行摘要
         if: always()
         # 脚本体是 bash 写法（`{ …; } >> "$GITHUB_STEP_SUMMARY"`）；矩阵含 windows 格，
@@ -199,21 +223,21 @@ jobs:
           const NAME = "@jayyuen66/dsh-session-rescue";
           const mod = await import(NAME);
           // 入口形状两态都收：本仓用默认导出，而同级包里也有纯命名导出的。写死一种形态
-          // 会让另一种假红——判据是「apply 与 Config 能从入口拿到」，不是「挂在 default 上」。
+          // 会让另一种误报——判据是「apply 与 Config 能从入口拿到」，不是「挂在 default 上」。
           const plugin = mod.default ?? mod;
           if (typeof plugin?.apply !== "function") throw new Error("入口没有 cordis 插件形状：缺 apply");
           if (plugin.Config === undefined) throw new Error("入口缺 Config：设置卡不会挂载");
           const require = createRequire(import.meta.url);
           const pkgDir = path.dirname(require.resolve(NAME + "/package.json"));
           const manifest = require(NAME + "/package.json");
-          // exports 是消费方唯一能引用的面，所以判据取自装进来的这份 manifest 本身，
+          // exports 是消费方唯一能引用的内容，所以判据取自装进来的这份 manifest 本身，
           // 不在这里抄一份清单：抄来的清单与 exports 是两个真相，增删子路径时探针会
           // 静默落后，而它正是「产物装出去还能不能被解析」的唯一判据。
           //
           // 按**目标形态**分档，不按名字分档。`.js` 还要再分两档——本包的 `./client`
           // 是宿主按 bundle 载入的浏览器侧产物，顶层直接调 `window.__ModuleLoader__.load`，
           // 在 Node 里 import 它必抛 ReferenceError: window is not defined。把它当 ESM
-          // 模块 import 不是「更严格的检查」，是把一条正确产物判成红的假红。所以判据
+          // 模块 import 不是「更严格的检查」，是把一条正确产物判成红的误报。所以判据
           // 换成「它是合法的 ModuleLoader 外壳」：形态认得出来、id 是裸包名、文件非空。
           // 不认得形态的 `.js` 走真 import —— 那是唯一能证「解析得到」的方式。
           const esmSubs = [];
@@ -238,12 +262,12 @@ jobs:
             throw new Error("exports 里没有任何 .js 子路径，这一档探针等于没跑");
           }
           if (resourceSubs.length === 0) throw new Error("exports 里没有资源子路径，这一档探针等于没跑");
-          // 根入口由上面那次 import(NAME) 覆盖，但「拿到 apply」不等于「导出面非空」。
+          // 根入口由上面那次 import(NAME) 覆盖，但「拿到 apply」不等于「导出不为空」。
           if (Object.keys(mod).length === 0) throw new Error("根入口没有任何导出");
           for (const [key, target] of esmSubs) {
             const sub = await import(NAME + key.slice(1));
             // 命名空间对象永不为 null/undefined：子路径解析不到时直接抛 ERR_MODULE_NOT_FOUND /
-            // ERR_PACKAGE_PATH_NOT_EXPORTED，所以「拿到空值」那一档是死代码，恒绿。判导出面非空
+            // ERR_PACKAGE_PATH_NOT_EXPORTED，所以「拿到空值」那一档是死代码，永远通过。判导出名单非空
             // 才有信号，且失败信息点名是哪一条 exports 键。
             if (Object.keys(sub).length === 0) throw new Error(`${key} 解引用后没有任何导出（目标 ${target}）`);
           }
@@ -253,7 +277,7 @@ jobs:
             // 判语义而不是判另一个包的排版：裸包名必须以内联字符串形态出现在外壳里（那是宿主挂载
             // 这个 bundle 用的键，写成别名或不写都进不了层栈），且外壳确实是 factory 箭头函数的形态。
             // 原先两条把 id: "…" 的空格数与 (require) 的参数名钉死，而 client.js 在 .gitignore 里、
-            // CI 装的是 registry 上那份 shared 的 lib/build-client——它一改排版这里就假红，
+            // CI 装的是 registry 上那份 shared 的 lib/build-client——它一改排版这里就误报，
             // 「产物装出去能不能用」并没有变。
             const quoteClass = "[\"\\u0027\\u0060]";
             const escapedName = NAME.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -270,7 +294,7 @@ jobs:
             if (!existsSync(file)) throw new Error(`${key} 的目标没随包发出：${target}`);
             if (statSync(file).size === 0) throw new Error(`${key} 的目标是空文件：${target}`);
           }
-          // 类型面：exports["."].types 与 package.json 顶层的 types 都要在 tarball 里。
+          // 类型声明：exports["."].types 与 package.json 顶层的 types 都要在 tarball 里。
           // 这里只判存在性——`.d.ts` 不是可 import 的模块，真判类型解析得在消费方
           // 装一次 tsc，那是另一条更重的腿；本步要拦的是「files 漏了 types/」这一类。
           const typesTargets = [manifest.types, manifest.exports["."]?.types].filter(
@@ -337,7 +361,7 @@ jobs:
   # 来源证明是给「这次运行打出来的这份产物」出的第三方可验凭据，不是多一步验证：
   # 签在 PR 上，那张证明看起来属于本仓，指向的却是 PR 里 prepack 脚本产出的字节。
   # 它也不能靠在同一 job 里给某一步加 if 来做——id-token 与 attestations 是 job 级权限，
-  # 挂上去就等于 PR 也拿到了写入能力，权限面不会因为某一步被跳过而收窄。所以拆成独立 job。
+  # 挂上去就等于 PR 也拿到了写入能力，权限范围不会因为某一步被跳过而收窄。所以拆成独立 job。
   # 默认分支这一条挡的是 workflow_dispatch：手动触发可以在任意分支上跑，而在非默认分支上
   # 签出来的证明同样「看起来属于本仓」、指向的却是一个没人合并的分支的字节。push 只有
   # main 之外的分支被挡（on.push.branches 只列 main），所以合法的 push-to-main 不受影响。

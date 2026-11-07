@@ -30,7 +30,7 @@ import type { TranscriptNode, TranscriptView } from "./turn-scope.ts";
 /** 用户消息内容块：直接取官方 `ContentBlock` 判别联合（`ContentBlockMap` 的并集）。
  *  dsh-client-ui-conversation 的 records 也从 `@deepseek-ai/dsh-llm/types` 取同一个
  *  类型，两侧真值同源——本地再把 `type` 写成裸 `string` 就等于自造宿主不认的第二套
- *  块词汇，非 text 块在类型面上不再可辨。 */
+ *  块词汇，非 text 块在类型上不再可辨。 */
 export type { ContentBlock } from "@deepseek-ai/dsh-llm";
 
 /** 编辑重发目标：最后一条已完成轮的用户消息。

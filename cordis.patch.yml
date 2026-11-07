@@ -1,5 +1,5 @@
 # session-rescue：通用自动续跑 + 编辑重发/重试/排队撤回/停止重问/续写/设置卡。
-# 四条判据口径（都以真实会话事件流的形状为准，改任一条前先读一份会话日志核对）：
+# 四条判据规则（都以真实会话事件流的形状为准，改任一条前先读一份会话日志核对）：
 #   1) completed 成功回合重置续跑配额——counts 只增不清时，配合 maxResumes=3 等于每会话
 #      一生仅 3 次，长跑会话"用完即哑"直到重启；
 #   2) 冷却时间戳按 kind 独立——共享单个 lastFireAt 的话，resume 的 120s 冷却会跨类
@@ -11,7 +11,7 @@
 #      轮次驱动（source.kind=goal）时不注入，清单闭合后配额恢复。
 # request-error 的 429 重试带指数退避（2s/5s/10s/20s/30s，中止委托 next()）。
 # PI_AI_ERROR + "Provider returned an empty response"（OpenRouter 空响应原文，pi-ai 认不出
-#   措辞故兜底 PI_AI_ERROR）同样归为瞬时：按上面第 3) 条的口径，它落 unclassified 判永久时
+#   措辞，只能落到 PI_AI_ERROR 这一档兜底）同样归为瞬时：按上面第 3) 条的规则，它落 unclassified 判永久时
 #   实测同一形状连失 5 个回合且无日志（措辞不疑似限流）。
 #
 # 组合包层：本文件由 package.json 的 dsh.bundle.patch

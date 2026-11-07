@@ -1,6 +1,6 @@
-// 投影 ≡ 扫描的属性面：turn-facts 的全部价值就在「增量折叠的当前态」与「整串日志的同步
+// 投影 ≡ 扫描的属性测试：turn-facts 的全部价值就在「增量折叠（`rescueFactsProjection.apply`）的当前态」与「整串日志的同步
 // 扫描」逐项同解（单测 test/turn-facts.test.ts 钉的是作者手写的十几串日志）。这一层把
-// 输入面换成**随机事件流**：轮次号乱序/重复/缺字段、终态缺号、消息没有 source、source
+// 输入框状态换成**随机事件流**：轮次号乱序/重复/缺字段、终态缺号、消息没有 source、source
 // 是数字、todo 载荷不是数组、ask_user_question 缺 turn……崩溃恢复与宿主版本漂移给出的
 // 就是这类形状，而它们恰是「采信条件」该守住的地方。
 //
@@ -88,7 +88,7 @@ const toolDataArbitrary = fc.record(
 );
 const todoDataArbitrary = fc.record({ todos: todosPayloadArbitrary }, { requiredKeys: [] });
 
-/** 一条会话事件（只带本模块会读的字段；多余的噪声事件也要有，折叠的 default 分支才有人走）。 */
+/** 一条会话事件（只带本模块会读的字段；与本模块无关的事件也要有，折叠的 default 分支才有人走）。 */
 const eventArbitrary = fc.oneof(
   {
     weight: 3,
@@ -143,7 +143,7 @@ function maxTurnOf(events: readonly unknown[]): number {
   return max;
 }
 
-/** 查询面：0..上界 **并上** 折叠态里真实出现过的轮次号。生成器刻意产负数、1.5 与 NaN，
+/** 查询接口：0..上界 **并上** 折叠态里真实出现过的轮次号。生成器刻意产负数、1.5 与 NaN，
  *  它们会进 openers 与 latestTurnStart；只问 0..上界就永远查不到它们。 */
 function queryTurns(state: RescueFacts, maxTurn: number): number[] {
   const turns = new Set<number>();
@@ -159,7 +159,7 @@ function queryTurns(state: RescueFacts, maxTurn: number): number[] {
   return [...turns].toSorted((left, right) => left - right);
 }
 
-/** 事件行的轮次号按「安全整数才算有号」读：与实现的 numIn 同口径，NaN／小数／无穷都算缺号。 */
+/** 事件行的轮次号按「安全整数才算有号」读：与实现的 numIn 同一种做法，NaN／小数／无穷都算缺号。 */
 function turnOf(row: unknown): number | undefined {
   const turn = (row as { data?: { turn?: unknown } }).data?.turn;
   return typeof turn === "number" && Number.isSafeInteger(turn) ? turn : undefined;

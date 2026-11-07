@@ -1,9 +1,9 @@
-// test/turn-facts-fold.ts —— 投影注册表替身的折叠口：把一串事件按序折成「日志就这么长」的当前态。
+// test/turn-facts-fold.ts —— 投影注册表替身的折叠口（`foldEvents`）：把一串事件按序折成「日志就这么长」的当前态。
 //
 // 为什么在测试树里而不是 lib/turn-facts.ts：生产侧从不整串折——真注册表按
 // `rescueFactsProjection.init` + 增量 `apply` 物化，host 只读 `stateOf()`。整串折叠只被
-// 用例与 host 替身取用，是一条「只被测试养着」的导出面，所以它留在这里，且走
-// **同一个公开单元**：替身与生产共用一份 init/apply，不会再各自漂出第二套折叠口径。
+// 用例与 host 替身取用，是一条「只被测试养着」的导出名单，所以它留在这里，且走
+// **同一个公开单元**：替身与生产共用一份 init/apply，不会再各自漂出第二套折叠规则。
 //
 // 事件形参按 `unknown` 收（用例里的夹具只带本包读的字段，不是官方 SessionEvent 全形状）。
 
@@ -16,7 +16,7 @@ import type { RescueFacts } from "../lib/turn-facts.ts";
  * 两处 `as never` 都是「替身交不出官方名义类型」的老问题（见 host.ts 的 ProjectionsRegistry
  * 注释）：`init` 要 SessionHeader，`apply` 要 SessionEvent，而夹具只带本包读的那几位。
  * 但 `as never` 也让**签名漂移**不可见——`init` 改成收三个参数、`apply` 改名或换形状，
- * 这里照样编译通过，只在运行时折出不一样的状态。所以在绕过类型之前先做一次形状探针：
+ * 这里照样编译通过，只在运行时折出不一样的状态。所以在绕过类型之前先做一次形状探测：
  * 拿到的不是函数就立刻点名，而不是把「注册表接口变了」表现成「折叠结果不对」。
  * 绕过只发生在本文件：用例改用 `initFacts` / `applyOnce`，不再自己写 `as never`。
  */
@@ -28,7 +28,7 @@ function isFacts(value: unknown): boolean {
   );
 }
 
-/** 折叠口的形状探针：`init`/`apply` 只要有一个不再是函数就点名，不往下走。
+/** 折叠口的形状探测：`init`/`apply` 只要有一个不再是函数就点名，不往下走。
  *  返回整个单元而不是拆出的方法——宿主那侧的教训是拆方法会丢接收者。 */
 function requireUnit(): typeof rescueFactsProjection {
   if (

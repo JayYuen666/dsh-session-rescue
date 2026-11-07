@@ -14,7 +14,7 @@ node_modules/
 .env
 .env.*
 # 样板要能入库：`.env.*` 连 `.env.example` / `.env.sample` / `.env.template` 一起挡掉了，
-# 而新人给设置卡或 CI 配环境时正是要靠这一份样板——被静默跳过时 `git status` 不报任何东西。
+# 而新人给设置卡或 CI 配环境时正是要靠这一份样板——被不做声地跳过时 `git status` 不报任何东西。
 !.env.example
 !.env.sample
 !.env.template

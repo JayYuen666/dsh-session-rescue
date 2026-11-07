@@ -1,5 +1,5 @@
 /**
- * 等价用例（投影的验收面）：同一串会话事件分别喂
+ * 等价用例（投影的验收内容）：同一串会话事件分别喂
  *   - 旧读法：host.ts 迁移前的三处全量扫描（现搬进 lib/turn-facts.ts 的 scan* 与既有
  *     lib/turn-review.ts 的 reviewLastTurn），与
  *   - 新读法：投影折叠（test/turn-facts-fold.ts 的 foldEvents，折的是生产那份
@@ -186,7 +186,7 @@ describe("投影 ≡ 旧扫描（干净日志）", () => {
     assertEquivalent(evs, { trusted: true });
   });
 
-  it("未闭合口径只认 pending/in_progress：cancelled、拼错与空串不算（与同步扫描同解）", () => {
+  it("未闭合规则只认 pending/in_progress：cancelled、拼错与空串不算（与同步扫描同解）", () => {
     const evs = [
       turnStart(1),
       userMsg(USER),
@@ -237,7 +237,7 @@ describe("投影 ≡ 旧扫描（干净日志）", () => {
       turnEnd(3, "aborted"),
     ];
     // 「逐串同解」的可见判据：最后回合复盘 + 新轮判定 + opener 三项先当场对撞一次，
-    // 再由 assertEquivalent 跑完整的 turnNos 矩阵。
+    // 再由 assertEquivalent 跑完整的 turnNos 取值表。
     const state = foldEvents(evs);
     assert.deepEqual(reviewFromFacts(state), reviewLastTurn(evs), "reviewLastTurn 与投影同解");
     assert.equal(hasNewerTurn(state, 2), scanNewerTurn(evs, 2), "newer-turn(2) 与倒扫同解");
@@ -366,7 +366,7 @@ describe("投影 ≡ 旧扫描（异常日志：不可采信则交回扫描）",
 
   it("无关事件不改变状态引用（官方 Object.is 契约 = 零下游工作）", () => {
     const state = foldEvents([turnStart(1), userMsg(USER)]);
-    // 合法事件与畸形载荷都走 applyOnce：`as never` 只留在替身里，形状漂移由那里的探针点名。
+    // 合法事件与畸形载荷都走 applyOnce：`as never` 只留在替身里，形状漂移由那里的形状探测点名。
     for (const other of [ev("tool/result"), ev("agent/inbox/spliced"), { nope: 1 }, null, "x"]) {
       assert.equal(applyOnce(state, other), state);
     }
@@ -518,7 +518,7 @@ describe("投影单元与状态形状", () => {
   it("init 交回空态（忽略 header 与继承前缀）", () => {
     // 直接摊开这一份空态：它是投影的首值，断言的对象就是「首值长什么样」这条判据本身，
     // 拿同一个模块里的第二个函数当右值等于把判据折成 self-comparison。
-    // initFacts 只代管 `as never` 与形状探针，摊开的仍是单元自己的首值。
+    // initFacts 只代管 `as never` 与形状探测，摊开的仍是单元自己的首值。
     assert.deepEqual(initFacts(), {
       end: null,
       latestTurnStart: null,

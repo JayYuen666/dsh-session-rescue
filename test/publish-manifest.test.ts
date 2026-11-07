@@ -1,26 +1,26 @@
-// test/publish-manifest.test.ts —— 发布形态门禁：入口面必须**与发布器无关**地可解析。
+// test/publish-manifest.test.ts —— 发布形态门禁：入口必须**与发布器无关**地可解析。
 //
-// 为什么值得一条测试：构建与单测都在源码侧跑绿，而真实故障发生在装出去之后。两类坑都在
-// 那一侧。其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
+// 为什么值得一条测试：构建与单测都在源码里跑绿，而真实故障发生在装出去之后。两类坑都在那之后：
+// 其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
 // pnpm 发布时把它合并到顶层，npm 不合并（npm 会打印
 // "Unknown publishConfig config main/exports" 并忽略），同一个仓库换个发布器就发出一个
 // import 必失败的包。这里不模仿任何发布器的实现，而是把不变式钉成断言：**顶层入口自己就
 // 完整可解析，且 publishConfig 不再承载入口字段**，于是两套发布器语义的差恒为空。
 //
 // 第二组门禁扫注释：日期、评审条目号、决策来源簿记、退役叙事与本机绝对路径，写下时对作者
-// 有用，对读者只是困惑，且没有人能从中重建当时的上下文。只扫注释行与文档；测试夹具里的日期
-// （modifiedAfter 之类的边界值）是数据，不在禁面内。
+// 有用，对读者只是困惑，且没有人能从中重建当时的上下文。只扫注释行与文档；夹具里的日期
+// （modifiedAfter 之类的边界值）是数据，不在禁止名单内。
 //
 // 第三组门禁盯**声明产物**：`types/` 整目录进 `files`，于是它的四类静默故障都没有运行期信号
 // ——入口声明缺失、声明停在上一版源码上、声明里带着构建机的本机路径或 pnpm 的内容寻址目录、
 // 相对说明符还指着源码 `.ts`。这些全都只能在发布前拦。
 //
-// 第四组门禁管 registry 侧的元数据与宿主发现面：本包靠 `dsh` 段被宿主认出条目与客户端半，靠
+// 第四组门禁管 registry 侧的元数据与宿主发现机制：本包靠 `dsh` 段被宿主认出条目与客户端半，靠
 // `engines`/peer 被版本门校验，靠 keywords/homepage/bugs 被检索与反馈找回。这些字段拼错不会
 // 让任何用例变红，只会让包在 registry 上沉默地难找，或装上去才发现宿主不认识它。
 //
 // 第五组门禁把随包文档的版本声明绑到 manifest：CHANGELOG 顶部条目、两份 README 的宿主窗口
-// 与 dsh 徽章都从 `package.json` 现量。这三处各自手抄一份时，改 manifest 不动文档不会红，
+// 与 dsh 徽章都从 `package.json` 当场实测。这三处各自抄一份时，改 manifest 不动文档不会红，
 // 而发布出去的 tarball 会带着一套与安装门不一致的兼容性声明。
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
@@ -52,17 +52,17 @@ const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [
   /已退役/u,
 ];
 
-/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口面。 */
+/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口。 */
 const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry"]);
 
-/** 遍历时跳过的目录：依赖、产物、以及本门禁刻意不管的面。 */
+/** 遍历时跳过的目录：依赖、产物、以及本门禁刻刻意不管的目录。 */
 const SKIP_DIRS = new Set([
   "node_modules",
   "coverage",
   "_env",
   "dist",
   ".git",
-  // 测试夹具里的日期与轮次编号是数据，不是注释噪音。
+  // 夹具里的日期与轮次编号是数据，不是注释噪音。
   "test",
   "tests",
   "__tests__",
@@ -70,7 +70,7 @@ const SKIP_DIRS = new Set([
   "agents",
 ]);
 
-/** package.json 里与入口面有关的形状；其余字段本门禁不关心。 */
+/** package.json 里与入口有关的形状；其余字段本门禁不关心。 */
 interface Manifest {
   readonly main?: string;
   readonly types?: string;
@@ -208,25 +208,25 @@ function entryFiles(manifest: Manifest): readonly { label: string; file: string 
 /**
  * 发布器无条件附带的文件：不受 `files` 约束，也不该由门禁去断言它在 `files` 里。
  *
- * 这份清单是 `npm pack --dry-run` 实测出来的，不是照抄文档口径：`package.json`、`LICENSE` 与
+ * 这份清单是 `npm pack --dry-run` 实测出来的，不是照抄文档规则：`package.json`、`LICENSE` 与
  * 任何 `README*`（`README.zh-CN.md` 也算）无条件进 tarball，而 `CHANGELOG.md` **不在**其中——
  * 把它从 `files` 里删掉，tarball 里就真没有它。名字越像「标准文档」越容易以为它自然会被带上，
  * 于是漏写进 `files` 也没人发现：registry 页面看不出任何异常，只有真去找那份文件的人会撞到。
- * 下面的「包根每份 .md 都在发布面」把这一类一次性封住，不靠这份清单枚举得完整。
+ * 下面的「包根每份 .md 都在发布名单」把这一类一次性封住，不靠这份清单枚举得完整。
  */
-/** 两份语言 README 的文件名：发布面清单与文档同源门禁共用，避免同一字面量抄三遍。 */
+/** 两份语言 README 的文件名：发布名单清单与文档同源门禁共用，避免同一字面量抄三遍。 */
 const README_EN = "README.md";
 const README_ZH = "README.zh-CN.md";
 
 const ALWAYS_SHIPPED = ["package.json", README_EN, README_ZH, "LICENSE"];
 
-/** 声明入口：`types` 字段与 `exports["."].types` 都指向它，宿主侧的类型面由它落地。 */
+/** 声明入口：`types` 字段与 `exports["."].types` 都指向它，宿主的类型声明由它落地。 */
 const DECLARATION_ENTRY = "types/host.d.ts";
 
 /**
  * 仓库归属（`<owner>/<repo>`）：homepage、bugs、repository 三条 URL 都由它对照。
  *
- * 四处各写一遍是漂移的温床（换 owner 时最容易漏 bugs.url），所以这里留唯一真源。
+ * 四处各写一遍是漂移的温床（换 owner 时最容易漏 bugs.url），所以这里留唯一唯一来源。
  * npm 名不从这里派生：registry 的作用域一律小写（`@jayyuen66`），而 GitHub 的 owner 大小写
  * 混用（`JayYuen666`），把两者绑成同一个常量会让其中一边写成错的字面量。
  */
@@ -248,7 +248,7 @@ const SOURCE_SUFFIX = /(?<!\.d)\.tsx?$/u;
 async function readTypeDeclarations(): Promise<{ file: string; text: string }[]> {
   const produced = await listDeclarations(path.join(pkgDir, "types"), "");
   // 空集在这里就断掉：两条内容检查都是 `for` 循环遍历这份清单，清单为空时它们逐字节
-  // 表现为「通过」——实测过：把读取器改成返回空数组，20 条用例全绿，禁面词可以随便进声明。
+  // 表现为「通过」——实测过：把读取器改成返回空数组，20 条用例全绿，禁止名单词可以随便进声明。
   expect(produced.length, "types/ 没产出声明：两条声明内容检查会空转").toBeGreaterThan(0);
   return Promise.all(
     produced.map(async (file) => ({
@@ -325,7 +325,7 @@ function blockCommentRows(text: string): Set<number> {
  * 字面量里的数据（日期夹具、示例路径）误判成注释噪音。注释的三种写法都进门：行首注释、
  * 行尾注释，以及多行块注释里不带 `*` 前缀的正文行。
  *
- * @param file - 相对包根的文件名，用于决定判定口径
+ * @param file - 相对包根的文件名，用于决定判定规则
  * @param text - 文件全文
  * @returns 参与门禁的行
  */
@@ -341,7 +341,7 @@ function commentLines(file: string, text: string): string[] {
       picked.push(line);
     } else {
       // 行尾注释也要进门：只认行首注释时，`const x = 1; // 2026-01-01 修过` 这类写法
-      // 能带着禁面词绕过去。`://` 不是注释（URL），先替换占位再找行尾 `//`。
+      // 能带着禁止名单词绕过去。`://` 不是注释（URL），先替换占位再找行尾 `//`。
       const stripped = line.replaceAll("://", "∶∶");
       const at = stripped.indexOf("//");
       if (at !== -1) {
@@ -379,7 +379,7 @@ describe("发布形态", () => {
     }
   });
 
-  it("包根的每一份 .md 都在发布面里（npm 只自动附带 README* 与 LICENSE）", async () => {
+  it("包根的每一份 .md 都在发布名单里（npm 只自动附带 README* 与 LICENSE）", async () => {
     // 一次性封住这一类陷阱，而不是每加一份文档就补一条断言：文档名字越像「npm 自然会带上」，
     // 漏写进 `files` 就越安静——registry 页面看不出任何异常，只有真去找那份文件的人会发现它不在。
     const { shipped } = await readSurface();
@@ -407,14 +407,14 @@ describe("发布形态", () => {
     // 这批输入里至少有一个比声明新——build:types 没跑，或跑了但失败。不按导出名比：那要先
     // import 产物，于是这道门反过来依赖 build 已经跑过，而单跑 `vitest` 时产物可能不存在。
     // 声明入口在 .gitignore 里：fresh clone / 只跑 vitest 时它不存在，这条断言先红并
-    // 指到修复命令，而不是让 statSync 以裸 ENOENT 收场。
+    // 指到修复命令，而不是让 statSync 以不带路径信息的 ENOENT 收场。
     const declarationPath = path.join(pkgDir, DECLARATION_ENTRY);
     assert.ok(
       existsSync(declarationPath),
       `${DECLARATION_ENTRY} 不存在：请先运行 npm run build:types（新鲜度门读的是它的 mtime）`,
     );
     const declaredAt = statSync(declarationPath).mtimeMs;
-    // 输入面按 tsconfig 的口径递归收集（lib/**/*.ts），只枚举 lib 顶层时，lib 下
+    // 输入框状态按 tsconfig 的规则递归收集（lib/**/*.ts），只枚举 lib 顶层时，lib 下
     // 新增子目录的源文件改了不会让这道门红——静默失效。
     const sources = readdirSync(path.join(pkgDir, "lib"), { recursive: true, encoding: "utf8" })
       .map((name) => name.split(path.sep).join("/"))
@@ -504,8 +504,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // registry 上的 dist-tag 是实测出来的陷阱：`latest` 可能指向远早于宿主 ABI 的版本。
     // 精确钉是让「不带版本地装成远古版本」这件事不发生的最小条件；一旦放宽成 `^`/`~`，
     // 宿主某天发新 minor 就会自动跟上去，而插件与宿主 ABI 耦合，那等于让本包在没有测试的
-    // 情况下换掉编译用的宿主类型面。
-    // 只判 dev 这一侧：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
+    // 情况下换掉编译用的宿主类型声明。
+    // 只判 dev这一侧 段：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
     // 装什么版本由宿主决定，判据在下面那条。
     const { manifest } = await readSurface();
     // 过滤出违规项再一次性断言，而不是在循环里按条件 expect：失败时 diff 直接列出
@@ -520,8 +520,8 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   });
 
   it("devDependencies 里的 dsh-* 全部同版本（不许装出第二份宿主类型）", async () => {
-    // 宿主类型面被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
-    // nominal 类型（品牌串、投影状态）会开始互相不认，而那不报编译错、只报运行期
+    // 宿主类型被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
+    // nominal 类型（带类型品牌的串、投影状态）会开始互相不认，而那不报编译错、只报运行期
     // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。
     const { manifest } = await readSurface();
     const dshDev = Object.entries(manifest.devDependencies ?? {}).filter(([name]) =>
@@ -547,7 +547,7 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   });
 });
 
-describe("registry 与宿主发现面", () => {
+describe("registry 与宿主发现机制", () => {
   it("包名、可见性与许可三者齐备（scope 写错就是发不出去或发到错的位置）", async () => {
     const { manifest } = await readSurface();
     expect(manifest.name, "缺 name 或写错了作用域").toBe(PKG_NAME);
@@ -618,10 +618,10 @@ describe("registry 与宿主发现面", () => {
     expect(shipped.has(relative), `${patch} 不在发布面`).toBe(true);
   });
 
-  it("files 不打包源码面与测试面（发布的是产物，源码由仓库读）", async () => {
+  it("files 不打包源码范围与测试面（发布的是产物，源码由仓库读）", async () => {
     // 与「入口指产物」互补：那条管入口指向，这条管整目录别被顺手带上。判据按**展开后
     // 的实际文件**与源码后缀求交，而不是只匹配条目字符串——`src/**`、`./lib`、`src/*.ts`
-    // 这类等价写法在字符串匹配下能逃逸，展开口径与上面「入口覆盖」用的是同一套。
+    // 这类等价写法在字符串匹配下能逃逸，展开规则与上面「入口覆盖」用的是同一套。
     const { manifest } = await readSurface();
     const escaped: { entry: string; file: string }[] = [];
     for (const entry of manifest.files ?? []) {
@@ -676,7 +676,7 @@ describe("注释与文档没有内部指涉", () => {
   });
 });
 
-/** README 与 CHANGELOG 都随包发布；它们的版本声明必须从 manifest 现量，不能另抄一份。 */
+/** README 与 CHANGELOG 都随包发布；它们的版本声明必须从 manifest 当场读，不能另抄一份。 */
 const DOC_FILES = [README_EN, README_ZH] as const;
 const CHANGELOG_FILE = "CHANGELOG.md";
 

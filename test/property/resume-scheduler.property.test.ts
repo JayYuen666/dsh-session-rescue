@@ -51,7 +51,7 @@ interface TimerDisposerBox {
   calls: number;
 }
 
-/** 一次跑批里我持有的定时器记账。 */
+/** 一次跑批里我持有的定时器记录下来。 */
 interface Attachments {
   /** 会话 → 当前挂着且尚未释放的 disposer 调用次数盒。 */
   live: Map<string, TimerDisposerBox>;
@@ -89,7 +89,7 @@ interface Stats {
   evictions: number;
 }
 
-/** 跑批现场：调度器 + 模型 + 四类记账。 */
+/** 跑批现场：调度器 + 模型 + 四类记录下来。 */
 interface Run {
   scheduler: ResumeScheduler;
   model: Model;
@@ -483,7 +483,7 @@ function applyTick(run: Run, cmd: Extract<Cmd, { op: "tick" }>): void {
   run.model.now += cmd.ms;
 }
 
-/** 按 op 分派。表的键由 `Cmd["op"]` 映射出来，穷尽性交给类型面：漏一个 op 就编译不过——
+/** 按 op 分派。表的键由 `Cmd["op"]` 映射出来，穷尽性交给类型声明：漏一个 op 就编译不过——
  *  比 switch 补一个空 default 可靠（也让每条判序各自可读，不再挤进一个高复杂度函数）。 */
 type CmdHandler<Op extends Cmd["op"]> = (run: Run, cmd: Extract<Cmd, { op: Op }>) => void;
 
@@ -631,11 +631,11 @@ describe("调度器的状态机不变量（随机指令序列）", () => {
     assert.ok(reached.evictions > 0, "整批没发生过一次淘汰 ⇒ 淘汰判据只是空转");
     assert.ok(
       reached.capacitySkips > 0,
-      "整批没碰到过一次「新建时表已满且全忙」 ⇒ 硬上限判据只是空转",
+      "整批没碰到过一次「新建时表已满且全忙」 ⇒ 硬上限判据没有得到实际验证",
     );
   });
 
-  it("disposeAll 释放仍在挂的定时器（随机面不把定时器留到收尾，这一支定向钉住）", () => {
+  it("disposeAll 释放仍在挂的定时器（随机形态不把定时器留到收尾，这一支定向钉住）", () => {
     const scheduler = new ResumeScheduler({ now: () => 0 });
     scheduler.onFailure({
       sessionId: "s1",

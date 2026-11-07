@@ -50,7 +50,7 @@ export const PLACEHOLDER = "⟨slot⟩";
 
 /** 骨架 → 整条日志的匹配式。转义字面量、把占位符换回通配，两端锚死。
  *  带 `s` 旗标：`.*` 要跨得过换行——日志正文自带的换行不该把一条本来合法的日志判成
- *  未认领；这与调用方是否先做空白折叠解耦（折叠只是归一化，不是本匹配的前提）。 */
+ *  未认领；这与调用方是否先把连续空白归一成一个空格无关（归一化不是本匹配的前提）。 */
 function skeletonPattern(skeleton: string): RegExp {
   const parts = skeleton
     .split(PLACEHOLDER)

@@ -1,6 +1,6 @@
-// host.ts 契约补充：现有 host.test.ts 之外的缺口面（服务缺失降级、路由
+// host.ts契约补充：现有 host.test.ts 之外的缺口（服务缺失降级、路由
 // 方法守卫/body 上限、用户中止不消耗配额、等待中 abort、重连恢复各分支、
-// 总线沉淀容错、请求级重试计数耗尽重置、瞬时失败→成功兑 pass 的「已遵守」观测）。
+// 总线写入容错、请求级重试计数耗尽重置、瞬时失败→成功兑 pass 的「已遵守」观测）。
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -9,7 +9,7 @@ import { applyRescue, configDict, volatileFormOf } from "./config-refs.ts";
 import { loggedText } from "./setup-logs.ts";
 import type { SchemaNode } from "./config-refs.ts";
 
-// 宿主事件名、回合终态 kind 与总线沉淀分类：替身造事件流与断言期望值都取这几条。
+// 宿主事件名、回合终态 kind 与总线写入分类：替身造事件流与断言期望值都取这几条。
 // 这些都是测试作者自持的**期望值**（不从 host.ts 导入，否则断言就是拿被测常量比自己）。
 const TURN_START_EVENT = "turn/start";
 const USER_MESSAGE_EVENT = "user/message";
@@ -25,7 +25,7 @@ const PASS_DISPOSE_SESSION_ID = "pass-dispose";
 const CARRIER_DOWN_MESSAGE = "carrier down";
 /** llm-pi-ai 那条 describe 里已声明的 provider（retry-policy 白名单的唯一合法值）。 */
 const KNOWN_PROVIDER = "sensenova";
-/** 真适配器交回的限流载荷形状（集成层实测的字段面），多处用例共用。 */
+/** 真适配器交回的限流载荷形状（集成层实测的字段），多处用例共用。 */
 const RATE_LIMIT_MESSAGE = "rate limit exceeded";
 
 interface TimerEntry {
@@ -39,7 +39,7 @@ interface MockAgent {
   id: string;
   options?: { provider?: string } | null;
   status?: string;
-  /** 模型服务面：`current()` 抛错时用来钉定时器回调的异常收口。 */
+  /** 模型宿主服务：`current()` 抛错时用来钉定时器回调的异常统一处理。 */
   model?: { current: () => { provider?: string } | undefined } | null | undefined;
   inbox?: { nextTurn?: unknown[]; nextStep?: unknown[] };
   session: {
@@ -64,7 +64,7 @@ interface LessonPass {
 interface MockInjectCtx {
   effect: (factory: () => (() => void) | undefined) => void;
   get: (name: string) => unknown;
-  /** cordis 的注入子上下文同样带着被注入服务的读面（settings.configure 走这条路）。 */
+  /** cordis 的注入子上下文同样带着被注入服务的读取接口（settings.configure 走这条路）。 */
   settings: MockCtx["settings"];
   /** 真 cordis 把被注入的服务也挂在子 ctx 的属性上，插件读的就是
    *  `child.sessionProjections` 与注册口，替身必须照样交出去。 */
@@ -81,7 +81,7 @@ interface MockCtx {
   scope: { get: () => Record<string, unknown>; set: (patch: Record<string, unknown>) => void };
   /** 本插件 fiber：settings.configure 的 owner 必须是它。 */
   fiber: { id: string };
-  /** 页面策略登记记录（{ auto:false } + owner 的断言面）。 */
+  /** 页面策略登记记录（{ auto:false } + owner 的断言内容）。 */
   configureCalls: { presentation: { auto?: boolean }; owner: unknown }[];
   agents?: {
     rootsList: MockAgent[];
@@ -91,19 +91,19 @@ interface MockCtx {
   };
   lessonLoop?: {
     /** 返回值按 unknown 收：lesson-loop 落库已异步（report 返回 Promise），声明成
-     *  `=> void` 会让"调用方丢弃 Promise"通过类型检查——正是这次静默失败的根因。 */
+     *  `=> void` 会让"调用方丢弃 Promise"通过类型检查——正是这次静默失败的真正的原因。 */
     report: (input: LessonReport["input"]) => unknown;
     pass: (input: LessonPass["input"]) => unknown;
   };
   lessonReports: LessonReport["input"][];
-  /** 总线 pass 调用记录（「已遵守」观测的断言面）。 */
+  /** 总线 pass 调用记录（「已遵守」观测的断言内容）。 */
   lessonPasses: LessonPass["input"][];
   piAiDescribeImpl?: () => unknown;
   /** `llm-pi-ai` 行的 revision；undefined = 该行没带出 revision 字段（CAS 无从取值）。 */
   piAiRevision?: number;
   /** 让 mutate 抛 SettingsConflictError，模拟读到 revision 之后别处又改了同一段。 */
   mutateConflict?: boolean;
-  /** 0.1.7 的 settings 服务面：`register`/`get`/`installSection` 已被宿主移除
+  /** 0.1.7 的 settings 宿主服务：`register`/`get`/`installSection` 已被宿主移除
    *  （命名空间改按 profile 条目 id 隐式注册），只剩 describe / mutate / configure。 */
   settings: {
     describe: () => unknown;
@@ -173,7 +173,7 @@ function createCtx(
   const mutations: { ns: string; ops: unknown[]; expectedRevision: number | undefined }[] = [];
   const settings = {
     // 0.1.7 唯一的跨命名空间读：locale 偏好与 llm-pi-ai 都从这张 describe 表单里挑。
-    // opts.locale 未设 = 官方 client-locale 那条目没被投影 → 该行不存在 → 中文默认。
+    // opts.locale 未设 = 官方 client-locale 那个条目没被投影 → 该行不存在 → 中文默认。
     describe(): unknown {
       if (opts.describeThrows === true) {
         throw new Error("settings describe down");
@@ -518,8 +518,8 @@ function suspendAgent(ctx: MockCtx, agent: MockAgent): void {
   latest.fn();
 }
 
-/** 脏 Retry-After 探针：每个值独立 ctx/agent——请求级计数按会话累加，共用一个会话时
- *  第二枚探针读到的计数取决于微任务顺序，「都落第一档」就只是时序侥幸而不是判据。
+/** 脏 Retry-After 探测用例：每个值独立 ctx/agent——请求级计数按会话累加，共用一个会话时
+ *  第二枚探测用例读到的计数取决于微任务顺序，「都落第一档」就只是时序侥幸而不是判据。
  *  返回武装的延迟，断言留在用例体内。 */
 async function probeDirtyRetryAfter(value: number): Promise<number | undefined> {
   const probeCtx = createCtx();
@@ -648,7 +648,7 @@ describe("用户中止/打断的回合不消耗配额，判定只在 agent/statu
   //   `session.append('turn/end', …)`；且 signal.aborted 分支直接 rethrow、
   //   **根本不** emit agent/error。所以"在 error 处扫该轮 turn/end 是否 aborted"
   //   永远扫不到——那是死代码，已删（原 turnEndedAborted）。
-  it("agent/error 时该轮 turn/end 尚未落盘：即便日志里有 aborted 记录也不再 veto（回归护栏）", () => {
+  it("agent/error 时该轮 turn/end 尚未写到磁盘：即便日志里有 aborted 记录也不再 veto（回归护栏）", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const agent = makeAgent("s1", "x", [
@@ -772,7 +772,7 @@ describe("goal 停机后接管", () => {
   });
 
   it("goals 服务在位但没有 `get` 那一位 ⇒ 同样按读不到处理", () => {
-    // 名字撞上别人的服务、或宿主换了面：`ctx.get("goals")` 交回的不是本包认的那个形状。
+    // 名字撞上别人的服务、或宿主换了类型：`ctx.get("goals")` 交回的不是本包认的那个形状。
     // 走能力探测而不是直接调用，缺位时与「服务不在位」同一理由，不去赌 TypeError 被 catch 兜住。
     const ctx = createCtx();
     ctx.setService("goals", {});
@@ -976,7 +976,7 @@ describe("请求级 429 重试边界", () => {
 });
 
 describe("观察性兜底：疑似限流被判永久", () => {
-  it("permanent + looksRateLimitish → console.error + 总线沉淀 unclassified-failure", () => {
+  it("permanent + looksRateLimitish → console.error + 总线写入 unclassified-failure", () => {
     const ctx = createCtx({ lessonLoop: true });
     applyPlugin(ctx);
     const agent = makeAgent("s1", "x");
@@ -1030,7 +1030,7 @@ describe("链式配置边界", () => {
   });
 });
 
-describe("remote 写面的业务结果", () => {
+describe("remote 写入的业务结果", () => {
   let ctx: MockCtx;
   beforeEach(() => {
     ctx = createCtx();
@@ -1110,7 +1110,7 @@ describe("remote 写面的业务结果", () => {
   });
 });
 
-describe("state 读面：禁用会话补记录与挂起并入", () => {
+describe("state 读取接口：禁用会话补记录与挂起并入", () => {
   it("toggle 关闭的无记录会话在 state 中显示 disabled", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
@@ -1166,7 +1166,7 @@ describe("resumeAfterReconnect 分支", () => {
 
   it("脏 kind 的挂起快照不带走整批补发", () => {
     // 跨版本快照的 kind 可能是空串（PendingRecord 那一位如实承认）。恢复这一批时若不先
-    // 归一，textForKind 会在循环里抛错——第一条之后的所有会话都不再补发，而挂起记账留在
+    // 归一，textForKind 会在循环里抛错——第一条之后的所有会话都不再补发，而挂起记录下来留在
     // 调度器里不可淘汰。回落被删掉时这条红在第一句断言上，不是红在某句文案上。
     const ctx = createCtx();
     applyPlugin(ctx);
@@ -1299,9 +1299,9 @@ describe("请求级退避正确性", () => {
   });
 });
 
-// ── 事件流 / inbox 坏形状（守卫投影面）、provider 降级、恢复竞态 ──────────
+// ── 事件流 / inbox 坏形状（守卫投影）、provider 降级、恢复竞态 ──────────
 
-/** 捕获 console.info/error/warn（宿主侧可观测性判定的断言面）。 */
+/** 捕获 console.info/error/warn（宿主侧可观测性判定的断言依据）。 */
 function captureConsole(): {
   infos: string[];
   errors: string[];
@@ -1342,7 +1342,7 @@ function withSession(agent: MockAgent, session: Record<string, unknown>): MockAg
 }
 
 /**
- * 未处理拒绝探针：装一枚 process 级监听，把漏网的 rejection 收进数组。
+ * 未处理拒绝探测用例：装一枚 process 级监听，把漏网的 rejection 收进数组。
  * `stop` 必须进 finally——vitest 的 worker 进程被所有用例共用，残留监听会把
  * 别人的 rejection 也算到本用例头上。
  */
@@ -1367,7 +1367,7 @@ function latestTimer(ctx: MockCtx): TimerEntry {
   return entry;
 }
 
-/** 触发最新一枚定时器（fire 时刻的模拟入口）；与 tick 同一套记账：置 fired 再触发，
+/** 触发最新一枚定时器（fire 时刻的模拟入口）；与 tick 同一套记录下来：置 fired 再触发，
  *  否则先 fireLatest 再 tick 会把同一枚待办再执行一次。 */
 function fireLatest(ctx: MockCtx): void {
   const entry = latestTimer(ctx);
@@ -1448,7 +1448,7 @@ describe("事件流与 inbox 的坏形状（逐项守卫，不抛错也不误发
     assert.equal(agent.followupCalls.length, 1, "坏 turn 编号不会被误判成 newer-turn");
   });
 
-  it("inbox 三侧：整个面缺席 / 只有 nextStep / nextTurn 为空数组", () => {
+  it("inbox 三侧：整块类型缺席 / 只有 nextStep / nextTurn 为空数组", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const noInbox = register(ctx, makeAgent("i-none", "x"));
@@ -1526,7 +1526,7 @@ describe("provider 缺席 / 载荷缺字段时的降级（绝不打 undefined）
     assert.equal(report?.["detail"], "status=503 upstream unavailable");
   });
 
-  it("agent/error 载荷缺 turn → 按回合 0 沉淀与调度，state 也报 0 号回合", async () => {
+  it("agent/error 载荷缺 turn → 按回合 0 写入与调度，state 也报 0 号回合", async () => {
     const ctx = createCtx({ lessonLoop: true });
     applyPlugin(ctx);
     const agent = register(ctx, makeAgent("noturn", "x"));
@@ -1542,7 +1542,7 @@ describe("provider 缺席 / 载荷缺字段时的降级（绝不打 undefined）
     assert.equal(pending?.turn, 0);
   });
 
-  it("max-tokens 沉淀：无 provider → unknown，且不带 evidence 键（可选展开两侧）", () => {
+  it("max-tokens 写入：无 provider → unknown，且不带 evidence 键（可选展开两侧）", () => {
     const ctx = createCtx({ lessonLoop: true });
     applyPlugin(ctx);
     const agent = register(
@@ -1629,7 +1629,7 @@ describe("fire 时刻的服务下线与恢复竞态", () => {
     assert.equal(agent.followupCalls.length, 0, "服务读不到时宁可不发");
   });
 
-  it("disposeAll 之后定时器仍被唤醒：无待办可挂 → 明确报错，不静默也不假装挂起", async () => {
+  it("disposeAll 之后定时器仍被唤醒：无待办可挂 → 明确报错，不会静默也不假装挂起", async () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const agent = register(ctx, makeAgent("late-fire", "x"));
@@ -1904,14 +1904,14 @@ function failingAgent(ctx: MockCtx, id: string, provider: string, cwd = "/work/a
   return agent;
 }
 
-/** state 读面里某会话的 resume 计数（无记录 → -1）。 */
+/** state 读取接口里某会话的 resume 计数（无记录 → -1）。 */
 function resumeCount(ctx: MockCtx, sessionId: string): number {
   const st = remoteOf(ctx).state();
   const session = st.sessions[sessionId] as { counts?: { resume?: number } } | undefined;
   return session?.counts?.resume ?? -1;
 }
 
-/** 总线降级面的共同判据：续跑真 fire 过一次（计数 1）之后，completed 回合必须照常
+/** 总线降级的共同判据：续跑真 fire 过一次（计数 1）之后，completed 回合必须照常
  *  把配额重置回 0——lesson-loop 出任何问题都不许动这条主流程。 */
 async function assertQuotaResetOnSuccess(ctx: MockCtx, agent: MockAgent): Promise<void> {
   fireLatest(ctx);
@@ -2269,7 +2269,7 @@ describe("宿主交回形状的真实性", () => {
     // 形状出处：agent-loop 在「步骤失败且待写工具结果也落不了盘」时抛
     // `new AggregateError([error, other], …, { cause: error })`
     // （packages/core/agent-loop/src/agent.ts:353 与 :496）——`.failure` 只在原失败上。
-    // 只读 `error.failure` 的话，一次货真价实的 429 会被当成「没有失败面可分类」
+    // 只读 `error.failure` 的话，一次货真价实的 429 会被当成「没有失败可分类」
     // 而一律判永久 → 该续跑的回合永不续跑。
     const ctx = createCtx();
     applyPlugin(ctx);
@@ -2296,7 +2296,7 @@ describe("宿主交回形状的真实性", () => {
 
   it("cause 的原失败优先于 errors 里的附带错误", () => {
     // 官方两处包壳都把原失败同时放进 errors[0] 与 cause，而 errors 里还躺着第二条
-    // （落盘/结算失败）。先扫 errors 就有把附带错误当分类依据的风险。
+    // （写到磁盘/结算失败）。先扫 errors 就有把附带错误当分类依据的风险。
     const ctx = createCtx();
     applyPlugin(ctx);
     const agent = register(ctx, makeAgent("agg-order", KNOWN_PROVIDER));
@@ -2314,7 +2314,7 @@ describe("宿主交回形状的真实性", () => {
     assert.equal(ctx.timers.length, 1, "按 cause 的 RATE_LIMIT 判瞬时，而不是按 errors[0] 判永久");
   });
 
-  it("cause 不带失败面时仍从 errors 里取（漂移兜底），且普通 Error 一律不注入", () => {
+  it("cause 不带失败时仍从 errors 里取（漂移兜底），且普通 Error 一律不注入", () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const withErrors = register(ctx, makeAgent("agg-errors", KNOWN_PROVIDER));
@@ -2390,7 +2390,7 @@ describe("宿主交回形状的真实性", () => {
   });
 
   it("同一轮的 status→idle 重复到达 ⇒ 只处理一次；换了轮才再处理", () => {
-    // 真宿主在 `turn/start` 或 `turn/end` 落盘失败的支线上照样会发一次 status→idle,
+    // 真宿主在 `turn/start` 或 `turn/end` 写到磁盘失败的支线上照样会发一次 status→idle,
     // 而读侧只能取「日志里最后一条 turn/end」。不挡就会拿上一轮的旧终态再走一遍：
     // `onSuccess` 把配额复位成「那一轮真跑成功了」，截断还会为同一轮再排一次续写。
     const ctx = createCtx();
@@ -2462,7 +2462,7 @@ describe("宿主交回形状的真实性", () => {
   });
 
   it("投影形状被拒：点名判错原因、每会话只报一次，判定仍按回退扫描给出", async () => {
-    // 「key 未落地」与「读口在位但形状不合 schema」以前折叠成同一个 undefined，
+    // 「key 未落地」与「读口在位但形状不合 schema」以前都只交回同一个 undefined，
     // 三类判定长期停在 O(n) 回退扫描却没有任何信号说明是谁造成的。
     const ctx = createCtx();
     let releases = 0;
@@ -2592,7 +2592,7 @@ describe("宿主交回形状的真实性", () => {
     assert.notEqual(sessions["cap-200"], undefined, "最新的一位必须记着");
   });
 
-  it("台账满且每一位都还是活会话 ⇒ 409 拒收，绝不静默解掉别人的开关", () => {
+  it("台账满且每一位都还是活会话 ⇒ 409 拒收，绝不会静默解掉别人的开关", () => {
     // 无脑淘汰最旧一位的代价是：那位用户仍关着的活会话位消失，state 里读不到它、
     // 卡片回弹成「开」，下一次瞬时失败就自动续跑了用户明确关掉的那条会话。
     const ctx = createCtx();
@@ -2613,7 +2613,7 @@ describe("宿主交回形状的真实性", () => {
 
   it("providerRetryAfterMs 是 NaN 或负数时回落到固定阶梯，不跳过等待", async () => {
     // 官方在构造期就丢掉 <=0 / 非有限的这个字段（llm/src/adapter-failure.ts:76-78），
-    // 所以这两枚都是漂移兜底面：NaN 连 `> cap` 比较都过不掉（NaN 与任何数比都是
+    // 所以这两枚都是漂移兜底：NaN 连 `> cap` 比较都过不掉（NaN 与任何数比都是
     // false），既不配当延迟也不配当「等不起」的信号，只能走阶梯。
     const [nanDelay, negativeDelay] = await Promise.all([
       probeDirtyRetryAfter(Number.NaN),

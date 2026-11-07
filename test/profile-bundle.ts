@@ -1,4 +1,4 @@
-// test/profile-bundle.ts —— 卡片槽位 key 的漂移针（多包共用，复制式分发，同 client-freshness.ts）。
+// test/profile-bundle.ts —— 卡片槽位 key 的产物漂移检查（多包共用，复制式分发，同 client-freshness.ts）。
 //
 // 背景（这一条就是排查时查出来的真缺陷）：`plugins.bundle.config` 是**按 bundle 包名**
 // keyed 的槽位，宿主派发时拿注册项的 key 与该 bundle 的包名做精确相等匹配：
@@ -15,12 +15,12 @@
 // key 写成 loader 的裸条目 id（cordis.patch.yml 的 `- id:`）时，宿主拿包名找不到这个
 // 键，`configured` 也是 false → 插件页上永不出卡（本文件存在的理由）。
 //
-// 两个标识**各管各的**，本模块把两侧真源都读出来，防止「一改全改」把另一边带坏：
-//   - 槽位 key = bundle 包名，真源是本包自己的 package.json（宿主派发 entryKey 用的就是
+// 两个标识**各管各的**，本模块把两侧唯一来源都读出来，防止「一改全改」把另一边带坏：
+//   - 槽位 key = bundle 包名，唯一来源是本包自己的 package.json（宿主派发 entryKey 用的就是
 //     被装 bundle 的包名，与装法无关）；profile 只在这台开发机上存在，装了才顺手钉一道
-//     「清单里确有这一条」的机器侧漂移针；
+//     「清单里确有这一条」的机器侧产物漂移检查；
 //   - configForms.get(entryId) 的入参（= 隐式 settings 命名空间）= 裸条目 id，
-//     真源本包 cordis.patch.yml（installed dsh-client-ui-settings/lib/client.js:1294-1298
+//     唯一来源本包 cordis.patch.yml（installed dsh-client-ui-settings/lib/client.js:1294-1298
 //     把 entryId 原样当命名空间用）。
 // 所以这里**不写任何包名/条目 id 字面量**：测试里抄一份常量，正是本缺陷当初漏网的原因。
 
@@ -32,7 +32,7 @@ import path from "node:path";
 /** 本包根目录：helper 与 client-freshness.ts 同放 test/，据此定位包内文件。 */
 const PKG_DIR = path.resolve(import.meta.dirname, "..");
 
-/** unknown → Record 的窄化判据。刻意手抄：test/ 不引运行时依赖，真源见
+/** unknown → Record 的窄化判据。刻意自己抄：test/ 不引运行时依赖，唯一来源见
  *  shared/lib/record.ts（本包 client 半不抄第二份，别再往这里加判据）。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -47,7 +47,7 @@ function assertRecord(value: unknown, message: string): Record<string, unknown> 
   return value;
 }
 
-/** 读一份 JSON 文件并投影为 Record（形状不对即抛，不静默兜成空对象）。 */
+/** 读一份 JSON 文件并投影为 Record（形状不对即抛，不会静默兜成空对象）。 */
 function readJson(file: string): Record<string, unknown> {
   assert.ok(existsSync(file), `读不到 ${file}`);
   const text = readFileSync(file, "utf8");
@@ -64,7 +64,7 @@ function profileManifestPath(): string {
     : override;
 }
 
-/** 本包的包名（`package.json.name`）；清单与注册 key 两处都用它当唯一真源。 */
+/** 本包的包名（`package.json.name`）；清单与注册 key 两处都用它当唯一唯一来源。 */
 function ownPackageName(): string {
   const own = readJson(path.join(PKG_DIR, "package.json"))["name"];
   assert.equal(typeof own, "string", "本包 package.json 没有 name");
@@ -92,10 +92,10 @@ function profileBundleListOrNull(): string[] | null {
   assert.deepEqual(
     nonStrings,
     [],
-    `${file} 的 dsh.profile.bundles 含非字符串项（清单损坏，不静默丢弃）：${JSON.stringify(nonStrings).slice(0, 200)}`,
+    `${file} 的 dsh.profile.bundles 含非字符串项（清单损坏，不会静默丢弃）：${JSON.stringify(nonStrings).slice(0, 200)}`,
   );
   const bundles = items as string[];
-  // 同名 profile 未必属于本工作面：`--from-default-profile web` 也会造一个只装官方基座的
+  // 同名 profile 未必属于本工作区：`--from-default-profile web` 也会造一个只装官方自带插件的
   // web profile。清单里一个本族包都没有时按「没装 profile」处理——机器侧针只钉在真装着
   // 本族插件的 profile 上，把陌生 profile 报成「本包不在清单」是把环境当成了漂移。
   // 作用域从本包 package.json 的 name 推：写死 `@jayyuen66/` 会在改名/换 scope 后静默失效。
@@ -115,7 +115,7 @@ function profileBundleListOrNull(): string[] | null {
  * 本包在 profile 里那条 bundle 的包名 —— `plugins.bundle.config` 的 key 必须是它。
  * 取的是本包自己的 `package.json.name`：宿主派发的 `entryKey` 就是**被装的那个 bundle**
  * 的包名，所以对任何装法（registry / link / 本机 profile）它都是那个值。
- * profile 只存在在这台开发机上，装了才加一道机器侧针（清单里确有这一条）。
+ * profile 只存在在这台开发机上，装了才加一道机器侧检查（清单里确有这一条）。
  */
 export function profileBundleName(): string {
   const name = ownPackageName();
@@ -154,7 +154,7 @@ function stripYamlTrailingComment(raw: string): string {
  * `configForms.get(entryId)` 的入参都取它，与 bundle 包名是两回事。
  * 收集**全部**裸 `- id:` 行并断言唯一：只取第一条的话，清单里多出第二条（或条目嵌进
  * 别的键下）时会把无关条目当成命名空间，「隐式命名空间」这条证据失真却不报错。
- * 引号与行尾注释都剥掉：`- id: "foo"  # 说明` 与 `- id: foo` 是同一条目。
+ * 引号与行尾注释都在这里去掉：`- id: "foo"  # 说明` 与 `- id: foo` 是同一条目。
  */
 function patchEntryId(): string {
   const yml = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
@@ -181,7 +181,7 @@ function patchEntryId(): string {
   return ownIds[0] ?? "";
 }
 
-/** 产物里 `const <name> = "<字面量>"` 的值；取不到即抛（漂移针不许静默放过）。
+/** 产物里 `const <name> = "<字面量>"` 的值；取不到即抛（产物漂移检查不许静默放过）。
  *  标识符先进正则转义再拼模式（产物常量名可能带 `$`，不转义就成了行尾锚点），
  *  并给 `const` 加词边界：注释或字符串里出现的同名片段不许命中。 */
 function constLiteral(text: string, name: string): string {
@@ -299,7 +299,7 @@ function topLevelSlotKey(span: string): { literal: string; ident: string } {
 }
 
 /** 取产物里 `plugins.bundle.config` 那次 register 的 key（字面量或常量标识符都解析）。
- *  搜索范围限定在本次 register 的对象字面量内：产物里别处也有裸 `key:`（槽位键、
+ *  搜索范围限定在本次 register 的对象字面量内：产物里别处也有 `key:` 这个键名（槽位键、
  *  React list key），全局抓会拿错；名字相同的注册必须唯一，否则定位本身就不成立。 */
 function registeredSlotKey(text: string): string {
   const marker = text.indexOf('name: "plugins.bundle.config"');
@@ -360,12 +360,12 @@ function configFormsEntryId(text: string): string {
 }
 
 /**
- * 漂移针的三份证据，全部从真源读出来（本模块**不写任何包名/条目 id 字面量**：
+ * 产物漂移检查的三份证据，全部从唯一来源读出来（本模块**不写任何包名/条目 id 字面量**：
  * 测试里抄一份常量，正是本缺陷当初漏网的原因）。判据断言在
- * test/build-client.test.ts 的「漂移针」用例里。
+ * test/build-client.test.ts 的「产物漂移检查」用例里。
  *   1. `plugins.bundle.config` 的 key === profile `dsh.profile.bundles` 中本包那条包名；
  *   2. `configForms.get()` 的入参 === cordis.patch.yml 的裸条目 id
- *      （**没有**被顺手一起改成包名 —— 那会把 client 半的写入面再次弄坏）；
+ *      （**没有**被顺手一起改成包名 —— 那会把 client 半的写入路径再次弄坏）；
  *   3. 两个标识不同值（相等就说明本包恰好条目 id == 包名，那这一层的混用钉不住，直接红）。
  */
 export interface SlotKeyEvidence {

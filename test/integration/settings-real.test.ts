@@ -1,5 +1,5 @@
 // 集成测试：**真 settings 装配**下的本插件设置契约。test/integration/loader-boot.test.ts
-// 的 settings 是记账桩——桩的 describe() 永远返回 []，宿主设置投影的形状漂移它接不住。
+// 的 settings 是记录下来桩——桩的 describe() 永远返回 []，宿主设置投影的形状漂移它接不住。
 // 这一台起真 profile + 真 Loader + 真 SettingsForms（真 config-editor / 真 settings 服务），
 // 钉三件事：volatile 十三项真投影、mutate 写路径经真 CAS、陈旧 revision 的机器冲突码。
 // 装配样板照抄 dir-prep 的 settings-boot.test.ts（真件组合一致，条目换成本包）。
@@ -104,7 +104,7 @@ async function start(): Promise<Rig> {
       path.join(dir, CORDIS_YML),
       readProfilePatches("test", profile),
       (root) => {
-        // loader-boot 同款：本包 fiber 激活需要 agents/timer 服务面在位（inject 依赖从
+        // loader-boot 同款：本包 fiber 激活需要 agents/timer 宿主服务在位（inject 依赖从
         // 根 ctx 服务解析，不经 loader 条目——loader 条目里的 cordis:timer 不解析）。
         root.provide("agents", {
           get: (): undefined => undefined,

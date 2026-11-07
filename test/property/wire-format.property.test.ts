@@ -1,4 +1,4 @@
-// 线格式与渲染决策的属性面：`/state` 的响应体与 dock 的渲染判据是本包唯一两处
+// 线格式与渲染决策的属性测试：`/state` 的响应体与 dock 的渲染判据是本包唯一两处
 // 「把外部数据变成界面」的地方。它们必须对**任意** JSON 全性、且不会因为一个坏字段
 // 把整张表的原型换掉（`__proto__` 那条已在单测里钉过具体形状，这里跑随机形态）。
 import { describe, it } from "vitest";
@@ -65,11 +65,11 @@ function parseWireSessions(sessions: unknown): RescueStateBody | null {
   return parseStateBody({ ok: true, sessions });
 }
 
-/** 一条已解析会话行的类型面（本层要撞的就是「坏形状有没有被降级干净」）。 */
+/** 一条已解析会话行的类型声明（本层要撞的就是「坏形状有没有被降级干净」）。 */
 function assertEntryShape(entry: RescueSessionState): void {
   assert.equal(typeof entry.count, "number");
   assert.ok(!Number.isNaN(entry.count), "count 不得是 NaN（渲染会写出 NaN 次）");
-  // NaN/Infinity 都满足 typeof：解析侧的 preprocess 承诺的就是有限数，这里同口径。
+  // NaN/Infinity 都满足 typeof：解析侧的 preprocess 承诺的就是有限数，这里同一种做法。
   assert.ok(Number.isFinite(entry.lastFireAt), "lastFireAt 必须是有限数");
   const { pending } = entry;
   if (pending !== null) {
@@ -176,8 +176,8 @@ describe("/state 载荷解析（任意 JSON）", () => {
       assert.equal(parsed.sessions?.["s1"]?.count, good, `count=${label} 不该被改动`);
     }
     // 同样的定向输入要给 lastFireAt 与 pending 的数值位：`fc.jsonValue()` 造不出
-    // NaN/Infinity（JSON 里没有这两个字面量），所以属性里那两条 isFinite 断言只有在这一面
-    // 才有可证伪性——实测过：撤掉实现的守卫，随机面 9 条全绿。
+    // NaN/Infinity（JSON 里没有这两个字面量），所以那两条 isFinite 断言只有从属性这边才
+    // 有可证伪性——实测过：撤掉实现的守卫，随机形态 9 条全绿。
     const nonFinite: readonly (readonly [string, number])[] = [
       ["NaN", Number.NaN],
       ["Infinity", Number.POSITIVE_INFINITY],
@@ -201,7 +201,7 @@ describe("/state 载荷解析（任意 JSON）", () => {
   });
 });
 
-describe("轮询档位与退避（数值面）", () => {
+describe("轮询档位与退避（数值）", () => {
   it("退避随连跳单调不减、且有上限；0/1 跳都交回原档", () => {
     const baseArbitrary = fc.integer({ min: 1, max: BACKOFF_CEILING_MS });
     const streaksArbitrary = fc.array(fc.integer({ min: 0, max: 40 }), {
@@ -260,7 +260,7 @@ describe("轮询档位与退避（数值面）", () => {
 describe("dock 渲染决策（信号组合）", () => {
   it("hasContent 恰等于「有区块要渲染」；toggle=unknown 恰等于「快照不在场」", () => {
     const flagsArbitrary = fc.array(fc.boolean(), { minLength: 6, maxLength: 6 });
-    /** 三种快照形态各自被抽到的次数：漏抽一支，那一支的判据就是空转。 */
+    /** 三种快照形态各自被抽到的次数：漏抽一支，那一支的判据就没有实际校验。 */
     const seen = { absent: 0, empty: 0, pending: 0 };
     const rescueArbitrary = fc.oneof(
       fc.constant(null),
@@ -305,7 +305,7 @@ describe("dock 渲染决策（信号组合）", () => {
         assert.equal(decision.toggle === "unknown", rescue === null);
         assert.equal(decision.showToggleRow, rescue !== null);
         assert.equal(decision.rescueKnown, rescue !== null);
-        // 快照里真有 pending 时，渲染面必须拿到它：抽样若永远抽不到这一支，上一行的
+        // 快照里真有 pending 时，渲染这边必须拿到它：抽样若永远抽不到这一支，上一行的
         // hasContent 判据就只在「pending 恒 null」的形态下成立。
         assert.equal(withPending, decision.pending !== null, "快照里的 pending 要原样交回渲染面");
       }),

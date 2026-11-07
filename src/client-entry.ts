@@ -16,7 +16,7 @@ import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 // plugin-manager 是 `plugins.bundle.config` 这条 keyed 槽的**属主**（installed
 // `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:111-116`，文件头明写
 // 「A registrant merges this contract with `import type` and registers through `ctx.slots`;
-// it never imports this package at runtime」）。本包不再手抄那份 merge 的形状，改为直接
+// it never imports this package at runtime」）。本包不再自己抄那份 merge 的形状，改为直接
 // 用属主交出的两位：`PluginConfigViewProps['view']`（卡片的两视图判别位，见
 // SettingsCardProps）与 `ConfigPageForm['state']`（配置页交给卡片的状态快照，见
 // FormSnapshot）。属主一改形状，这两处当场红。
@@ -89,7 +89,7 @@ import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
 import { createRescueReader } from "./remote.ts";
 import type { RescueReader } from "./remote.ts";
 
-// NS 的字面量形态是**承重**的：test/profile-bundle.ts 的漂移针从产物里按
+// NS 的字面量形态是**承重**的：test/profile-bundle.ts 的产物漂移检查从产物里按
 // `const NS = "…"` 抓这条声明，再与 cordis.patch.yml 的裸 `- id:` 比对（写成别名
 // 就让那条针取不到值）；类型标注不改变产物，针照旧抓得到。同一条串的另外两位（文案
 // 命名空间本源、引用标签 REFERENCE_SOURCE_KEY）各自由 `LocaleNs` 与该常量本身钉住。
@@ -97,7 +97,7 @@ const NS: LocaleNs = "session-rescue";
 
 // ⚠ 两个**不同**的标识，别混用（混用过的形状：卡片打不开 / 保存写进别的条目）：
 //  - `NS` = loader 条目 id = settings 命名空间 = `configForms.get(NS)` 的入参，
-//    真源是本包 cordis.patch.yml 的裸 `- id:`（宿主读 `entry.options.id`）。
+//    唯一来源是本包 cordis.patch.yml 的裸 `- id:`（宿主读 `entry.options.id`）。
 //  - 下面这个常量 = 本包在 profile 里那条 bundle 的**包名**，只当槽位 key 用。
 // `plugins.bundle.config` 是按 bundle 包名 keyed 的槽位：宿主把注册项的 key 与
 // bundle 包名精确相等匹配后才渲染（installed
@@ -109,8 +109,8 @@ const NS: LocaleNs = "session-rescue";
 // （"keyed by the bundle's package name"），首方先例
 // dsh-experimental-client-ui-voice-input/lib/client.js:5659-5661。
 // 写成裸条目 id（`session-rescue`）时 ledger 里没有这个键 → 插件页永不出卡。
-// 包名真源：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；
-// test/profile-bundle.ts 把真源读进测试，test/build-client.test.ts 的漂移针据此钉。
+// 包名唯一来源：`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles`；
+// test/profile-bundle.ts 把唯一来源读进测试，test/build-client.test.ts 的产物漂移检查据此钉。
 // 注意 dock 那侧的 `id: "session-rescue"` 是 list 槽的条目 id，与本常量无关，别一起改。
 
 /**
@@ -136,7 +136,7 @@ const BUNDLE_PKG = "@jayyuen66/dsh-session-rescue";
 
 /** 从对象安全读字段：字面量键走变量参数，绕开 dot-notation 与
  *  noPropertyAccessFromIndexSignature（tsc 禁索引签名点访问）的互斥。 */
-// 发给模型的重发/续写正文（dock 两个按钮产出）不再住在模块常量里，而是取自
+// 发给模型的重发/续写正文（dock 两个按钮产出）不再定义在模块常量里，而是取自
 // UI_MESSAGES 双语字典（语言由官方 ctx.locale 决定，见 apply 的 bind）。
 
 const CSS = [
@@ -194,7 +194,7 @@ export interface RescueStateStore {
   timer: ReturnType<typeof setTimeout> | null;
   /** /state 是否在飞。在飞期间新订阅不补发——订阅抖动才不会放大成连发。 */
   inFlight: boolean;
-  /** 官方 Remote 读面；`undefined` = 当前部署没有远程面（数据面显示读不到）。 */
+  /** 官方 Remote 读取接口；`undefined` = 当前部署没有远程通道（数据那一栏显示读不到）。 */
   reader: RescueReader | undefined;
   /** 连着多少跳没读到有效快照（0=上一跳有效）。决定退避档位与快照是否过期。 */
   failStreak: number;
@@ -210,7 +210,7 @@ export interface RescueStateStore {
 export const ACTIVE_POLL_MS = 1000;
 
 /** 无 pending 时的兜底周期：没有倒计时在跑，轮询只为发现 host 侧新出现的
- *  pending。不分档位一律 1Hz 的老口径，空闲页签也每秒打一发 /state。 */
+ *  pending。不分档位一律 1Hz 的老规则，空闲页签也每秒打一发 /state。 */
 export const IDLE_POLL_MS = 5000;
 
 /** 连着这么多跳读不到有效快照 ⇒ 手上那份判定为过期（交回 null = rescueKnown=false，
@@ -229,7 +229,7 @@ export function backoffMs(base: number, failStreak: number): number {
 }
 
 /** 取一跳 /state（经官方 Remote 的 `sessionRescue.state()`）。交回非记录、`ok!==true`、
- *  sessions 坏形状、以及远程面拒绝/传输层 reject 全部归 null =「这一跳没读到有效快照」：
+ *  sessions 坏形状、以及远程通道拒绝/传输层 reject 全部归 null =「这一跳没读到有效快照」：
  *  读侧只按这个结论做退避与过期判定，不必分辨来路。 */
 async function readStateHop(store: RescueStateStore): Promise<RescueStateBody | null> {
   const { reader } = store;
@@ -287,12 +287,12 @@ export function nextPollMs(data: RescueStateBody | null): number {
 }
 
 /** 页签不可见时没有观察者，不该继续轮询。无 DOM 的环境（node 单测）恒判不隐藏。
- *  这里不能折成 `document?.hidden ?? false`：全局 `document` **未声明**的环境里
+ *  这里不能写成 `document?.hidden ?? false`：全局 `document` **未声明**的环境里
  * `document?.hidden` 抛 ReferenceError，而 `typeof` 探测不抛——两者不等价，故保留
  *  typeof 判据。判据先落成布尔量再与，是因为直接写
  * `typeof document !== "undefined" && document.hidden` 会被 prefer-optional-chain
- *  误判成可折叠；写成早退 `if` 则给 node 环境那条路加一个无用例可达的代码块，
- *  踩 100% 覆盖门槛（v8 按块计数，`&&` 的短路侧原本不成块）。 */
+ *  误判成可以合并成可选链；写成早退 `if` 则给 node 环境那条路加一个无用例可达的代码块，
+ *  踩 100% 覆盖阈值（v8 按块计数，`&&` 的短路侧原本不成块）。 */
 function pageHidden(): boolean {
   const hasDocument = typeof document !== "undefined";
   return hasDocument && document.hidden;
@@ -402,7 +402,7 @@ export const rescueState: RescueStateStore = {
 
 /** useSyncExternalStore 的两个入参必须是**模块级稳定引用**。写成内联箭头函数
  *  会让每次渲染都重跑订阅 effect——官方 React 18.3.1 的实现是
- *  `useEffect(bind(...),[subscribe])`，依赖数组只收 subscribe。重跑的代价不是空转：
+ *  `useEffect(bind(...),[subscribe])`，依赖数组只收 subscribe。重跑的代价并非没有作用：
  *  disposer 把唯一订阅者摘干净 → stop() 撤表，新订阅 → timer===null → 立刻再发
  *  一发 /state。真机 20:08:24.352/.353/.358/.360/.372 那五连发即由此而来。
  *  导出仅供单测。 */
@@ -421,7 +421,7 @@ export interface JsonResult {
   ok: boolean;
 }
 
-/** 写一次并投影结果：只认 `{ok:true}`；远程面缺席或传输失败都算失败。 */
+/** 写一次并投影结果：只认 `{ok:true}`；远程通道缺席或传输失败都算失败。 */
 async function postSessionAction(
   action: "cancel" | "toggle",
   sessionId: string,
@@ -440,7 +440,7 @@ async function postSessionAction(
 }
 
 // 两位都是纯转发，真正的等待在 postSessionAction 里的 Remote 调用。本包的三条 async
-// 规则在此咬合：`require-await`（async 函数必须有 await）、`promise-function-async`
+// 规则在这里同时生效：`require-await`（async 函数必须有 await）、`promise-function-async`
 //（返回 promise 的函数必须是 async）与 `return-await`（不许 `return await`）。
 // 因此把等待写成落地一跳再交回——语义与调用点完全一致（调用方要么 `await`（测试），
 // 要么把返回值当 promise 交给 useHostActions 的 run）。
@@ -467,7 +467,7 @@ interface ActionResult {
  *  1. `binding(id)` 官方返回 **`SessionBinding | undefined`**（其 `.session` 是
  *     `SessionFace`），镜像写成 `{ session: SessionBinding }` 等于把 `SessionFace`
  *     标成了 `SessionBinding`——属性路径巧合，标签是错的；
- *  2. `fork` 官方返回 `Promise<SessionId>`（品牌串），镜像写成 `Promise<string>`；
+ *  2. `fork` 官方返回 `Promise<SessionId>`（`SessionId` 是带 `brand` 标记的字符串类型），镜像写成 `Promise<string>`；
  *  3. 镜像里的 `open(id)` **官方根本不存在**：`ISessions` 与实现 `ClientSessions`
  *     都没有该成员，且 `sessions.list` 的注释明写「navigation belongs to view owners」；
  *     首方 Chat 的 fork 流程是 `ctx.sessions.fork(...).then((childId) =>
@@ -478,7 +478,7 @@ interface ActionResult {
  */
 export type SessionsService = Pick<ISessions, "binding" | "fork" | "using">;
 
-/** 导航位按官方成员面投影（`UiWorkspace` 还有 openWorkspace/forkSession 等，本包只用一位）。 */
+/** 导航位按官方成员类型投影（`UiWorkspace` 还有 openWorkspace/forkSession 等，本包只用一位）。 */
 type WorkspaceNavigation = Pick<UiWorkspace, "openSession">;
 
 /** 会话绑定取不到时的失败码：三条动作（重发/停止重问/fork 重发）的开手守卫同源。 */
@@ -494,7 +494,7 @@ interface ActionFailure {
 }
 
 /**
- * 本包对卡片交出的动作面。**会话标识用官方品牌**（`SessionId`），因为下游每一位都是
+ * 本包对卡片交出的动作接口。**会话标识用官方类型品牌**（`SessionId`），因为下游每一位都是
  * 官方 API 的形参——用裸 `string` 只是把不匹配推到运行时。
  */
 interface Actions {
@@ -613,7 +613,7 @@ function createActions(
     text: string,
   ): Promise<ActionResult | ActionFailure> {
     // 形参声明是 `number | null`（Actions 接口与 CompletedUserTarget.forkAtSeq 同源），
-    // `undefined` 那半边没有类型面也没有调用点（唯一挂载点传 target.forkAtSeq），
+    // `undefined` 那半边既没有类型声明也没有调用点（唯一挂载点传 target.forkAtSeq），
     // 故只判 null。
     if (forkAtSeq === null) {
       return { ok: false, code: "fork-unavailable", message: t("forkFirstTurn") };
@@ -654,13 +654,13 @@ function createActions(
 // ── 合并 view：useChat.legacy + useSession 控制字段 ─────────────────────
 
 /**
- * dock 组件的 props。**四位 standard kit 一律取官方合成面**，不再逐成员重述：
+ * dock 组件的 props。**四位 standard kit 一律取官方合成类型**，不再逐成员重述：
  * `SessionStandardProps`（installed `@deepseek-ai/dsh-client-ui-slots/lib/types/index.d.ts:191`）
  * 是一张由各方 merge 的空表——`sessionId` / `useSession` / `useProjection` 由
  * `@deepseek-ai/dsh-client-ui-session`（其 lib/types/client/index.d.ts:77-84）合入，
  * `useChat` 由 `@deepseek-ai/dsh-client-ui-chat`（其 contract/slots.d.ts:275-279）合入，
  * 于是本包 selector 读到的 `snap.running` / `snap.legacy.nodes` 等成员的形状、只读性、
- * 品牌（`sessionId: SessionId`）都由宿主侧的那份声明交出。把这四位手抄成
+ * 类型品牌（`sessionId: SessionId`）都由宿主侧的那份声明交出。把这四位自己抄成
  * `sessionId: string` + 三个自造 selector 签名，`slots` 也因此只能跟着降级成本地面
  * （官方 `register` 会按 `ComposedProps` 反变校验组件形参，抄窄了就直接红，
  * 见下面 ClientCtx.slots 处记的那条 TS2769）。
@@ -768,7 +768,7 @@ function RescueEditor(props: EditorProps): ReactNode {
   );
   // `target` 由 EditorProps 声明成必选的 CompletedUserTarget，dock 的唯一挂载点
   //（`if (dockEditing && target !== null)`）已在门外判过——旧的 `target !== null &&`
-  // 在这里是第二次判同一件事，类型面上没有可判的空值。只剩 forkAtSeq 这一位真会空，
+  // 在这里是第二次判同一件事，类型声明里没有可判的空值。只剩 forkAtSeq 这一位真会空，
   // 判它并把正分支写在前（no-negated-condition）。
   const forkButton =
     target.forkAtSeq === null
@@ -1008,9 +1008,9 @@ interface ActionSink {
   setError: (message: string | null) => void;
 }
 
-/** 一次业务动作的通用外壳（停止重问 / 编辑重发 / 重试 / 续写共用同一套
+/** 一次业务动作的通用 外壳（停止重问 / 编辑重发 / 重试 / 续写共用同一套
  *  busy-重入保护与错误呈现；原本 dock 里两份逐字重复的实现）。
- *  失败面两条都要覆盖：结果 `{ok:false}`（宿主拒绝）与 reject（服务抛错）。 */
+ *  失败两条都要覆盖：结果 `{ok:false}`（宿主拒绝）与 reject（服务抛错）。 */
 async function runAction(
   busy: boolean,
   sink: ActionSink,
@@ -1035,7 +1035,7 @@ async function runAction(
 }
 
 /**
- * host 写通道（取消 / 每会话开关）的在途与失败面。
+ * host 写通道（取消 / 每会话开关）的在途与失败。
  *
  * postCancel/postToggle 返回 {ok:false}（宿主拒绝、网关不可达、传输中断）时
  * **什么都没发生**——倒计时照跑、待办照发，所以结果必须消费掉并显式报错。
@@ -1205,7 +1205,7 @@ function RescueDockView(props: DockProps): ReactNode {
     );
   }
 
-  // host 写通道失败面（取消/开关）：紧随其操作行显示，不静默吞掉。
+  // host 写通道失败（取消/开关）：紧随其操作行显示，不会静默吞掉。
   if (host.error !== null) {
     children.push(
       createElement("div", { key: "host-action-error", className: "sr-error" }, host.error),
@@ -1233,21 +1233,21 @@ interface CardSnapshot {
 /**
  * 本条目在客户端的共享配置表单 = 官方声明
  * `@deepseek-ai/dsh-client-ui-settings/client` 交出的 `ConfigForm<T>`
- * （`getSnapshot` / `subscribe` / `mutate` / `set` / `unset` 五成员全必选），快照面
+ * （`getSnapshot` / `subscribe` / `mutate` / `set` / `unset` 五成员全必选），快照类型
  * `ConfigFormSnapshot<T>`（status / value / base / user / revision / writable / mode
- * 七成员全必选）。原先这里手抄了一份 `getSnapshot: () => unknown` 的三成员投影，
+ * 七成员全必选）。原先这里自己抄了一份 `getSnapshot: () => unknown` 的三成员投影，
  * 快照字段全靠 `fieldOf(snap,"status")` 逐位再解析一遍——那个解析器只是丢失类型的
  * 补救，不是宿主契约（provider 侧已 decode/derive 过），故随类型回归官方一并删除。
  * ⚠ 旧 `ctx.settingsScope.bind({ namespace })` 连同 `settingsScope` 服务已被宿主
  * 移除（installed 全树零命中），入口换成 `ctx.configForms.get(entryId)`
  * （installed `config-form.d.ts:142`，服务本身由 :95-96 的 Context 增强交出）。
- * ⚠ 消费者面上没有 `dispose`：`get()` 交回的是 provider 持有的共享表单
+ * ⚠ 消费者这边没有 `dispose`：`get()` 交回的是 provider 持有的共享表单
  * （installed `config-form.d.ts:138-142`），销毁由 provider 在自己的 teardown 统一做。
  */
 export type EntryForm = ConfigForm<Record<string, unknown>>;
 
 /**
- * 本条目那张表单的官方快照面（值面是任意 JSON 形状，由 host 半的 Config 把关）。
+ * 本条目那张表单的官方快照类型（值是任意 JSON 形状，由 host 半的 Config 把关）。
  * 锚在**槽位属主包**交给配置页的那份状态上（`ConfigPageForm['state']`，installed
  * `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:166-171`——它本身就是
  * `ConfigFormSnapshot<Record<string, unknown>>` 的具名投影），而不是本地再写一遍泛型实参：
@@ -1315,7 +1315,7 @@ interface SettingsCardProps {
 // ── 429 重试策略区块（官方 llm-retry provider 级 retryPolicy 配置）────────────
 // 数据流：remote.sessionRescue.retryProviders()（host 读 llm-pi-ai namespace）
 // → 每 provider 一行下拉；选择 → remote.sessionRescue.retryPolicy() → host 经
-// 官方 settings.mutate 落盘（validator 在写处把关）→ 重拉列表。
+// 官方 settings.mutate 写到磁盘（validator 在写处把关）→ 重拉列表。
 // 档位：default（官方默认 5 次码表）/ enhanced（12 次 + QUOTA + 8s→60s，
 // settings.yaml 四家现行同款）/ always（官方无限重试 + backoff）/ off（0 次）。
 
@@ -1356,7 +1356,7 @@ function presetOfRow(row: RetryProviderRow): string {
   return "default";
 }
 
-/** 单行 provider 的档位下拉（选择先暂存，点「保存」批量落盘）。 */
+/** 单行 provider 的档位下拉（选择先暂存，点「保存」批量写到磁盘）。 */
 function retryRowElement(
   row: RetryProviderRow,
   pending: Record<string, string>,
@@ -1375,7 +1375,7 @@ function retryRowElement(
   return createElement(SelectField, {
     key: row.provider,
     label: row.provider,
-    // always 档没有次数上限（官方语义 until success），落盘值里也没有 maxRetries 可读
+    // always 档没有次数上限（官方语义 until success），写到磁盘值里也没有 maxRetries 可读
     // ——宿主兜底的 5 只是 normal 档的官方默认，显示出来会把「无限」读成「5 次上限」。
     hint:
       row.mode === "always"
@@ -1390,8 +1390,8 @@ function retryRowElement(
   });
 }
 
-/** 单个 provider 的落盘（经官方 Remote 的 `sessionRescue.retryPolicy`）。返回 null=已落盘，
- *  返回文案=host 拒绝。失败可能是 `{ok:false, error}` 业务结果，也可能是远程面拒绝；
+/** 单个 provider 的写到磁盘（经官方 Remote 的 `sessionRescue.retryPolicy`）。返回 null=已写到磁盘，
+ *  返回文案=host 拒绝。失败可能是 `{ok:false, error}` 业务结果，也可能是远程通道拒绝；
  *  两者都不得落到"成功"分支，否则 pending 被清空、用户以为档位已保存。 */
 
 const applyPreset = async (
@@ -1417,7 +1417,7 @@ const applyPreset = async (
   }
 };
 
-/** 逐项串行执行档位落盘。host 的 retryPolicy 是「读 revision → 带该 revision 写」的一对，
+/** 逐项串行执行档位写到磁盘。host 的 retryPolicy 是「读 revision → 带该 revision 写」的一对，
  *  并行发会在后到的那次撞 settings-revision-conflict；规则禁了 reduce / .then / 循环内
  *  await，串行只能这样逐项递归（层数 = provider 数，很小）。 */
 async function applyPresetsInOrder(
@@ -1524,7 +1524,7 @@ function retrySaveBar(props: {
 function RetryPolicySection(props: { t: Translate }): ReactNode {
   const { t } = props;
   const [state, setState] = useState<RetryPanelState>(null);
-  // 保存条模式：改档位先暂存（provider → preset），点「保存」批量落盘
+  // 保存条模式：改档位先暂存（provider → preset），点「保存」批量写到磁盘
   const [pending, setPending] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1629,7 +1629,7 @@ function excludesDraftToArray(draft: string): string[] {
     .filter((part) => part !== "");
 }
 
-/** 落盘当前 touched 草稿：逐字段异步写入（宿主 schema 在写处把关），并把
+/** 写到磁盘当前 touched 草稿：逐字段异步写入（宿主 schema 在写处把关），并把
  *  「复读确认未落地」的字段汇总成用户可见的失败文案（null=全部落地）。
  *  set 的失败只体现在返回值，且必须 await：让它自己 catch 并 console.error 的话，
  *  这里的 try 永远看不到失败，被宿主拒绝的值也会报"已保存"。 */
@@ -1954,8 +1954,8 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   });
   const retrySection = createElement(RetryPolicySection, { key: "retry-policy", t });
 
-  // 0.1.6：page 视图只渲染表单主体——标题/描述/卡片外壳由插件管理页统一绘制，
-  // 不再自绘 RescuePluginCard（旧自绘壳属于已删除的 settings.plugin.item）。
+  // 0.1.6：page 视图只渲染表单主体——标题/描述/卡片外层的 外壳 由插件管理页统一绘制，
+  // 不再自绘 RescuePluginCard（旧自绘的那层 wrapper 属于已删除的 settings.plugin.item）。
   return createElement(
     CardForm,
     null,
@@ -1985,17 +1985,17 @@ export interface ClientCtx {
   /** cordis 官方效应面（installed `@deepseek-ai/cordis/lib/types/fiber.d.ts` 的
    *  `interface Context extends Pick<Fiber, 'effect'>`，两个重载）。 */
   effect: Context["effect"];
-  /** 官方反射面：可选服务（`uiWorkspace`）经 `get` 读出不建立 inject 依赖，
+  /** 官方反射类型：可选服务（`uiWorkspace`）经 `get` 读出不建立 inject 依赖，
    *  已声明的名字返回 `undefined | this[K]`——`get("uiWorkspace")` 因此直接是
    *  官方 `UiWorkspace | undefined`，不需要本地投影也不需要断言。 */
   get: Context["get"];
   on?: (event: string, listener: () => void) => unknown;
   /**
-   * 官方 `SlotRegistry`（renderer 把它增强进 cordis `Context`）的**方法面投影**。取
+   * 官方 `SlotRegistry`（renderer 把它增强进 cordis `Context`）的**方法子集投影**。取
    * `Pick` 而不是 `Context["slots"]` 整类型：`SlotRegistry` 是带 private 字段的 cordis
    * `Service` 类（installed `dsh-client-ui-renderer` 的 `lib/types/client/registry.d.ts` 里那份
    * `declare class SlotRegistry`），
-   * TS 对它做名义比较，测试桩件永远满足不了整类型；`register` 逐字复用
+   * TS 对它做名义比较，测试替身永远满足不了整类型；`register` 逐字复用
    * `SlotCore['register']` 的两个重载，`inject` 是「按槽位声明生命周期装 effect」那一位
    *（collapse 跑 disposer、再次声明重跑工厂，契约写在同一份 `registry.d.ts` 里 `register` 的
    * 文档注释上）。
@@ -2026,8 +2026,8 @@ export interface ClientCtx {
    *  `configForms` 本身——写侧的 `remote.settings` 由 provider 自己的 fiber 承担
    *  （同文件 :114-117 明写「letting a shared form write through the caller's
    *  context would make every caller declare `remote.settings`」，故此处不必声明）。
-   *  ⚠ 只用 `get` 这一位，故按方法面投影——官方 `ConfigForms` 是带 private 字段的
-   *  Service 类，TS 对其做名义比较，测试桩件无法满足，**不得**写成 `ConfigForms`。
+   *  ⚠ 只用 `get` 这一位，故按方法子集投影——官方 `ConfigForms` 是带 private 字段的
+   *  Service 类，TS 对其做名义比较，测试替身无法满足，**不得**写成 `ConfigForms`。
    *  返回类型 `EntryForm` 即官方 `ConfigForm<Record<string, unknown>>`（见其声明处），
    *  快照或写侧成员一名一改，这里就会编译失败。 */
   configForms: {
@@ -2043,7 +2043,7 @@ export interface ClientCtx {
    *   拿不到隐式索引签名（本包实测：`Type 'UiMessages' is not assignable to type
    *   'Record<string, string>'. Index signature for type 'string' is missing in type
    *   'UiMessages'`）。走有限键映射那条既满足官方契约、又让「少一门语言」在编译期红。
-   * - `bind` 是官方 `TranslateNS<NS>`，dock 与卡片不再自带一份手抄的取文案签名。
+   * - `bind` 是官方 `TranslateNS<NS>`，dock 与卡片不再自带一份抄来的取文案签名。
    * ⚠ 两位都不写成 `LocaleRuntime['register'|'bind']`：官方每条都是双重载，把未类型化
    * 那条一起带进目标类型后，任何单一实现都满足不了（本包实测两条分别回
    * `Type 'string' is not assignable to type 'LocaleKeysOf<"session-rescue">'` 与
@@ -2069,7 +2069,7 @@ const inject = ["slots", "sessions", "configForms", "locale"];
  * "传输已就绪"——host 若在挂起态（suspendSession 未恢复）就重新武装定时器。
  * 断开本身不做臆测挂起：断连瞬间 host fire 失败已 settle 'skipped'，后续
  * 仍会由下一次 agent/error 重新调度，因此这里只做恢复方向。
- * 导出仅供单测（断言连接重置会调用读面的 resume）。
+ * 导出仅供单测（断言连接重置会调用读取接口的 resume）。
  */
 export function notifyHostConnected(ctx: ClientCtx): void {
   if (typeof ctx.on !== "function") {
@@ -2080,7 +2080,7 @@ export function notifyHostConnected(ctx: ClientCtx): void {
       try {
         await rescueState.reader?.resume();
       } catch {
-        // 读面不可达时降级：host 定时器照旧，仅丢失暂停恢复优化。
+        // 读取接口不可达时降级：host 定时器照旧，仅丢失暂停恢复优化。
       }
     })();
   });
@@ -2166,7 +2166,7 @@ function apply(ctx: ClientCtx): void {
     // 属于本卡片的 dispose 可登记。slot collapse 会调用本 disposer 并在再次声明时
     // **重跑工厂**（ui-renderer registry inject 契约："Collapse disposes the effect
     // and a later declaration runs it again"）——表单是共享且长活的，所以重跑后写入
-    // 依然落盘；旧 `settingsScope` 那种「离开插件页一次之后 scope 永久 disposed、
+    // 依然写到磁盘；旧 `settingsScope` 那种「离开插件页一次之后 scope 永久 disposed、
     // 每次保存被静默丢弃」的坑（0.1.6 的 fiber 级 dispose）随该服务一起消失。
     return unregister;
   });

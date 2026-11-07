@@ -1,4 +1,4 @@
-// 调度器的时钟与容量判据：now() 可注入是本模块的设计面（头注写明），这一层把
+// 调度器的时钟与容量判据：now() 可注入是本模块的设计约定（头注写明），这一层把
 // 「非单调时钟」「容量饱和」「0 是合法时钟值」三件平台相关假设逐条钉住。
 // 期望值全部来自 lib/resume-scheduler.ts 头注与字段注释写明的契约，不从实现派生。
 import { describe, it } from "vitest";
@@ -129,7 +129,7 @@ describe("0 是合法时钟值（null 哨兵契约）", () => {
 });
 
 describe("容量饱和的现行为", () => {
-  it("MAX_SESSIONS 条挂起记录占满后，新会话 skip(capacity)，且告警只报一次（真修复的观察面）", () => {
+  it("MAX_SESSIONS 条挂起记录占满后，新会话 skip(capacity)，且告警只报一次（真修复的观察接口）", () => {
     const scheduler = new ResumeScheduler();
     for (let index = 0; index < MAX_SESSIONS; index += 1) {
       addSuspendedSession(scheduler, `full-${String(index)}`);

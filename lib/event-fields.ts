@@ -1,4 +1,4 @@
-// 会话事件读取的共享判据：投影折叠（turn-facts）与回退扫描（turn-review）必须对同一串
+// 会话事件读取的共享判据：投影折叠（lib/turn-facts.ts 的 `applyEvent`）与回退扫描（turn-review）必须对同一串
 // 事件逐项同解；两处各抄一份时，任何一侧被单独微调都会让投影读与回退读给出不同答案。
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 

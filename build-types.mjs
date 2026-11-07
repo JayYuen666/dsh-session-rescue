@@ -2,8 +2,8 @@
 // @ts-check
 /// <reference types="node" />
 // 构建 types/：先让 tsc 出声明，再把声明里的相对说明符从源码后缀改写成产物后缀。
-// 编排（两阶段草稿→替换、说明符正典化、清单口径）统一住在 @jayyuen66/dsh-plugin-shared/
-// lib/build-types，一处可改；本文件只定位本仓依赖图里的 tsc 入口并转交目录约定。
+// 编排（先编译进临时目录（scratch）再整体替换、说明符规范化、清单规则）统一实现在
+// @jayyuen66/dsh-plugin-shared/lib/build-types，一处可改；本文件只定位本仓依赖图里的 tsc 入口并转交目录约定。
 // 为什么需要后处理与两阶段——见 shared 同名切面的文件头。
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -12,7 +12,7 @@ import { buildDeclarations } from "@jayyuen66/dsh-plugin-shared/lib/build-types"
 import { invokedDirectly } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
 // 声明门禁（test/publish-manifest.test.ts）按同一口径列 types/ 与判说明符，此处转导出，
-// 测试里不必改路径。类型面不在这里手抄：build-types.d.mts 从同一处 shared 取。
+// 测试里不必改路径。类型声明不在这里另抄：build-types.d.mts 从同一处 shared 取。
 export {
   canonicalizeDeclarationSpecifiers,
   listDeclarations,
@@ -69,7 +69,7 @@ export async function buildTypes() {
 async function main() {
   const files = await buildTypes();
   // 0 份声明是失败，不是「安静的成功」：tsconfig.types.json 的 include 空掉、tsc 提前退出、
-  // shared 的清单口径回归，都会让这一步交出空数组，而 types/ 整目录进发布包。
+  // shared 的清单规则回归，都会让这一步交出空数组，而 types/ 整目录进发布包。
   if (files.length === 0) {
     throw new Error(
       "build-types：tsc 没有产出任何声明（检查 tsconfig.types.json 的 include 与 tsc 退出状态）",

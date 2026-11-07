@@ -24,8 +24,8 @@ const LOADER_ENTRY = createRequire(import.meta.url).resolve("@deepseek-ai/cordis
 const PKG_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const HOST_TS = path.join(PKG_ROOT, "host.ts");
 
-/** 本包在 Loader 里的条目 id（= 隐式 settings 命名空间，真源是 cordis.patch.yml 的裸
- *  `- id:`）：建条目与按 id 找 fiber 两侧必须是同一个串，测试侧按期望值自持。 */
+/** 本包在 Loader 里的条目 id（= 隐式 settings 命名空间，唯一来源是 cordis.patch.yml 里不带
+ *  包名的 `- id:`）：建条目与按 id 找 fiber 两侧必须是同一个串，测试侧按期望值自持。 */
 const PLUGIN_ENTRY_ID = "session-rescue";
 // 条目 id 与 cordis.patch.yml 裸 id 的同源断言挪进 beforeAll（patchEntryId 读文件，
 // setup 必须在 hook 里）：集成层要抓的正是这条漂移——条目 id == settings 命名空间
@@ -48,14 +48,14 @@ const AGENT_STATUS_EVENT = "agent/status";
 //     build-host.mjs 的产物，故"真装机跑的是哪一份文件"只有载产物才验得到（内联/残留 ./x.ts 之类的
 //     构建回归，源码态测试一律看不见）。产物文本在内存里现建（buildHost() 是纯函数），
 //     不依赖磁盘上那份 gitignored host.js；本机 link: 装法解析到的仍是 host.ts 源码，
-//     所以这条用例覆盖的正是本机日常跑不到的那一面。
+//     所以这条用例覆盖的正是本机日常跑不到的那条分支。
 const FIXTURE_DIR = path.join(PKG_ROOT, ".tmp");
 const FIXTURE_PKG = path.join(FIXTURE_DIR, "pkg");
 const FIXTURE_HOST = path.join(FIXTURE_PKG, "host.ts");
 const FIXTURE_HOST_JS = path.join(FIXTURE_PKG, "host.js");
 
-// 动态导入 .mjs 对 TS 为 any，先收窄到用到的最小面再取成员（避免 no-unsafe-*）。
-// 载入失败要点名是哪一个入口：本文件载两份（cordis 与 loader），裸 ERR_MODULE_NOT_FOUND
+// 动态导入 .mjs 对 TS 为 any，先收窄到用到的最小类型再取成员（避免 no-unsafe-*）。
+// 载入失败要点名是哪一个入口：本文件载两份（cordis 与 loader），ERR_MODULE_NOT_FOUND 原文
 // 只说「找不到模块」，读的人还得先猜是哪一份；exports 条件变化时同理。
 async function importChecked(entry: string): Promise<Record<string, unknown>> {
   try {
@@ -134,7 +134,7 @@ interface Mount {
   tick: () => void;
 }
 
-/** lesson-loop 总线替身（report/pass 的调用记录面）。 */
+/** lesson-loop 总线替身（report/pass 的调用记录）。 */
 interface LessonBus {
   report: (input: Record<string, unknown>) => void;
   pass: (input: Record<string, unknown>) => { ok: boolean };
@@ -186,7 +186,7 @@ async function mount(
       get: (name: string) => unknown;
       [key: string]: unknown;
     }) {
-      // settings 服务替身：只给 0.1.7 还剩下的那一面（installed
+      // settings 服务替身：只给 0.1.7 还剩下的那几项（installed
       // dsh-settings/lib/types/index.d.ts：configure:80 / describe:96 / mutate:114；
       // `register`/`get`/`installSection` 已被宿主移除，命名空间改按条目 id 隐式注册）。
       // apply 的宿主契约守卫点名校验 describe/mutate，configure 由注入子上下文调用。
@@ -292,7 +292,7 @@ function rescueEntryOf(
 
 /** 条目确实经 Loader 激活（Node 原生 import + 类型剥离路径可用）。
  *  apply 内抛错会被 cordis 静默吞掉：fiber 存在不等于插件真的注册了东西，
- *  读面服务（settings 命名空间挂的 remote）在位才算数。 */
+ *  读取接口服务（settings 命名空间挂的 remote）在位才算数。 */
 function assertLoaded(inst: Mount): void {
   expect(rescueEntryOf(inst)?.fiber).toBeDefined();
   expect(inst.ctx.get("sessionRescue"), "读面服务必须已注册（apply 真的跑完了）").toBeDefined();
@@ -300,11 +300,11 @@ function assertLoaded(inst: Mount): void {
 
 describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发布产物）", () => {
   // 夹具的建/删在本套件的全部用例之外各跑一次（vitest 的结构类规则
-  // 判「用例与 hook 不在 describe 里」；本文件只有这一个顶层套件，移进来作用面不变）。
+  // 判「用例与 hook 不在 describe 里」；本文件只有这一个顶层套件，移进来的作用范围不变）。
   beforeAll(async () => {
     assert.equal(PLUGIN_ENTRY_ID, patchEntryId(), "cordis.patch.yml 的裸条目 id 漂移");
     // 先整目录清场再重建：cp 只覆盖/新增，源里删掉或改名的文件会以旧名留在副本里，
-    // 副本的相对 import 命中它时跑的就是过期代码（假绿，且极难归因）。
+    // 副本的相对 import 命中它时跑的就是过期代码（误判通过，且极难归因）。
     await rm(FIXTURE_PKG, { recursive: true, force: true });
     await mkdir(path.join(FIXTURE_PKG, "lib"), { recursive: true });
     await cp(HOST_TS, FIXTURE_HOST);
@@ -327,57 +327,61 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     await rm(FIXTURE_PKG, { recursive: true, force: true });
   });
 
-  it("loader 原生载入 host.ts：注入等待、事件驱动续跑、读面注册", { timeout: 30_000 }, async () => {
-    const inst = await mount();
-    live = inst.ctx;
-    assertLoaded(inst);
+  it(
+    "loader 原生载入 host.ts：注入等待、事件驱动续跑、读取接口注册",
+    { timeout: 30_000 },
+    async () => {
+      const inst = await mount();
+      live = inst.ctx;
+      assertLoaded(inst);
 
-    // 页面策略：0.1.7 的 settings 只剩 configure 这条写侧方法，且它只在
-    // `svc.inject(['settings'], child => child.effect(() => child.settings.configure(...)))`
-    // 的注入子上下文里被调。这条链在真实 cordis 下必须真的走通——假件里删掉
-    // configure 时那次调用会抛错，而**抛错被 cordis 静默吞掉、六条用例全绿**（实测），
-    // 所以这里点名断言：恰好一次、presentation 是 { auto: false }、owner 是本条目 fiber。
-    expect(inst.configureCalls).toHaveLength(1);
-    expect(inst.configureCalls[0]?.presentation).toStrictEqual({ auto: false });
-    // owner 比 fiber.uid，不比 fiber 对象本身：cordis 交出的 ctx/fiber 是代理，
-    // 不同调用点拿到的对象标识并不保证相同（直接 toBe 必然不等，失败信息还会踩上
-    // 代理属性读取的 pretty-format 坑）。uid 才是宿主自己的身份键。
-    const rescueFiberUid = rescueEntryOf(inst)?.fiber?.uid;
-    expect(rescueFiberUid, "比对基准：条目 fiber 必须有 uid").toBeDefined();
-    expect(
-      inst.configureCalls[0]?.ownerUid,
-      "owner 必须是本插件 fiber（缺省是 settings 服务自己的 fiber，传错等于给别人的页面定策略）",
-    ).toBe(rescueFiberUid);
+      // 页面策略：0.1.7 的 settings 只剩 configure 这条写侧方法，且它只在
+      // `svc.inject(['settings'], child => child.effect(() => child.settings.configure(...)))`
+      // 的注入子上下文里被调。这条链在真实 cordis 下必须真的走通——假件里删掉
+      // configure 时那次调用会抛错，而**抛错被 cordis 静默吞掉、六条用例全绿**（实测），
+      // 所以这里点名断言：恰好一次、presentation 是 { auto: false }、owner 是本条目 fiber。
+      expect(inst.configureCalls).toHaveLength(1);
+      expect(inst.configureCalls[0]?.presentation).toStrictEqual({ auto: false });
+      // owner 比 fiber.uid，不比 fiber 对象本身：cordis 交出的 ctx/fiber 是代理，
+      // 不同调用点拿到的对象标识并不保证相同（直接 toBe 必然不等，失败信息还会踩上
+      // 代理属性读取的 pretty-format 坑）。uid 才是宿主自己的身份键。
+      const rescueFiberUid = rescueEntryOf(inst)?.fiber?.uid;
+      expect(rescueFiberUid, "比对基准：条目 fiber 必须有 uid").toBeDefined();
+      expect(
+        inst.configureCalls[0]?.ownerUid,
+        "owner 必须是本插件 fiber（缺省是 settings 服务自己的 fiber，传错等于给别人的页面定策略）",
+      ).toBe(rescueFiberUid);
 
-    // 事件驱动：瞬时失败 → 定时器武装 → 触发 → followup 发出
-    emitRateLimitError(inst, 1);
-    expect(inst.timers).toHaveLength(1);
-    // 10_000 既不是本用例写的、也不是替身写的：0.1.7 交进 apply 的是 cordis 按条目
-    // `Config` 解析出的 volatile 引用，本用例 config 传空 → 这一读到的就是 schema 的
-    // `.default(10_000)`。
-    // 因此这条断言真正在测「内置默认有没有被静默丢弃」，而不是自己喂给自己。
-    expect(inst.timers[0]?.ms).toBe(10_000);
+      // 事件驱动：瞬时失败 → 定时器武装 → 触发 → followup 发出
+      emitRateLimitError(inst, 1);
+      expect(inst.timers).toHaveLength(1);
+      // 10_000 既不是本用例写的、也不是替身写的：0.1.7 交进 apply 的是 cordis 按条目
+      // `Config` 解析出的 volatile 引用，本用例 config 传空 → 这一读到的就是 schema 的
+      // `.default(10_000)`。
+      // 因此这条断言真正在测「内置默认有没有被静默丢弃」，而不是自己喂给自己。
+      expect(inst.timers[0]?.ms).toBe(10_000);
 
-    inst.tick();
-    expect(inst.agent.calls).toHaveLength(1);
-    expect((inst.agent.calls[0] as { role?: string }).role).toBe("user");
+      inst.tick();
+      expect(inst.agent.calls).toHaveLength(1);
+      expect((inst.agent.calls[0] as { role?: string }).role).toBe("user");
 
-    // 读面由 apply 的注入子上下文注册到根 ctx（官方 Typert Remote 服务键）
-    expect(inst.ctx.get("sessionRescue")).toBeDefined();
+      // 读取接口由 apply 的注入子上下文注册到根 ctx（官方 Typert Remote 服务键）
+      expect(inst.ctx.get("sessionRescue")).toBeDefined();
 
-    // 非瞬时失败 → 不武装
-    const before = inst.timers.length;
-    inst.ctx.emit(AGENT_ERROR_EVENT, {
-      agent: inst.agent,
-      turn: 2,
-      step: 1,
-      error: { failure: { code: "CONTEXT_WINDOW_EXCEEDED", message: "too long" } },
-    });
-    expect(inst.timers).toHaveLength(before);
-  });
+      // 非瞬时失败 → 不武装
+      const before = inst.timers.length;
+      inst.ctx.emit(AGENT_ERROR_EVENT, {
+        agent: inst.agent,
+        turn: 2,
+        step: 1,
+        error: { failure: { code: "CONTEXT_WINDOW_EXCEEDED", message: "too long" } },
+      });
+      expect(inst.timers).toHaveLength(before);
+    },
+  );
 
   it(
-    "发布态产物 host.js：真实 Loader 同样载得动，读面与续跑行为一致",
+    "发布态产物 host.js：真实 Loader 同样载得动，读取接口与续跑行为一致",
     { timeout: 30_000 },
     async () => {
       // 装载对象换成 build-host.mjs 现建的产物：装机后 dsh 按包名解析到的就是这份
@@ -387,7 +391,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       live = inst.ctx;
       assertLoaded(inst);
 
-      // 读面服务由 apply 的子上下文注册（产物里同样在）
+      // 读取接口服务由 apply 的子上下文注册（产物里同样在）
       expect(inst.ctx.get("sessionRescue")).toBeDefined();
 
       // 事件驱动链在产物形态下等价：瞬时失败 → 定时器武装 → 触发 → followup 发出
@@ -514,7 +518,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       expect(passes).toHaveLength(1);
       expect(passes[0]?.["category"]).toBe("transient-failure");
       // 先验两侧都不是 undefined：宿主漏给 signature 时 undefined === undefined 会让
-      // 这条「同源」断言空转通过。
+      // 这条「同源」断言在没有实际校验的情况下通过。
       expect(reports[0]?.["signature"], "report 侧必须有签名").toBeTypeOf("string");
       expect(passes[0]?.["signature"], "pass 侧必须有签名").toBeTypeOf("string");
       expect(passes[0]?.["signature"], "签名必须与 report 同源（规则卡定位键）").toBe(

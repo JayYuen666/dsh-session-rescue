@@ -1,8 +1,8 @@
-// 失败分类的属性面：不问「这条载荷算不算瞬时」，而问**证据次序**在任意载荷上是否成立。
+// 失败分类的属性测试：不问「这条载荷算不算瞬时」，而问**证据次序**在任意载荷上是否成立。
 //
 // 判据来自 lib/failure-classify.ts 文件里写明的原则，两条并存：
 //   ① 先按 code 路由；未知 = 永久（保守）；
-//   ② `code === "QUOTA"` 时「余额耗尽」证据必须先于裸 `status===429` 捷径——真宿主把
+//   ② `code === "QUOTA"` 时「余额耗尽」证据必须先于只看 `status===429` 那条捷径——真宿主把
 //      「额度到了」也交回 429；而**非 QUOTA 的 429 本身就是限速定义**，余额措辞不得抢判
 //      永久（百度 token plan 的限流型配额拒绝就是这一形：冷却后有配额回来）。
 //      这条立场在 test/failure-classify.test.ts 与请求级用例里各钉了一次，属性层沿用它，
@@ -38,7 +38,7 @@ const RATE_CODES = ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPO
 
 /** 「余额真耗尽」的自然语言说法（只用文档承诺的那三种形态：insufficient+配额名 /
  *  余额或额度+exhausted|depleted / out of+额度或预算。造一句「credits are insufficient」
- *  然后断言它该判永久，是拿英文语感当契约——实现承诺的是那三形，兜底方向是保守永久）。 */
+ *  然后断言它该判永久，是拿英文语感当契约——实现承诺的是那三形，后备方向是保守永久）。 */
 const BALANCE_PHRASES = [
   "Insufficient quota, please top up",
   "insufficient balance",
@@ -50,8 +50,8 @@ const BALANCE_PHRASES = [
 ];
 
 /** 配额**窗口**措辞（分钟/吞吐型额度的说法）：文档明写这一形只归请求级判瞬时。
- *  本式是实现 QUOTA_WINDOW_TEXT 的镜像（含连字符与 i 旗标），实现改口径要同步这里，
- *  否则「usage-limit exceeded」会在实现里可重发、在 oracle 里不算窗口而假红。 */
+ *  本式是实现 QUOTA_WINDOW_TEXT 的镜像（含连字符与 i 旗标），实现改规则要同步这里，
+ *  否则「usage-limit exceeded」会在实现里可重发、在 oracle 里不算窗口而误报。 */
 const QUOTA_WINDOW_WORDING =
   /\bquota[\s_-]*(?:exceeded|exhausted|reached|limit)\b|\busage[\s_-]+limit\b/iu;
 
@@ -65,7 +65,7 @@ const RATE_PHRASES = [
   "Rate-Limit: retry soon",
 ];
 
-/** 载荷面：code × message × status × providerRetryAfterMs 的笛卡尔抽样，
+/** 载荷形状：code × message × status × providerRetryAfterMs 的笛卡尔抽样，
  *  外加「缺位」与「类型不对」的脏形状（宿主载荷跨进程，缺字段是真事）。 */
 const failureArbitrary = fc.record(
   {
@@ -93,7 +93,7 @@ const failureArbitrary = fc.record(
   { requiredKeys: [] },
 );
 
-/** 限速措辞（文档承诺的那一族：整串裸 429、HTTP 语境里的 429、`429 too many/rate/throttl`、
+/** 限速措辞（文档承诺的那一族：整串只有 429、HTTP 语境里的 429、`429 too many/rate/throttl`、
  *  rate limit / throttl / too many requests|busy）。 */
 function hasRateWording(lower: string): boolean {
   return (
@@ -107,7 +107,7 @@ function hasRateWording(lower: string): boolean {
 }
 
 /** 余额真耗尽的三种形态（判据陈述，需与实现的形态族同步维护）：尾端 \b 与实现一致，
- *  缺了它 "insufficient quotas" 这类串会被这里当成余额证据、实现却不认，随机面上
+ *  缺了它 "insufficient quotas" 这类串会被这里当成余额证据、实现却不认，随机形态上
  *  oracle 与实现就会在「同解」上假分歧。 */
 function hasBalanceEvidence(lower: string): boolean {
   return (
@@ -123,7 +123,7 @@ function providerSaidWhen(retryAfter: number | undefined): boolean {
 }
 
 /** 独立 oracle：按文档两条原则重写一遍证据优先级。
- *  交回 undefined = 这一形落在「保守永久」的兜底面，不参与同解断言。 */
+ *  交回 undefined = 这一形落在「保守永久」的兜底，不参与同解断言。 */
 function expectedTransient(info: {
   code: string;
   message: string;
@@ -186,7 +186,7 @@ const positiveNatArbitrary = fc.integer({ min: 1, max: 60_000 });
 /** 限速措辞样本。 */
 const rateMessageArbitrary = fc.constantFrom(...RATE_PHRASES);
 
-/** 全性输入面：正常载荷 + 各种「压根不是失败面对象」的形状（宿主 `agent/error` 的
+/** 全性输入框状态：正常载荷 + 各种「压根不是失败面对象」的形状（宿主 `agent/error` 的
  *  `error` 位是 unknown，普通 Error / null / 数组 / 类型错位都真出现过）。 */
 const oddFailureShapes = [
   null,
@@ -228,7 +228,7 @@ describe("失败分类的证据次序（属性）", () => {
   });
 
   it("限速证据（措辞或 provider 给了再来时刻）能翻掉 QUOTA 的永久默认", () => {
-    // 「给了再来时刻」的随机面：0（没给）或一个正毫秒数。
+    // 「给了再来时刻」的随机形态：0（没给）或一个正毫秒数。
     const retryAfterArbitrary = fc.oneof(positiveNatArbitrary, fc.constant(0));
     fc.assert(
       fc.property(rateMessageArbitrary, retryAfterArbitrary, (message, retryAfter) => {
@@ -245,7 +245,7 @@ describe("失败分类的证据次序（属性）", () => {
   });
 
   it("无措辞、无 429 时，provider 给了再来时刻才翻案（providerSaidWhen 分支）", () => {
-    // 上面那条「措辞或再来时刻」的随机面里 message 全是限速措辞，providerSaidWhen
+    // 上面那条「措辞或再来时刻」的随机形态里 message 全是限速措辞，providerSaidWhen
     // 那一支（仅凭再来时刻翻案）是死维度；这里单独供给：中性措辞 + 非 429 状态。
     fc.assert(
       fc.property(positiveNatArbitrary, (retryAfter) => {
@@ -350,7 +350,7 @@ describe("失败分类的证据次序（属性）", () => {
         // 请求级愿意原地重发的那几种证据：限速族 code、429、限速/配额窗口措辞、
         // provider 给了再来时刻。两条链路的**问题不同**（回合级问「值不值得重开一回合」，
         // 请求级问「等一会儿再发同一个请求会不会更好」），所以只在证据全无时才要求同向；
-        // 配额窗口措辞那一形正是文档明写的「只归请求级」的差异面。
+        // 配额窗口措辞那一形正是文档明写的「只归请求级」的差异。
         const waitThenResend =
           RATE_CODES.includes(failure.code) ||
           failure.status === 429 ||
@@ -370,9 +370,9 @@ describe("失败分类的证据次序（属性）", () => {
     );
   });
 
-  it("oracle 的余额三形按词边界收口：复数形态不算余额证据", () => {
+  it("oracle 的余额三形按词边界统一处理：复数形态不算余额证据", () => {
     // 这三形是实现常量的镜像；少了尾端 `\b`，oracle 会把「insufficient quotas」这类串
-    // 当成余额证据，而实现不认——随机面上的「同解」就会变成假分歧。
+    // 当成余额证据，而实现不认——随机形态上的「同解」就会变成假分歧。
     expect(hasBalanceEvidence("insufficient quota")).toBe(true);
     expect(hasBalanceEvidence("insufficient quotas")).toBe(false);
     expect(hasBalanceEvidence("balance exhaustedness")).toBe(false);

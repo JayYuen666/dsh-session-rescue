@@ -97,7 +97,7 @@ async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
     });
     const turnEnds: { turn: number | undefined; reasonKind: string | undefined }[] = [];
     // 终态从 `session/event` 上读（官方 goal-round-driver 也用这一位）：
-    // `turn/end` 的 reason.kind 是唯一权威面，不猜宿主的事件顺序，也不碰
+    // `turn/end` 的 reason.kind 是唯一权威来源，不猜宿主的事件顺序，也不碰
     // `session.snapshotEvents()`（官方已标 @deprecated，新调用是禁的）。
     ctx.on("session/event", (_session: unknown, event: unknown) => {
       const record = event as {
@@ -155,7 +155,7 @@ function rescueMessages(agent: Agent): number {
     ).length;
 }
 
-/** stall 序列下的用户中止：请求进到流中段时 cancel，等到回合收口。
+/** stall 序列下的用户中止：请求进到流中段时 cancel，等到回合统一处理。
  *  两条用例共用这段最时序敏感的编排，官方 cancel 语义一变只改这一处。 */
 async function abortDuringStall(text: string): Promise<Rig> {
   const current = await boot(["stall", "rate_limit", "success"]);
@@ -192,7 +192,7 @@ describe("真宿主下的用户中止：不 emit agent/error，也不消耗续�
     // 一次多余的 turn/end 就是救援轮偷偷多跑了一轮。
     expect(turnEnds).toHaveLength(1);
     expect(["aborted", "interrupted"]).toContain(turnEnds[0]?.reasonKind);
-    // 收口的就是被中止的那一轮。
+    // 统一处理的就是被中止的那一轮。
     expect(turnEnds[0]?.turn).toBe(1);
   }, 60_000);
 

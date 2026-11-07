@@ -55,13 +55,13 @@
   - **unfinished 补跑**——回合以 `completed` 收尾，但**该回合自己写的**待办清单仍有未闭合项（`lib/turn-review.ts`，纯结构化信号、零文本猜测）；等 `unfinishedDelayMs` 后注入。
   - 注入一律是经 `agent.followup()` 发出的 `role: "user"`、`source: { kind: "plugin:session-rescue" }` 消息——模型会接着跑，token 与配额继续消耗。
 - **请求级 429 兜底**，只在宿主没有为该 provider 解析出 `retryPolicy` 时接手：监听 `agent/request-error`（waterfall），命中限流即返回 `{ kind: "retry" }`，让宿主在同一回合重发该请求。
-  - 固定退避阶梯（默认 2s / 5s / 10s / 20s / 30s，同一会话最多 5 次——部署值）；provider 的 `Retry-After` 优先于阶梯，超过封顶的就不等、委托回 `next()`。回合收口即重置计数。
+  - 固定退避阶梯（默认 2s / 5s / 10s / 20s / 30s，同一会话最多 5 次——部署值）；provider 的 `Retry-After` 优先于阶梯，超过封顶的就不等、委托回 `next()`。回合统一处理即重置计数。
   - 有策略时官方 `llm-retry` 拥有重试（码表过滤、provider 重试时刻、抖动、持久事件）。deepseek 适配器即使不配策略也会解析出一份，所以这条阶梯实际只对「不解析策略的适配器」生效。
 - **输入框下方的 dock**：编辑重发（本会话）/ Fork 重发（新分支）/ 停止并重问 / 手动重试与继续输出 / 续跑倒计时横幅 / 每会话开关。停止重问先把你的重问入队再 cancel，消息不会因取消丢失；内置重试仍在进行时，手动重试按钮保持禁用。
 - **连接感知**：发送失败的注入（传输类故障）不丢弃而是挂起，横幅显示「重连后自动续跑」，连接恢复后按剩余延迟重新武装。
 - **`/state` 轮询是自排循环 + 两档**：有 pending 时 1s（横幅按秒走倒计时），无 pending 时 5s；上一跳落地后才排下一跳，在飞期间不叠并发也不停摆。连着三跳读不到有效快照就把缓存判为过期——横幅与每会话开关回到中性态，不拿没人确认过的数字继续倒计时——轮询按翻倍退避到 30s 封顶。
 - **一张设置卡**：自动续跑参数，加上写进官方 `llm-pi-ai` 命名空间的按 provider 429 重试档位。
-- 读的宿主面：`agent/error`、`agent/status`、`agent/request-error`、`agent/disposed`（清理）。回合事实（`turn/start`、`turn/end`、`user/message`、`tool/call`、`todo/write`）经 `ctx.sessionProjections` 增量折叠；注册表缺席的 profile、或折叠不可采信的形状，回退 `session.snapshotEvents()` 全量扫描，判定逐项相同。
+- 读取的宿主类型：`agent/error`、`agent/status`、`agent/request-error`、`agent/disposed`（清理）。回合事实（`turn/start`、`turn/end`、`user/message`、`tool/call`、`todo/write`）经 `ctx.sessionProjections` 增量折叠（`rescueFactsProjection.apply`）；注册表缺席的 profile、或折叠不可采信的形状，回退 `session.snapshotEvents()` 全量扫描，判定逐项相同。
 
 ### 判定是怎么做出来的
 
@@ -83,7 +83,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 - **需要 Node.js `>= 24.9`。** 本包仅 ESM；正是这个 Node 下限让 `require()` 一份 ESM 入口成为可能，`engines.node` 因此声明。
 - **需要宿主 `dsh` 在 `0.2.1-rc.5` 或 `0.2.2-alpha.3` 这条线上。** 宿主装插件时读的是 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`），而且它**单独决定**：那一支给出结论后不再读 `peerDependencies`。预发布版本参与范围比较（宿主按 `includePrerelease: true` 判）。`@deepseek-ai/dsh-*` 的 peer 写同一条窗口范围；精确钉版只在 `devDependencies` 里，那是编译期纪律，不参与装载判定。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
-- **`dependencies` 里没有任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 以 `nodeLinker: hoisted` + `autoInstallPeers: false` 安装，`dependencies` 里的宿主包会被物化成一份真实目录、落在运行中宿主已装载的那份旁边——此后原生工具调用全部抛错，而构建、类型检查、覆盖率一路全绿。`host.js` 值导入的三枚宿主包（`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-typert-protocol`、`@deepseek-ai/schemastery`）是必备 peer、并以同一钉版重复落在 `devDependencies`，打包器因此把它们外部化而不是内联官方函数体。
+- **`dependencies` 里没有任何 `@deepseek-ai/*`，这是约定**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 以 `nodeLinker: hoisted` + `autoInstallPeers: false` 安装，`dependencies` 里的宿主包会被物化成一份真实目录、落在运行中宿主已装载的那份旁边——此后原生工具调用全部抛错，而构建、类型检查、覆盖率一路全绿。`host.js` 值导入的三枚宿主包（`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-typert-protocol`、`@deepseek-ai/schemastery`）是必备 peer、并以同一钉版重复落在 `devDependencies`，打包器因此把它们外部化而不是内联官方函数体。
 - **随包发布**：`prepare` 重建的 `host.js` 与 `client.js`、`types/`、`cordis.patch.yml`，加上 `README*`、`LICENSE`、`CHANGELOG.md` 与 `icon.svg`。产物不提交，也刻意不压缩——裸跨包说明符必须留在产物里，外部化断言才有意义。
 - 装不上报 404：该版本没发出去过（先看 `dist-tags.latest`）。更常见的原因是同组库包 `@jayyuen66/dsh-plugin-shared` 还没上 registry——`host.js` 值导入它的 `lib/locale`、`lib/record`、`lib/errors` 与 `lib/lesson-bus`，`client.js` 值导入 `client`，缺了就是 `ERR_MODULE_NOT_FOUND`。
 
@@ -103,16 +103,16 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 ## <img src="https://api.iconify.design/lucide/circle-slash.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它不提供什么
 
 - **不注册任何模型工具。** 面就是宿主事件加 Remote 命名空间；没有 `session_rescue` 工具给模型调。
-- **不开自己的 HTTP 路由。** 数据面是官方 Typert Remote 命名空间 `sessionRescue`，经宿主 `/api` 网关到达；认证、Host / DNS 重绑定 / Origin 闸与 body 上限全是网关的。
+- **不开自己的 HTTP 路由。** 数据那一栏是官方 Typert Remote 命名空间 `sessionRescue`，经宿主 `/api` 网关到达；认证、Host / DNS 重绑定 / Origin 闸与 body 上限全是网关的。
 - **不加 CLI 子命令。**
 - **不自渲染排队区**：官方 conversation 包已把队列 dock 挂上（逐行编辑 / 删除 / 插话），本包不重复列一份。
 - **host 半不写文件、不发外部请求**（见数据与隐私）。
-- 可选消费的面：`lessonLoop` 总线（事实与 pass）、`sessionProjections`（快速回合事实）、goal 服务（触发时刻的接管判定）。缺席它们救援照常——只是回退全量日志扫描，goal 回合无人接管。
+- 可选消费的类型：`lessonLoop` 总线（事实与 pass）、`sessionProjections`（快速回合事实）、goal 服务（触发时刻的接管判定）。缺席它们救援照常——只是回退全量日志扫描，goal 回合无人接管。
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
 - 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，内容是一串操作项，其 `insert:` 块带**两条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件）与 `- id: session-rescue`、`name: "@jayyuen66/dsh-session-rescue"`——宿主只对裸包名条目扫描 `dsh.client`。`dsh plugin add/remove` 维护装配层。
-- host 半硬依赖 `timer` 与 `settings`（`inject: ["timer", "settings"]`）；读面经注入子 fiber 注册进宿主 `remote` 网关。不依赖 `webServer`，没有该服务的宿主（TUI）自动续跑照常、只是设置卡读不到数据面。
+- host 半硬依赖 `timer` 与 `settings`（`inject: ["timer", "settings"]`）；读取接口经注入子 fiber 注册进宿主 `remote` 网关。不依赖 `webServer`，没有该服务的宿主（TUI）自动续跑照常、只是设置卡读不到数据那一栏。
 - 设置卡在插件页的 `plugins.bundle.config`，按 **bundle 包名** keyed；`configForms.get()` 与 settings 命名空间仍是裸条目 id `session-rescue`。改动点「保存」才写 settings、「撤销」丢弃。
 - 不开 UI 时，部署默认值写在注册行 `config:` 上；优先级 = 卡运行时值 > 行 `config` > schema `.default()`，配置非法则插件加载失败（响亮报错）。
 
@@ -130,7 +130,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 ## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
 
-命名空间 `session-rescue` = 条目 id（隐式注册——本包不调 `settings.register`）。设置表单与行 `config` 共用 host 入口里同一份 `Config` schema；标了 `.volatile()` 的字段即设置卡的可编辑面。时间单位 ms。
+命名空间 `session-rescue` = 条目 id（隐式注册——本包不调 `settings.register`）。设置表单与行 `config` 共用 host 入口里同一份 `Config` schema；标了 `.volatile()` 的字段即设置卡的可输入区。时间单位 ms。
 
 | 字段 | 类型 / 范围 | 默认 | 卡上有 | 作用 |
 |---|---|---|---|---|
@@ -172,14 +172,14 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私
 
-| 口径 | 内容 |
+| 规则 | 内容 |
 |---|---|
 | 不写盘、不外联 | host 半无 `node:fs`、无网络调用；除下面「唯一出口」一条外，输出去向只有 `console.*` 日志与那条注入消息 |
 | 内存态且有界 | 调度器最多 200 条会话记录、挂起待办 64 条、待兑 pass 64 条；这三类超限裁最旧。每会话开关台账同为 200 条，但满额时只淘汰已无活跃 agent 的会话，淘汰不到就让 `toggle` 返回 409——不裁活会话，否则等于悄悄重新启用它的救援。`agent/disposed` 与插件卸载时释放定时器 |
 | 持久化只有两处、都经官方 settings | 本包命名空间 `session-rescue` 与 `llm-pi-ai` 的重试档位，落在 dsh 数据目录里，重启不丢 |
 | 每会话开关 | 只存活在进程内存；重启即回到全局 `enabled` |
 | 语言 | 注入正文跟随官方 locale 偏好；条目未被投影时即中文 |
-| 唯一出口 | 内容只流向 lesson-loop、且只在装了它的时候：交给它的是失败 code / status / message 原文、session id 与该会话的 `cwd`，落盘位置由 lesson-loop 决定。没装则一条都不产生 |
+| 唯一返回路径 | 内容只流向 lesson-loop、且只在装了它的时候：交给它的是失败 code / status / message 原文、session id 与该会话的 `cwd`，写到磁盘位置由 lesson-loop 决定。没装则一条都不产生 |
 
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
@@ -189,7 +189,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 - **补跑有结构性前提**：该回合必须写过 `todo/write` 清单且仍有 `pending` 或 `in_progress` 项。从不用待办工具的会话触发不了它。
 - **429 阶梯只对「解析不出 `retryPolicy` 的 provider」生效**，而 deepseek 适配器不配也解析出一份。profile 没装 `dsh-llm-retry` 时，一次 429 零次重发直接终态。
 - **官方 `llm-retry` 不总在下游**：它的 abort 信号已触发或条目已 disposed 时直接返回、不调 `next()`，`always` 模式还会采纳下游交回的决策——那些窗口里本包根本不被咨询。
-- **读面持续不可达时 dock 降级而不是假装**：横幅与每会话开关回到中性态、轮询退避。回合相关的动作照旧可用——它们读的是会话实时状态，不依赖读面。
+- **读取接口持续不可达时 dock 降级而不是假装**：横幅与每会话开关回到中性态、轮询退避。回合相关的动作照旧可用——它们读的是会话实时状态，不依赖读取接口。
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题
 
@@ -214,7 +214,7 @@ pnpm run check   # typecheck → lint → client build → host build → types 
 - `test/integration/` 上真东西：发布产物经真实 cordis loader 装载；官方 testkit 装真 AgentLoop；真 goal 服务加官方 `goal-round-driver` 与脚本化失败的 mock LLM；中止语义（你停掉的回合不耗配额）。
 - `test/property/`（fast-check）覆盖分类判序、回合事实折叠、`/state` 载荷解析，以及随机指令序列下调度器的状态机不变量——每条属性都带「判据真被走到」的守卫，没走到的判据直接红而不是绿。
 - 覆盖率门是四项 100%，新增分支必须有走到它的用例。
-- `test/publish-manifest.test.ts` 看住发布面：入口目标随包、无源码入口、`dependencies` 无 `@deepseek-ai/*`、`dsh-*` 的 **devDependencies** 精确钉版且全族同值、`@deepseek-ai/dsh*` 的 **peer** 与 `engines.dsh` 同一条支持窗口范围、注释与文档无日期与本机路径。`test/dist-size.test.ts` 给产物设体积预算。
+- `test/publish-manifest.test.ts` 看住发布清单：入口目标随包、无源码入口、`dependencies` 无 `@deepseek-ai/*`、`dsh-*` 的 **devDependencies** 精确钉版且这一组包同值、`@deepseek-ai/dsh*` 的 **peer** 与 `engines.dsh` 同一条支持窗口范围、注释与文档无日期与本机路径。`test/dist-size.test.ts` 给产物设体积预算。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
 

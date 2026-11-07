@@ -69,7 +69,7 @@ describe("buildHost()", () => {
     // 子路径说明符：external 字符串项匹配不到的那个坑
     assert.ok(
       importsFrom(out, "@deepseek-ai/dsh-brand"),
-      "dsh-brand 必须外部化（口径 A；host 半的 SessionId 构造靠它）",
+      "dsh-brand 必须外部化（规则 A；host 半的 SessionId 构造靠它）",
     );
     // 内联判据不绑「行首 + function + 紧接左括号」一种形态：const/let/var/class 声明、
     // 泛型参数与缩进同样算内联已发生（打包器会改写声明形态）。
@@ -78,17 +78,17 @@ describe("buildHost()", () => {
     // 裸说明符），故 client.js 里仍是内联的 brandString——那条不由外部化裁定消灭。
     assert.ok(
       importsFrom(out, "@deepseek-ai/dsh-typert-protocol"),
-      "dsh-typert-protocol 必须外部化（读面的服务基类与注册口都来自宿主）",
+      "dsh-typert-protocol 必须外部化（读取接口的服务基类与注册口都来自宿主）",
     );
     assert.ok(
       importsFrom(out, "@jayyuen66/dsh-plugin-shared/lib/record"),
       "shared/record 必须外部化（SP-D 起 isRecord/fieldOf 单点在 shared，内联即复制判据）",
     );
-    // 本包自己的读面代码确已并入单文件：用**声明形态**判，而不是子串 "sessionRescue"——
+    // 本包自己的读取接口代码确已并入单文件：用**声明形态**判，而不是子串 "sessionRescue"——
     // 后者在产物里只出现在一个字符串常量（RESCUE_REMOTE_NAMESPACE）里，拿它当证据等于没证。
     assert.ok(
       declares(out, "SessionRescueRemoteService"),
-      "本包读面类须以声明形态出现在单文件产物里（证明本包代码被内联，而非只剩字符串常量）",
+      "本包读取接口类须以声明形态出现在单文件产物里（证明本包代码被内联，而非只剩字符串常量）",
     );
   });
 
@@ -103,7 +103,7 @@ describe("buildHost()", () => {
   });
 });
 
-describe("读面基座的外部化面（dsh-typert-protocol）", () => {
+describe("读取接口服务基类的外部化（dsh-typert-protocol）", () => {
   it("remote 标记与服务基类保持裸说明符，不被复制进本包产物", async () => {
     const out = await builtHost();
     assert.ok(

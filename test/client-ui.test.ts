@@ -28,9 +28,9 @@ import {
   notifyHostConnected,
   apply as clientApply,
 } from "../src/client-entry.ts";
-// 0.1.7 隐式注册的单源桩件：条目 id 直接读 cordis.patch.yml，不在测试里抄一遍。
+// 0.1.7 隐式注册的唯一来源测试替身：条目 id 直接读 cordis.patch.yml，不在测试里抄一遍。
 import { patchEntryId } from "./config-refs.ts";
-// 卡片槽位 key 的单源桩件：bundle 包名直接读 ~/.dsh/profiles/web/package.json。
+// 卡片槽位 key 的唯一来源测试替身：bundle 包名直接读 ~/.dsh/profiles/web/package.json。
 import { profileBundleName } from "./profile-bundle.ts";
 import type { RescueStateBody } from "../lib/dock-state.ts";
 import type { RescueReader } from "../src/remote.ts";
@@ -44,7 +44,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 /** 本条目那张共享表单的官方面（src/client-entry.ts 的 EntryForm 同源）。 */
 type EntryForm = ConfigForm<Record<string, unknown>>;
 
-/** 官方快照面：6 位全必选。 */
+/** 官方快照类型：6 位全必选。 */
 type FormSnapshot = ConfigFormSnapshot<Record<string, unknown>>;
 
 /** 本卡渲染视模型的形状（src 的 CardSnapshot：status/writable 在官方快照上必选）。 */
@@ -190,7 +190,7 @@ function makeGate(): Gate {
   return { promise, release: resolve, reject };
 }
 
-// 测试适配器 `readerFromFetch` 的传输标签：生产读面走官方 Remote，这里用 fetch 替身
+// 测试适配器 `readerFromFetch` 的传输标签：生产读取接口走官方 Remote，这里用 fetch 替身
 // 驱动同一批 UI 分支，故按读方法各给一条稳定 URL（只在本文件内路由，不是线上路径）。
 const STATE_URL = "rescue/state";
 const CANCEL_URL = "rescue/cancel";
@@ -200,7 +200,7 @@ const POLICY_URL = "rescue/retry-policy";
 /** host 侧写端点的拒因文案（dock 只负责把它显示出来）。 */
 const HOST_REJECT_TEXT = "host rejected the write";
 
-// ── 槽位名：测试按名字取注册项，名字写错就是「取到 undefined ⇒ 用例空转」。 ──
+// ── 槽位名：测试按名字取注册项，名字写错就是「取到 undefined ⇒ 用例没有实际校验」。 ──
 /** dock 的 list 槽位名。 */
 const DOCK_SLOT = "conversation.input.dock";
 /** 配置卡的 keyed 槽位名（0.1.6 起取代 settings.plugin.item）。 */
@@ -248,7 +248,7 @@ async function postFetch(url: string, body?: unknown): Promise<unknown> {
   return (await res.json()) as unknown;
 }
 
-/** 测试适配器：把既有的 fetch 替身接到官方 Remote 读面形状上（生产代码不经过它）。 */
+/** 测试适配器：把既有的 fetch 替身接到官方 Remote 读取接口形状上（生产代码不经过它）。 */
 function readerFromFetch(): RescueReader {
   return {
     state: async () => {
@@ -322,14 +322,14 @@ function mountedSaveButton(): HTMLButtonElement {
 
 /** 不写盘的 mutate 替身（只观察快照变化之后的草稿归属）。 */
 function noopMutate(): boolean {
-  /* 卡片只在保存时读 mutate 的受理位，本用例不触发保存 */
+  /* 卡片只在保存时读 mutate 的受理结果，本用例不触发保存 */
   return true;
 }
 
 // happy-dom 运行环境夹具。本文件有 21 个并列的顶层套件，夹具必须对**每一条用例**生效：
 // 挂在文件顶层会被 vitest/require-top-level-describe 判成"用例与 hook 不在 describe 里"，
 // 塞进其中任意一个套件又只会罩住那一个套件——故夹具做成两个具名函数，由每个套件用
-// `beforeEach(resetDomEnv) / afterEach(teardownDomEnv)` 各自登记（作用面＝全部用例，与
+// `beforeEach(resetDomEnv) / afterEach(teardownDomEnv)` 各自登记（作用范围＝全部用例，与
 // 原先挂在根上一模一样；漏登记的套件会直接没有 window，当场红，不会静默放行）。
 function resetDomEnv(): void {
   win = new Window();
@@ -346,7 +346,7 @@ function resetDomEnv(): void {
     configurable: true,
     writable: true,
   });
-  // 浏览器的全局 Node 构造器：happy-dom 只挂在 window 上，而依赖它的代码（React 事件面）
+  // 浏览器的全局 Node 构造器：happy-dom 只挂在 window 上，而依赖它的代码（React 事件接口）
   // 读的是全局名；缺了这一位会在渲染期抛 ReferenceError。
   Object.defineProperty(globals, "Node", {
     value: win.Node,
@@ -384,7 +384,7 @@ async function teardownDomEnv(): Promise<void> {
 /** 取 React 19 挂在 DOM 节点上的真实 props（含 onChange/onKeyDown），直调绕过
  *  happy-dom 合成事件层（happy-dom 的合成事件到不了 React 19 root 监听器——
  *  danger-guard 已实证；只绕过 DOM 事件传输层，state/防抖/写通道全是真实链路）。 */
-// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Props 只在返回位出现是这里的设计：23 个调用点各自声明本用例关心的 __reactProps$ 形状；去掉泛形就得把 23 处类型断言散进用例，断言面比现在这个单一收口更大。
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- Props 只在返回位出现是这里的设计：23 个调用点各自声明本用例关心的 __reactProps$ 形状；去掉泛形就得把 23 处类型断言散进用例，断言比现在这个单一统一处理更大。
 function reactProps<Props>(element: Element): Props {
   const key = Object.keys(element).find((keyName) => keyName.startsWith("__reactProps$"));
   assert.ok(key !== undefined, "拿到 React props");
@@ -466,7 +466,7 @@ describe("rescueState 轮询契约", () => {
     assert.notEqual(rescueState.data, first, "内容变化才替换引用");
   });
 
-  it("读面缺席 → 一跳直接落空，不炸也不改快照", async () => {
+  it("读取接口缺席 → 一跳直接落空，不炸也不改快照", async () => {
     resetStateStore();
     rescueState.reader = undefined;
     await rescueState.refresh();
@@ -602,7 +602,7 @@ describe("rescueState 轮询契约", () => {
     await flush();
     // 上面那条 `assert.equal(rescueState.timer, null)` 走 `asserts actual is T`，会把
     // `rescueState.timer` 这一属性引用收窄成 null —— 而 `rescueState` 是模块单例，
-    // 重新订阅后 refresh 的 finally 又赋回了定时器（类型面收窄跟不上可变状态）。
+    // 重新订阅后 refresh 的 finally 又赋回了定时器（类型声明收窄跟不上可变状态）。
     // 这里改用 notEqual（同一判据、同等强度，且不带断言签名，不再污染后续 narrowing）。
     assert.notEqual(rescueState.timer, null, "二次订阅同样排好下一跳");
     unsub2();
@@ -708,7 +708,7 @@ describe("rescueState 轮询契约", () => {
   });
 });
 
-// ── postCancel / postToggle 的失败面 ─────────────────────────────────────
+// ── postCancel / postToggle 的失败 ─────────────────────────────────────
 
 describe("postCancel / postToggle 失败降级", () => {
   beforeEach(resetDomEnv);
@@ -728,7 +728,7 @@ describe("postCancel / postToggle 失败降级", () => {
   });
 });
 
-// ── notifyHostConnected 的守卫面 ─────────────────────────────────────────
+// ── notifyHostConnected 的守卫 ─────────────────────────────────────────
 
 describe("notifyHostConnected 守卫", () => {
   beforeEach(resetDomEnv);
@@ -742,7 +742,7 @@ describe("notifyHostConnected 守卫", () => {
     assert.equal(fetchCalls.length, 0, "ctx.on 缺失时不得发出任何 fetch");
   });
 
-  it("读面缺席 → 连接重置时静默跳过恢复通知", async () => {
+  it("读取接口缺席 → 连接重置时静默跳过恢复通知", async () => {
     const listeners = new Map<string, () => void>();
     rescueState.reader = undefined;
     notifyHostConnected({
@@ -757,7 +757,7 @@ describe("notifyHostConnected 守卫", () => {
     assert.equal(fetchCalls.length, 0, "没有读面就什么都不发");
   });
 
-  it("连接重置 → 调 resume；读面拒绝时吞掉并降级", async () => {
+  it("连接重置 → 调 resume；读取接口拒绝时吞掉并降级", async () => {
     const listeners = new Map<string, () => void>();
     let resumes = 0;
     rescueState.reader = {
@@ -799,7 +799,7 @@ interface MockClientCtx {
   setCalls: { field: string; value: unknown }[];
   /** 官方 `mutate` 的调用记录（ops + 固定 revision）。 */
   mutateCalls: { ops: readonly SettingsPathOpView[]; revision: number | undefined }[];
-  /** 覆盖 mutate 的受理位（缺省记录并受理）。 */
+  /** 覆盖 mutate 的受理结果（缺省记录并受理）。 */
   mutateImpl?: (
     ops: readonly SettingsPathOpView[],
     revision: number | undefined,
@@ -846,18 +846,18 @@ interface MockClientCtx {
   /** apply 取表单时交出的条目 id（= settings 命名空间，见 cordis.patch.yml）。 */
   formEntryIds: string[];
   /** 注册进官方 locale 的入参（命名空间 + 一次交齐的两语字典），供双语断言。
-   *  元素形状从生产侧的 register 签名派生，桩件与生产不会各自漂移。 */
+   *  元素形状从生产侧的 register 签名派生，测试替身与生产不会各自漂移。 */
   locales: { ns: Parameters<LocaleSeat["register"]>[0]; dicts: LocaleDictArg }[];
-  /** 生产 `apply` 的那一位原样引用：桩件实现一改形状即编译期红。 */
+  /** 生产 `apply` 的那一位原样引用：测试替身实现一改形状即编译期红。 */
   locale: LocaleSeat;
-  /** 同上：可选服务读取面直接取生产签名（官方 cordis `Context['get']`）。 */
+  /** 同上：可选服务读取直接取生产签名（官方 cordis `Context['get']`）。 */
   get: ApplyCtx["get"];
   /** 覆盖 bind 交出的 translator（默认中文）：双语用例据此让 apply 整条装配链
    *  走英文，等价于宿主在「设置 → 常规」里切了语言。 */
   bindImpl?: Translate;
 }
 
-/** 生产 ClientCtx（未导出，但可从 apply 的入参取到）——桩件的 locale 面跟着它走。 */
+/** 生产 ClientCtx（未导出，但可从 apply 的入参取到）——测试替身的 locale 面跟着它走。 */
 type ApplyCtx = Parameters<typeof clientApply>[0];
 /** 官方类型化 register 的字典参数（两语目录），同样从生产侧派生。 */
 type LocaleDictArg = Parameters<ApplyCtx["locale"]["register"]>[1];
@@ -890,10 +890,10 @@ function makeClientCtx(): MockClientCtx {
         return holder.ctx.setImpl(field, value);
       }
       holder.ctx?.setCalls.push({ field, value });
-      // 老的单字段写口：本卡已改用 mutate，保留它只为满足官方 ConfigForm 的类型面。
+      // 老的单字段写口：本卡已改用 mutate，保留它只为满足官方 ConfigForm 的类型声明。
       return true;
     },
-    // 官方 `ConfigForm` 的另两位：本卡只写不清（恢复默认不在设置卡面上），类型面要求
+    // 官方 `ConfigForm` 的另两位：本卡只写不清（恢复默认不在设置卡上），类型上要求
     // 它们在位——缺一位就编译不过，正是此次迁移要的防漂移。
     unset: (): Promise<boolean> => Promise.resolve(true),
     async mutate(
@@ -1067,7 +1067,11 @@ describe("apply 装配（幂等守卫 / slot 注册 / css effect）", () => {
     // 「apply 取配置表单」那条用例）。dock 那行的 `id: "session-rescue"` 是 list 槽的
     // 条目 id，与本 key 无关。
     assert.equal(ctx.registers[1]?.key, profileBundleName(), "设置卡按 bundle 包名 keyed");
-    assert.notEqual(ctx.registers[1].key, patchEntryId(), "key 写成裸条目 id = 插件页永不出卡");
+    assert.notEqual(
+      ctx.registers[1].key,
+      patchEntryId(),
+      "key 写成不带包名的条目 id = 插件页永不出卡",
+    );
     cleanup?.();
     assert.equal(ctx.registers.length, 1, "unregister 生效");
   });
@@ -1147,7 +1151,7 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
   it("sendSameSession：失败体整位缺 error 也不抛（按无 code/message 透传）", async () => {
     const ctx = applyWithCtx();
     ctx.bindings.set("s1", {
-      // 网关转发的是裸 JSON：`{ok:false}` 不带 error 也能到得了这一层。
+      // 网关转发的是原样 JSON：`{ok:false}` 不带 error 也能到得了这一层。
       prompt: async () => ({ ok: false }),
       cancel: async () => ({ ok: true }),
       updateQueue: async () => ({ ok: true }),
@@ -1165,7 +1169,7 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
     let cancelError: unknown = { message: "cancel no" };
     const session = {
       // 官方 `RemoteResult` 的失败支必带 `error`（`{ok:false, error: RemoteFailure}`，
-      // dsh-typert-protocol/lib/types/types.d.ts:67-73）：桩件要交就交完整形状，
+      // dsh-typert-protocol/lib/types/types.d.ts:67-73）：测试替身要交就交完整形状，
       // 空 `error` 正是生产侧「有失败、无 code/message」那一支的合法表达。
       prompt: async () => (promptOk ? { ok: true } : { ok: false, error: {} }),
       cancel: async () => ({ ok: false, error: cancelError }),
@@ -1441,7 +1445,7 @@ describe("RescueDockView 渲染决策", () => {
   afterEach(teardownDomEnv);
 
   it("宿主不带 slots 契约（useProjection 整个缺席）→ dock 照常渲染不抛错", async () => {
-    // 0.1.5 之前的宿主没有 useProjection：inbox seat 缺席时排队读面回空而不是抛。
+    // 0.1.5 之前的宿主没有 useProjection：inbox seat 缺席时排队读取接口回空而不是抛。
     const { container } = await mountDock({}, { ok: true, sessions: {} }, { noProjection: true });
     assert.ok(container.textContent.length > 0, "dock 仍渲染出内容");
     assert.equal(container.textContent.includes("undefined"), false, "缺席的投影不漏进文案");
@@ -1449,7 +1453,7 @@ describe("RescueDockView 渲染决策", () => {
 
   it("inbox 投影交回坏形状：非数组 / 条目 content 不是数组 / 条目不是对象 ⇒ 都退化成空队列", async () => {
     // 投影是宿主交进来的外部输入。这一炸炸掉的是整张 dock（用户连取消都点不到），
-    // 而不是队列里的一行，所以宽容面要有判据——本节标题此前是空头承诺。
+    // 而不是队列里的一行，所以宽容这条要有判据——本节标题此前是空头承诺。
     // 判据取「与空队列渲染得一模一样」：只断渲染出来了，半截文案漏进来也算过。
     const baseline = await mountDock({ queue: [] }, { ok: true, sessions: {} });
     const emptyText = baseline.container.textContent;
@@ -1468,7 +1472,7 @@ describe("RescueDockView 渲染决策", () => {
     await expectEmptyLike("条目不是对象", [42]);
   });
 
-  it("pending 横幅：显示倒计时；点取消 → 走 cancel 读面", async () => {
+  it("pending 横幅：显示倒计时；点取消 → 走 cancel 读取接口", async () => {
     const body: RescueStateBody = {
       ok: true,
       sessions: {
@@ -1751,7 +1755,7 @@ interface SettingsPropsForTest {
   /** 框架把 hooks.card 映射成 useCard prop：快照形状即 src 的 CardSnapshot
    *  （status/writable 都是官方必选位，不再用 unknown 假装它们会缺）。 */
   useCard: (sel: (snap: CardSnapshotView) => unknown) => unknown;
-  /** 官方 mutate：一次原子写入，resolve 受理位。 */
+  /** 官方 mutate：一次原子写入，resolve 受理结果。 */
   mutate: (ops: readonly SettingsPathOpView[], revision?: number) => unknown;
   /** 保存时固定一次的 revision。 */
   revision: () => number | undefined;
@@ -1768,7 +1772,7 @@ function settingsCardComponent(): unknown {
   return ctx.registers[0]!.component;
 }
 
-/** 挂载配置表单（plugins.bundle.config 的 page 视图：表单直渲，无折叠外壳）。 */
+/** 挂载配置表单（plugins.bundle.config 的 page 视图：表单直渲，不带展开/收起的卡片 外壳）。 */
 async function mountSettingsCard(
   value: Record<string, unknown>,
   opts: {
@@ -1874,7 +1878,7 @@ describe("RescueSettingsCard 设置卡", () => {
     assert.equal(sw!.disabled, true);
   });
 
-  it("修改 providerExcludes 草稿 → 保存 → commitTouched 落盘数组", async () => {
+  it("修改 providerExcludes 草稿 → 保存 → commitTouched 写到磁盘数组", async () => {
     const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       providerExcludes: [],
@@ -1942,7 +1946,7 @@ describe("RescueSettingsCard 设置卡", () => {
     assert.equal(mountedSaveButton().disabled, false, "与最新快照不同 ⇒ 确有改动");
   });
 
-  it("数值行：以秒键入 → 保存按毫秒落盘", async () => {
+  it("数值行：以秒键入 → 保存按毫秒写到磁盘", async () => {
     const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       resumeDelayMs: 10_000,
@@ -2035,7 +2039,7 @@ describe("RescueSettingsCard 设置卡", () => {
   });
 
   it("数字栏键入即上报这一击的新值（不是上一次渲染的旧草稿）", async () => {
-    // 回归护栏：旧实现的 onChange 从闭包旧草稿取值，键入 5 落盘的却是上一个值 3。
+    // 回归护栏：旧实现的 onChange 从闭包旧草稿取值，键入 5 写到磁盘的却是上一个值 3。
     const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       maxResumes: 3,
@@ -2048,7 +2052,7 @@ describe("RescueSettingsCard 设置卡", () => {
     });
     const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
     assert.equal(saveBtn.disabled, false, "键入 5 就是一条待保存的改动");
-    // 上报的值本身必须是这一击的 5：只断回显不断落盘时，提交侧换回旧值这条用例照样绿。
+    // 上报的值本身必须是这一击的 5：只断回显不断写到磁盘时，提交侧换回旧值这条用例照样绿。
     assert.equal(input.value, "5", "输入框回显这一击的新值");
     await act(async () => {
       saveBtn.click();
@@ -2062,7 +2066,7 @@ describe("RescueSettingsCard 设置卡", () => {
 
   it("清空数字栏（全选 + Delete）不上报 0：空草稿等于没填", async () => {
     // `Number("")` 是 **0**：不设这一道的话，抹掉 maxResumes 会被当成「设成 0」
-    // 记成改动并落盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
+    // 记成改动并写到磁盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
     const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       maxResumes: 3,
@@ -2086,7 +2090,7 @@ describe("RetryPolicySection 重试策略区块", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
-  it("加载 → providers 行（档位推断）→ 改档位 → 保存落盘 POST", async () => {
+  it("加载 → providers 行（档位推断）→ 改档位 → 保存写到磁盘 POST", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return {
@@ -2137,7 +2141,7 @@ describe("RetryPolicySection 重试策略区块", () => {
     assert.ok(container.textContent.includes("不可用"), "错误态文案");
   });
 
-  it("落盘抛错（POST reject）→ 保存失败文案", async () => {
+  it("写到磁盘抛错（POST reject）→ 保存失败文案", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return {
@@ -2164,9 +2168,9 @@ describe("RetryPolicySection 重试策略区块", () => {
   });
 });
 
-// ── /state wire 载荷防御面与轮询循环（纯逻辑，不挂 DOM）────────────────────
+// ── /state wire 载荷防御与轮询循环（纯逻辑，不挂 DOM）────────────────────
 
-describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外部输入面）", () => {
+describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外部输入框状态）", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
@@ -2274,10 +2278,10 @@ describe("rescueState：/state 坏形状逐字段降级（wire 是唯一的外�
     assert.equal(rescueState.timer, null);
   });
 
-  it("无 pending 走慢档：下一跳按 IDLE 档排程，而不是 1Hz 空转", async () => {
+  it("无 pending 走慢档：下一跳按 IDLE 档排程，而不是 1Hz 空轮询", async () => {
     stubFetch(() => ({ ok: true, body: { ok: true, sessions: {} } }));
     // 判据落在**排程延迟**上，不是「等 1.3 秒看有没有第二发」：无 pending 的下一跳是
-    // IDLE_POLL_MS(5s)，1.3s 窗口里等不到既证不了实现对、也只白等一秒（旧实现正是空转 1Hz）。
+    // IDLE_POLL_MS(5s)，1.3s 窗口里等不到既证不了实现对、也只白等一秒（旧实现正是 1Hz 空轮询）。
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const unsubscribe = rescueState.subscribe(() => {
       /* 计数无关 */
@@ -2473,7 +2477,7 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
     });
     const busyBtn = buttonContaining(container, "发送中…");
     assert.ok(busyBtn, "busy 态按钮文案");
-    // React 19 不在 disabled 按钮上派发 click（探针实证）：重入闸门只能由 handler
+    // React 19 不在 disabled 按钮上派发 click（实测）：重入闸门只能由 handler
     // 直调命中——它守的是「事件层漏过来时也只发一次」这条不变量。
     await act(async () => {
       reactProps<{ onClick: () => void }>(busyBtn).onClick();
@@ -2579,7 +2583,7 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
   });
 });
 
-// ── dock 动作行与 host 写通道（取消 / 开关）的失败面 ──────────────────────
+// ── dock 动作行与 host 写通道（取消 / 开关）的失败 ──────────────────────
 
 const turnErrorNodes: DockNode[] = [
   { kind: TURN_ERROR_KIND, seq: 2, turn: 1, message: "boom", code: "X" },
@@ -2651,7 +2655,7 @@ describe("dock 动作行与 host 写通道", () => {
     assert.ok(container.textContent.includes("dock-bare"), "动作 reject(非 Error) 面");
   });
 
-  it("继续输出走同一外壳；成功时不显示错误条", async () => {
+  it("继续输出走同一个 外壳；成功时不显示错误条", async () => {
     const { container, stub } = await mountDock(
       {
         nodes: [
@@ -2756,7 +2760,7 @@ describe("dock 动作行与 host 写通道", () => {
     assert.equal(okHost.textContent.includes("未生效"), false, "成功路径不留错误条");
   });
 
-  it("读面缺席 → 会话动作直接失败并可见", async () => {
+  it("读取接口缺席 → 会话动作直接失败并可见", async () => {
     const body: RescueStateBody = {
       ok: true,
       sessions: {
@@ -2800,9 +2804,9 @@ describe("dock 动作行与 host 写通道", () => {
   });
 });
 
-// ── 真实注入面：cardStore 快照稳定化 + set 的写后复读 ─────────────────────
+// ── 真实注入：cardStore 快照稳定化 + set 的写后复读 ─────────────────────
 
-/** 官方 `ConfigForm.mutate` 的 op 视图（从被测表单类型派生，不手抄形状）。 */
+/** 官方 `ConfigForm.mutate` 的 op 视图（从被测表单类型派生，不另抄形状）。 */
 type SettingsPathOpView = Parameters<MockClientCtx["scope"]["mutate"]>[0][number];
 
 interface InjectedCardStore {
@@ -2811,7 +2815,7 @@ interface InjectedCardStore {
   subscribe: (listener: () => void) => () => void;
 }
 
-/** 取 plugins.bundle.config 的注入面（真实 cardStore + 绑到 scope 的 mutate/revision）。 */
+/** 取 plugins.bundle.config 的注入（真实 cardStore + 绑到 scope 的 mutate/revision）。 */
 function settingsWiring(ctx: MockClientCtx): {
   card: InjectedCardStore;
   mutate: (ops: readonly SettingsPathOpView[], revision?: number) => Promise<boolean>;
@@ -2839,10 +2843,10 @@ function settingsWiring(ctx: MockClientCtx): {
   };
 }
 
-/** 把 mock 的官方配置表单变成"宿主真会落盘"的形态：写入即换快照身份。
- *  accept=false 模拟宿主校验拒绝——快照纹丝不动，且受理位回 false（官方
+/** 把 mock 的官方配置表单变成"宿主真会写到磁盘"的形态：写入即换快照身份。
+ *  accept=false 模拟宿主校验拒绝——快照纹丝不动，且受理结果回 false（官方
  *  `ConfigForm.set`：拒绝/跳过回 false，不抛）。卡片的判定点仍是事后复读，
- *  故本桩件的失败路径与 0.1.6 完全同形。 */
+ *  故本测试替身的失败路径与 0.1.6 完全同形。 */
 function reflectingScope(
   ctx: MockClientCtx,
   initial: Record<string, unknown>,
@@ -2866,7 +2870,7 @@ function reflectingScope(
   ctx.scope.getSnapshot = () => snapshot;
 }
 
-/** 用真实注入面（hooks.card + set + t）挂载设置卡，而不是测试自己的 useCard 替身。 */
+/** 用真实注入（hooks.card + set + t）挂载设置卡，而不是测试自己的 useCard 替身。 */
 async function mountInjectedSettingsCard(ctx: MockClientCtx): Promise<HTMLElement> {
   const { card, mutate, revision, t, component } = settingsWiring(ctx);
   const comp = component as React.ComponentType<SettingsPropsForTest>;
@@ -2917,7 +2921,7 @@ describe("cardStore：快照引用稳定化与投影降级", () => {
       value: { enabled: false },
     });
     // 原用例在这里喂 `value:"坏形状"` 与整个快照 `null`，断言它们被归一成空值。那是
-    // 生产面写 `getSnapshot: () => unknown` 才存在的补救；绑官方后这些形状**不可表示**
+    // 生产代码写 `getSnapshot: () => unknown` 才存在的补救；绑官方后这些形状**不可表示**
     // （provider 侧 decode/derive 已把住这一层），故改钉官方真会送来的两态：
     // ① 首个快照受理前 value/revision 缺席 → 视图落到空对象；② memory 模式 writable 假。
     ctx.scope.getSnapshot = () =>
@@ -3116,7 +3120,7 @@ describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
   });
 });
 
-// ── RetryPolicySection：传输面失败与暂存语义 ──────────────────────────────
+// ── RetryPolicySection：传输失败与暂存语义 ──────────────────────────────
 
 function callsTo(url: string): number {
   return fetchCalls.filter((entry) => entry.url.startsWith(url)).length;
@@ -3169,7 +3173,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     assert.ok(!/always · max /u.test(container.textContent));
   });
 
-  it("连续两次保存各自落盘：成功清空暂存，第二次照常发", async () => {
+  it("连续两次保存各自写到磁盘：成功清空暂存，第二次照常发", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return {
@@ -3196,7 +3200,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     assert.equal(callsTo(POLICY_URL), 2, "第二次保存仍发出写请求");
   });
 
-  it("host 拒绝落盘 → 保留暂存并显示原因", async () => {
+  it("host 拒绝写到磁盘 → 保留暂存并显示原因", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return { ok: true, body: { ok: true, providers: [xkiroRow] } };
@@ -3213,7 +3217,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     assert.equal(callsTo(POLICY_URL), 1, "被拒一次就交回用户，不自动重试");
   });
 
-  it("落盘 {ok:false} 且无 error → 回退到本包的「宿主拒绝且未给原因」文案", async () => {
+  it("写到磁盘 {ok:false} 且无 error → 回退到本包的「宿主拒绝且未给原因」文案", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return { ok: true, body: { ok: true, providers: [xkiroRow] } };
@@ -3232,7 +3236,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     );
   });
 
-  it("读面中途缺席 → 保存报「远端面不可用」且保留暂存", async () => {
+  it("读取接口中途缺席 → 保存报「远程通道不可用」且保留暂存", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return { ok: true, body: { ok: true, providers: [xkiroRow] } };
@@ -3330,7 +3334,7 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
-  /** 一条瞬时失败待办：横幅 + 取消按钮 + 开关行，覆盖 dock 三类文案面。 */
+  /** 一条瞬时失败待办：横幅 + 取消按钮 + 开关行，覆盖 dock 三类文案。 */
   const pendingBody: RescueStateBody = {
     ok: true,
     sessions: {
@@ -3369,7 +3373,7 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
   });
 
   it("en 装配渲染整张设置卡：字段与按钮是英文，且不残留中文", async () => {
-    // 走真实注入面：t 由 apply 的 ctx.locale.bind 产出、经 slot payload 下发到卡片 props。
+    // 走真实注入：t 由 apply 的 ctx.locale.bind 产出、经 slot payload 下发到卡片 props。
     const ctx = applyWithCtx(tEn);
     reflectingScope(ctx, { enabled: true, providerExcludes: [] }, true);
     const container = await mountInjectedSettingsCard(ctx);

@@ -11,7 +11,7 @@
 import { RESCUE_FACTS_KEY, rescueFactsProjection } from "./turn-facts.ts";
 
 /**
- * `ctx.sessionProjections` 的本包读面。`stateOf` 的第一参按 `unknown` 收（官方钉名义类
+ * `ctx.sessionProjections` 的本包读取接口。`stateOf` 的第一参按 `unknown` 收（官方钉名义类
  * `Session`，替身会话永远满足不了）；`register` 的返回域按 `unknown` 收，理由见文件头。
  */
 export interface ProjectionsRegistry {
@@ -88,7 +88,7 @@ export async function mountFactsReader(
   try {
     publish(read);
   } catch (error: unknown) {
-    // 调用方只在拿到返回的释放函数时才记账；`publish` 抛错时它会把这次挂载当成「没装上」，
+    // 调用方只在拿到返回的释放函数时才记录下来；`publish` 抛错时它会把这次挂载当成「没装上」，
     // 而注册其实已经成功——不在这里释放就是一条静默泄漏（旧宿主上还多一个常驻 effect）。
     release();
     throw error;

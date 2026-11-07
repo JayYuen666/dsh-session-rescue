@@ -6,21 +6,21 @@
 
 ## 0.1.8
 
-宿主开发基线抬到 `0.2.2-rc.1`（支持窗口 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 未变），`engines.node` 地板抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。调度、恢复与投影的判定逻辑不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
+宿主开发基线抬到 `0.2.2-rc.1`（支持窗口 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 未变），`engines.node` 下限抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。调度、恢复与投影的判定逻辑不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
 
 ### Changed
 
 - **shared 抬到 0.2.4**：catalog、生成物与 lockfile 随之同步；shared 新增的普通依赖 `@deepseek-ai/dsh-fs-patch` 由 shared 自己安装，本包不重复声明。
-- **宿主开发基线**：`devDependencies` 的 dsh 家族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，cordis 插件组四枚分别抬到 `1.1.0`（timer 为 `1.2.0`），`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。`engines.dsh` 与三枚 `@deepseek-ai/dsh*` peer 保持 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 未动；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐——写确切值会在另一条线上被 npm 的严格 peer 解析拦在 `ERESOLVE`。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`，取值取自宿主自己的地板。
+- **宿主开发基线**：`devDependencies` 的 dsh 家族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，cordis 插件组四枚分别抬到 `1.1.0`（timer 为 `1.2.0`），`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。`engines.dsh` 与三枚 `@deepseek-ai/dsh*` peer 保持 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 未动；`@deepseek-ai/schemastery` 的 peer 由 `^3.18.6-alpha.1` 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐——写确切值会在另一条线上被 npm 的严格 peer 解析拦在 `ERESOLVE`。`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`，取值取自宿主自己的下限。
 - **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 与 `src/remote.ts` 的运行期值导入迁到 `./client`（只换说明符，没有逻辑改动），`package.json` 新增 `dsh.bundle.client.external`，`build-client.mjs` 的外置清单同步；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行（写 id 会在插件页多出一个可关闭的组件，关掉后设置卡失去组件供应）。
 - **CI 的 node 矩阵收敛**：`ci.yml` 的 `node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，两份 workflow 的 `node-version` 由 `24` 改为 `24.9`，与 `engines.node` 同值。
-- **文档纠偏**：README 的 shared 值导入名单原列 `lib/card-apply` 与 `lib/card-diff`，这两位在产物里已不存在——按 `host.js` / `client.js` 现量改为四枚 `lib/*`（host 侧）加 `client`（client 侧）；`host.js` 值导入的宿主包由「两枚」改为三枚（原文漏了 `@deepseek-ai/dsh-typert-protocol`）；`insert:` 块由「本包那一行」改为「两条条目」并写明 shared 那行为何不写 id；门禁职责那句把两条规则写反了——精确钉版那条扫的是 **devDependencies**，peer 那条要求的是与 `engines.dsh` 同一条窗口范围，原文说成「peer 精确钉且同范围」。
+- **文档纠偏**：README 的 shared 值导入名单原列 `lib/card-apply` 与 `lib/card-diff`，这两位在产物里已不存在——按 `host.js` / `client.js` 当场实测改为四枚 `lib/*`（host 侧）加 `client`（client 侧）；`host.js` 值导入的宿主包由「两枚」改为三枚（原文漏了 `@deepseek-ai/dsh-typert-protocol`）；`insert:` 块由「本包那一行」改为「两条条目」并写明 shared 那行为何不写 id；检查职责那句把两条规则写反了——精确钉版那条扫的是 **devDependencies**，peer 那条要求的是与 `engines.dsh` 同一条窗口范围，原文说成「peer 精确钉且同范围」。
 
 ## 0.1.7
 
-一轮围绕「记录被淘汰后状态仍然成立」的加固：调度器把配额记忆留在淘汰之外，回合读面统一按最后一次结果；
+一轮围绕「记录被淘汰后状态仍然成立」的加固：调度器把配额记忆留在淘汰之外，回合读取接口统一按最后一次结果；
 客户端重试档位不再把 always 显示成次数上限；发布链把守卫前移、产物改为 tarball 交棒，
-测试补上 SEED 解析、文档同源与工作流钉版三道门禁。
+测试补上 SEED 解析、文档同源与工作流钉版三道检查。
 
 ### Changed
 
@@ -33,7 +33,7 @@
   淘汰时仍能复位或递增。`MAX_RESUMES_REASON` 导出，调用方与测试不再抄字面量。
 - **`restorePending` 只接受挂起来源**：记录必须处于 `suspended` 且当前没有 pending，否则快照作废；
   脏快照不再覆盖正常记录。
-- **回合读面 last-wins**（`lib/turn-facts.ts`、`lib/turn-scope.ts`）：opener 查找改 `findLast`；
+- **回合读取接口 last-wins**（`lib/turn-facts.ts`、`lib/turn-scope.ts`）：opener 查找改 `findLast`；
   中断助手消息与 `turn-error` 按 `seq` 取最后一条，不再依赖 nodes 排列顺序。
   `TranscriptView.running` / `removed` 改为只读，客户端不再有写回宿主快照位的口子。
 - **客户端重试档位**（`src/client-entry.ts`）：`always` 档显示 `unlimited`，不再把宿主兜底的
@@ -67,7 +67,7 @@
 
 ## 0.1.6
 
-一轮跨面审查修复：调度器加容量闸门、投影读面改三态、失败分类与编辑重发判据收口，
+一轮跨模块审查修复：调度器加容量闸门、投影读取接口改三态、失败分类与编辑重发判据统一处理，
 测试补 e2e 与 platform 两层；宿主开发线抬升，发布链同步加固。
 
 ### Changed
@@ -78,16 +78,16 @@
   `prepare` **之前**先跑 `prepack`（实测 `pnpm pack` 与 `pnpm publish --dry-run --no-git-checks`
   的回执里两段都出现），同一条发布因此把整套构建跑两遍。删掉 `prepack`——`prepare` 在两条路上
   都会被跑，产物照样在打包前就位。
-- **投影挂载的两处收口**：`handle.dispose()` 的拒绝不再变成 `unhandledRejection`（它只说明注册
+- **投影挂载的两处统一处理**：`handle.dispose()` 的拒绝不再变成 `unhandledRejection`（它只说明注册
   已随宿主卸载被撤销，不是需要重启插件的错误，改为一条 `[session-rescue]` 警告）；`publish`
   抛错时先释放这次注册再抛——否则调用方把这次挂载当成「没装上」，注册却已经成功，泄漏一个常驻 effect。
 - **文案**：英文 `unfinishedLessonDetail` 不再把复数名词硬连在 `{count}` 后（`count=1` 时是语法
   错误，而这条 detail 会持久化进 lesson-loop），改为 `… still had open items (open count: {count})`；
   中文 `unfinishedText` 与英文对齐成「从清单中未完成的**第一项**继续执行」。
 - **调度器容量闸门**（`lib/resume-scheduler.ts`）：新增 `hasCapacity()`，200 条满且无可淘汰空闲记录时不再新建排期（skip 理由 `capacity`）；`host.ts` 对 capacity skip 升 warn 并去重，任一次 schedule 成功后回落再武装，堵会话表无界膨胀。
-- **投影读面三态化**（`lib/turn-facts.ts`）：`asFacts` 由二值改三态（absent / rejected / facts），`host.ts` 对 rejected 每会话报一次 stderr——投影降级的原因不再与「投影缺席」混叠。
+- **投影读取接口三态化**（`lib/turn-facts.ts`）：`asFacts` 由二值改三态（absent / rejected / facts），`host.ts` 对 rejected 每会话报一次 stderr——投影降级的原因不再与「投影缺席」混叠。
 - **失败分类判序与白名单**（`lib/failure-classify.ts`）：请求级重发把 `RATE_LIMIT` 提到余额措辞之前（与回合级同序，属性层钉死）；`UNRECOGNIZED_FINISH_REASON` 白名单扩 `tool_calls` / `function_call` / `length` / `safety` / `recitation`；余额耗尽不再报「疑似限流」。
-- **客户端写通道**（`src/client-entry.ts`）：取消/开关在途时按钮 disabled；重试档位改逐项串行落盘（并行写入会撞 settings-revision-conflict）；stopAndReask 的 cancel 被拒改报「重问已入队」。
+- **客户端写通道**（`src/client-entry.ts`）：取消/开关在途时按钮 disabled；重试档位改逐项串行写到磁盘（并行写入会撞 settings-revision-conflict）；stopAndReask 的 cancel 被拒改报「重问已入队」。
 - **包元数据**：author 改对象形；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；devDependencies 新增 `@deepseek-ai/dsh-app-boot` / `@deepseek-ai/dsh-config-editor`；catalog 的 shared 抬到 0.2.2。
 - **文档**：两份 README 与 `docs/DETAIL(.zh).md` 重写配额清零语义、`providerExcludes` 精确匹配、重启清冷却、开关台账满额 409、429 窄化；ci.yml 的 actionlint 改按文件豁免。
 
@@ -104,12 +104,12 @@
 ### Added
 
 - **测试两层**：`test/e2e/rescue-loop.e2e.test.ts`（真 AgentLoop + 官方 mock LLM 的多回合/跨会话全旅程）与 `test/platform/scheduler.platform.test.ts`（非单调时钟、容量饱和、0 是合法时钟），check 链相应新增 `test:e2e`、`test:platform` 两腿；另新增 `test/integration/settings-real.test.ts`（真 app-boot + config-editor 钉 volatile 投影与 CAS）与 `test/projection-reader.test.ts`。
-- **事件字段单源**：新增 `lib/event-fields.ts`（投影折叠与回退扫描的事件读取判据）。
+- **事件字段唯一来源**：新增 `lib/event-fields.ts`（投影折叠与回退扫描的事件读取判据）。
 
 ## 0.1.5
 
 这一版把失败归因改到「本次请求实际走的线路」，投影挂载改成兼容新旧宿主协议的时序，
-设置卡与 dock 读面统一到 shared 组件和 zod。
+设置卡与 dock 读取接口统一到 shared 组件和 zod。
 
 ### Changed
 
@@ -122,12 +122,12 @@
   中性显示，原型链键不会被写进表。
 - **设置卡迁到 shared 组件与 zod**：时间输入按秒录入、按毫秒存，越界就地提示；保存条改整批拒绝文案。
 - **客户端用例的 React 基线回到 `^19.3.0` / `^19.3.1`**：0.1.2 曾把 devDependencies 落回
-  `18.3.1` 并注明「宿主锁的是 React 18.3.1」，这一版按 `@types/react` 的 catalog 口径与客户端
+  `18.3.1` 并注明「宿主锁的是 React 18.3.1」，这一版按 `@types/react` 的 catalog 规则与客户端
   代码使用的 API 面统一回 19。宿主运行期提供的仍是 18.x（`packages/client/*` 声明 `^18.2.0`），
-  客户端代码因此**不得**使用 React 19 独有 API——这条约束不变，只是验收环境与类型面回到同一 major。
+  客户端代码因此**不得**使用 React 19 独有 API——这条约束不变，只是验收环境与类型声明回到同一 major。
 - **构建与依赖**：client 产物按宿主 `PLATFORM_MODULES` 外置 zod；devDependencies 与 catalog/overrides
   抬到 `0.2.2-alpha.2`，`engines.dsh` 与 peer 保持 `^0.2.1-rc.3` 窗口，README 补滚动窗口说明。
-- **插件页展示面进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、`docs/DETAIL.zh.md`；
+- **插件页展示进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、`docs/DETAIL.zh.md`；
   `exports` 增加 `./locale/en.json` 与 `./locale/zh.json` 两条显式子路径（install-probe 不解引用
   通配键），`files` 收进 locale 与 docs。
 - **正则常量提取**：失败分类里的余额耗尽与限速措辞提取为命名常量，行为不变。
@@ -142,10 +142,10 @@
 ### Changed
 
 - **失败分类器三个入口共用同一份字段投影与判序**：裸 429 只在 HTTP 语境里算限速证据；已知的 `finish_reason` 不再被当成上游异常；408/425 判瞬时，402 归永久，余额证据排在状态码之前。
-- **回合事实与评审面收口**：未闭合待办改成白名单，未知状态不再算「未完成」；缺 `turn` 的调用按本轮窗口判「等用户」；`retryState` 取官方字面量联合，没有 `turn/end` 时不再按节点区间判工具活动。
-- **Remote 数据面**：`$mount` 失败不再缓存；空的 `sessionId` / `provider` / `preset` 直接拒绝；六个端点收敛到同一条 `invoke`，错误带 `cause`。
+- **回合事实与评审统一处理**：未闭合待办改成白名单，未知状态不再算「未完成」；缺 `turn` 的调用按本轮窗口判「等用户」；`retryState` 取官方字面量联合，没有 `turn/end` 时不再按节点区间判工具活动。
+- **Remote 数据那一栏**：`$mount` 失败不再缓存；空的 `sessionId` / `provider` / `preset` 直接拒绝；六个端点收敛到同一条 `invoke`，错误带 `cause`。
 - **设置卡文案**改用 `{detail}` 占位，并补三条远端不可用文案。
-- **定时器释放收敛为 `releaseTimer`**（纯重构，行为不变）。
+- **定时器释放统一成 `releaseTimer`**（纯重构，行为不变）。
 - **宿主线抬到 `0.2.1-rc.3`**：`engines.dsh`、peer/dev 依赖、overrides 与 README 徽标/正文同值。
 - **CI/CodeQL/Scorecard/Dependabot 与 Windows 矩阵补齐**：构建脚本统一走 shared 的 `lib/build-*`，产物仍落 `dist/`。
 
@@ -167,14 +167,14 @@
 
 ## 0.1.2
 
-这一版把数据面迁到官方 Typert Remote，并修掉非回环绑定的信任闸门回归；宿主生态升到 alpha.2 后继续跟到 rc.2，发布面补上类型声明、tarball 内容与 registry 元数据门禁。
+这一版把数据那一栏迁到官方 Typert Remote，并修掉非回环绑定的信任闸门回归；宿主生态升到 alpha.2 后继续跟到 rc.2，发布清单补上类型声明、tarball 内容与 registry 元数据检查。
 
-一类自动注入的判据也变了：**goal 轮次不再一律让路**。其余改动集中在客户端侧的可见性与发布/构建面，注入文案与默认配置未改。
+一类自动注入的判据也变了：**goal 轮次不再一律让路**。其余改动集中在客户端侧的可见性与发布/构建流程，注入文案与默认配置未改。
 
 ### Changed
 
-- **六条 `/_dsh/session-rescue/*` 端点改为官方 `sessionRescue` Remote**：客户端改走 source-mode descriptor + remote 读面；HTTP 路由、CSRF、`shared/lib/http`、`shared/lib/trust`、`connection.requestRejection` 与 webServer 子 fiber 一并删除。
-- **发布面补齐 `types/` 声明产物**：构建后把相对 `.ts` 说明符改写成 `.js`；`exports["."].types`、keywords/homepage/bugs/engines.node 与 `files` 同步。
+- **六条 `/_dsh/session-rescue/*` 端点改为官方 `sessionRescue` Remote**：客户端改走 source-mode descriptor + remote 读取接口；HTTP 路由、CSRF、`shared/lib/http`、`shared/lib/trust`、`connection.requestRejection` 与 webServer 子 fiber 一并删除。
+- **发布清单补齐 `types/` 声明产物**：构建后把相对 `.ts` 的说明符改写成 `.js`；`exports["."].types`、keywords/homepage/bugs/engines.node 与 `files` 同步。
 - **门禁补齐**：包根每份 `.md` 都进发布面；声明入口存在且不比源码旧、不含本机绝对路径与 pnpm 内容寻址目录；registry 与宿主发现面四道检查；产物体积预算。
 - **publish.yml 加固**：concurrency、action 钉 commit SHA、`--provenance`、`--publish-wait-timeout`、registry 预检，不再打印 token 长度。
 - **goal 轮次：让路判据从排期侧移到触发侧，driver 停机后由本包接管**。官方
@@ -191,12 +191,12 @@
 - `devDependencies` 的 `react`/`react-dom` 从 `^19.3.0` 改为 `18.3.1`：宿主锁的是 React 18.3.1，
   客户端 bundle 又把 react 外部化，测试层跑在 19 上等于用产品从不运行的那个 major 验收 UI。整套
   客户端用例（含真实 happy-dom + react-dom 挂载）在 18.3.1 上重跑通过。`@types/react*` 仍随 catalog
-  取 19.3.0——类型面比运行时新，故客户端代码不得使用 React 19 独有 API 与语法糖。
+  取 19.3.0——类型声明比运行时新，故客户端代码不得使用 React 19 独有 API 与语法糖。
   （更正：该回落未保留，0.1.5 已把 devDependencies 写回 `^19.3.0`/`^19.3.1`，见该版 Changed 里的那一条；
   「客户端代码不得使用 React 19 独有 API」这条约束仍然有效。）
 - `engines.dsh` 从 `>=0.2.1-alpha.2` 改为与 peer 同一份范围（随宿主线升到 `^0.2.1-rc.2`）。宿主装插件时校验的是
   peer，`0.` 主版本上的 `^` 带上界（<0.3.0），而 `>=` 没有——旧写法等于对外宣称兼容 0.3/1.x，
-  宿主却会当场拒装。门禁断言随之从「同值」改成「同一份范围」。
+  宿主却会当场拒装。检查断言随之从「同值」改成「同一份范围」。
 - **客户端不再重复渲染排队区**：官方 `dsh-client-ui-conversation` 自己就往
   `conversation.input.dock` 注册了 `QueueDock`（`id="queue"`，逐行编辑/删除/插话都有），本包在
   同一条槽（`order=500`）按同一份 inbox 投影又列了一遍，同一批待发消息显示两次。删掉本包那份
@@ -220,7 +220,7 @@
 - `build-types.mjs` 不再走 `npx tsc`：`npx` 要在 PATH 上找 `npx`/`npx.cmd`，Windows 上
   `execFileSync` 不带 `shell: true` 就 ENOENT，pnpm 装的仓里 `npx` 本身也不保证存在。改为解析本地
   `typescript/bin/tsc` 并用 `process.execPath` 调用。
-- `src/client-entry.ts` 回到 `max-lines` 门槛内（写路径此前逐条出口各写一遍 403 重试语义，现收敛成
+- `src/client-entry.ts` 回到 `max-lines` 阈值内（写路径此前逐条返回路径各写一遍 403 重试语义，现收敛成
   一条共享写通道；`/state` 载荷解析器移入 `lib/dock-state.ts`，与它输出的类型同源）。
 - **显式瞬时码不再被配额措辞抢判**。`classifyFailure` 把文本兜底排在 code 路由之前，于是 provider
   把「本分钟速率已到顶」写进 message 时，`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`
@@ -230,7 +230,7 @@
   写进 `turn-facts` 的折叠态会让自家 schema 在读回时拒收整份快照，写进调度器的
   `lastHandledTurn` 更糟——水位比较 `turn <= lastHandledTurn` 对 NaN 恒判 false，那条会话的
   「旧轮重放」闸门从此永久失效，重放的旧回合既能复位配额又能再排一次注入，日志里一个字都不提。
-  现两侧都在入口处收口（同一条判据，`lib/turn-facts.ts` 与 `host.ts` 各有落点）。
+  现两侧都在入口处统一处理（同一条判据，`lib/turn-facts.ts` 与 `host.ts` 各有一处）。
 - `restorePending()` 不再为未知会话凭空造记录。旧写法走 `rec()`，于是「恢复一条已被 dispose/淘汰的
   挂起待办」拿到的是 counts 全 0 的新记录——`maxResumes` 这道防失控闸门被静默复位，且没有任何
   说明。现在记录不在位就返回 false，由调用方按「这一条补发不出去」处置。
@@ -241,14 +241,14 @@
   `goal-round-driver` + 真 AgentLoop + 官方 mock LLM 故障脚本。一条钉住「driver 只 disarm、
   本包接管恰好补发一条且不带 goal kind」，另一条钉住「窗口里 resume 之后同一条会话只留下 driver
   一个续跑者」。`@deepseek-ai/dsh-goal` 与 `@deepseek-ai/dsh-goal-round-driver` 按 `0.2.1-alpha.2`
-  进 devDependencies（只用于类型对账与这层装配；发布面里它们是可选条目，所以 `host.ts` 的读面
+  进 devDependencies（只用于类型对账与这层装配；发布清单里它们是可选条目，所以 `host.ts` 的读取接口
   仍按防御式本地投影，不把官方类型写进 `types/`）。
-- **集成层补齐真宿主语义与真传输面**（`test/integration/`，`npm run test:integration`，已接进
+- **集成层补齐真宿主语义与真实传输**（`test/integration/`，`npm run test:integration`，已接进
   `npm run check`，发布流水线因此也会跑）：`agent-loop.test.ts` 用官方 testkit 装真
   SessionStore/AgentLoop/投影注册表；`http-routes.test.ts` 与真 `WebServer` + 真 socket 对账
   成帧、Host 权威、keep-alive 与残断请求体；`abort-semantics.test.ts` 钉住「用户中止不 emit
   `agent/error`、不消耗续跑配额，之后的真瞬时失败照常续跑」；`goal-round.test.ts` 见上。
-  装配面抽到 `http-harness.ts` 单源，两个 HTTP 用例文件共读一份闸门形状。
+  装配抽到 `http-harness.ts` 唯一来源，两个 HTTP 用例文件共读一份闸门形状。
 - **属性/模糊层**（`test/property/` + `test/integration/http-fuzz.test.ts`，`npm run test:property`）。
   `fast-check` 进 devDependencies。四份属性用例覆盖失败分类判序、回合事实折叠、`/state` 载荷解析，
   以及调度器的**状态机不变量**：随机指令序列驱动，逐步核对会话数上限、按 kind 的配额与冷却、
@@ -257,29 +257,29 @@
   信封完好、越权不得碰巧放行）。
   两层都带「判据必须真被走到」的计数守卫：`size: "max"` 之前 fast-check 默认只把 `maxLength` 当
   上界（实测 400 的上界默认只到 12 条），会话数上限那道闸门在短序列里永远碰不到，越界与淘汰两条
-  判据就成了空转的绿灯；守卫让「没走到」直接变红灯。调度器用例另外先把状态机灌过上限再腾出空闲位，
+ 判据就成了没有实际校验的通过结果；守卫让「没走到」直接变红灯。调度器用例另外先把状态机灌过上限再腾出空闲位，
   使这两支不靠概率命中。
 
 ## 0.1.1
 
-宿主生态与工具链升到当前发布线，并修掉一处会让局域网部署整片失效的信任闸门判据。**三类自动注入的判据、注入文案与默认配置未改**，改的是「跟谁对齐」以及发布面。
+宿主生态与工具链升到当前发布线，并修掉一处会让局域网部署整片失效的信任闸门判据。**三类自动注入的判据、注入文案与默认配置未改**，改的是「跟谁对齐」以及发布清单。
 
 ### Changed
 
-- `@deepseek-ai/dsh-*` 家族（41 枚）与 peer 的 `@deepseek-ai/dsh` 从 `0.2.1-alpha.1` 升到 `0.2.1-alpha.2`：`devDependencies`、`peerDependencies`、`pnpm-workspace.yaml` 的 `overrides` 与 `engines.dsh` 四处同值——`test/publish-manifest.test.ts` 要求它们与 peer 逐项相等，且一律精确钉（registry 的 `latest` 标签可能指向远早于宿主 ABI 的版本，`^`/`~` 会让消费方在没有测试的情况下换掉宿主类型面）。`@deepseek-ai/cordis` `4.0.5-alpha.1` 与 `@deepseek-ai/schemastery` `3.18.5-alpha.1` 不动：那是 alpha.2 自己声明的约束（`~4.0.5-alpha.1` / `~3.18.5-alpha.1`），registry 上没有更新的 alpha。
-- `@jayyuen66/dsh-plugin-shared` `^0.1.2` → `^0.1.4`：0.1.3 把宿主包从它自己的 `dependencies` 挪进 `peerDependencies`，消费方 profile（`nodeLinker: hoisted` + `autoInstallPeers: false`）因此不再物化出第二份宿主类型面；0.1.4 把那些 peer 钉到 `0.2.1-alpha.2`，依赖树里最后一处旧宿主需求随之清零。
+- `@deepseek-ai/dsh-*` 家族（41 枚）与 peer 的 `@deepseek-ai/dsh` 从 `0.2.1-alpha.1` 升到 `0.2.1-alpha.2`：`devDependencies`、`peerDependencies`、`pnpm-workspace.yaml` 的 `overrides` 与 `engines.dsh` 四处同值——`test/publish-manifest.test.ts` 要求它们与 peer 逐项相等，且一律精确钉（registry 的 `latest` 标签可能指向远早于宿主 ABI 的版本，`^`/`~` 会让消费方在没有测试的情况下换掉宿主类型声明）。`@deepseek-ai/cordis` `4.0.5-alpha.1` 与 `@deepseek-ai/schemastery` `3.18.5-alpha.1` 不动：那是 alpha.2 自己声明的约束（`~4.0.5-alpha.1` / `~3.18.5-alpha.1`），registry 上没有更新的 alpha。
+- `@jayyuen66/dsh-plugin-shared` `^0.1.2` → `^0.1.4`：0.1.3 把宿主包从它自己的 `dependencies` 挪进 `peerDependencies`，消费方 profile（`nodeLinker: hoisted` + `autoInstallPeers: false`）因此不再物化出第二份宿主类型；0.1.4 把那些 peer 对齐到 `0.2.1-alpha.2`，依赖树里最后一处旧宿主需求随之清零。
 - 工具链：`vitest`/`@vitest/coverage-v8` 5.0.3、`vite` 8.3.4、`rolldown` 1.2.13、`oxlint` 1.87.0、`oxfmt` 0.72.0、`oxlint-tsgolint` 7.0.2004、`happy-dom` 20.14.6、`@types/node` 26.6.5。
 - README 拆成两份语言纯净的文档：`README.md`（英文，registry 页面默认读它）与 `README.zh-CN.md`（中文），两份内容对等、互相链接。
 
 ### Fixed
 
-- **局域网绑定下六条 `/_dsh/session-rescue/*` 路由整片 403**。宿主 0.2.1-alpha.2 把 `WebServer` 的 `Config.host` 从 `'127.0.0.1' | '0.0.0.0'` 换成任意真实网卡地址字面量，并在载入时拒掉通配地址；本包那句 `webServer.host === "0.0.0.0"` 因此恒为 false，`servingNonLoopback` 再也传不到信任闸门，非回环部署会被 Host 腿判成 `untrusted host authority`。类型面放宽成 `string`，编译期抓不到，所以这道改判据只能落在门禁与文档上。现改用 shared 的 `isNonLoopbackBindHost(webServer.host)`——口径与官方 `isLoopbackHost` 对齐，且不必对本包只做类型消费的宿主包做值导入。
-- 源码注释里钉住的上游坐标全部按安装态重核：`@deepseek-ai/dsh-session` 的 `id`/`header`/`snapshotEvents` 与那两枚 `@deprecated` 行号、`@deepseek-ai/dsh-host-webserver` 的类与 `register`、`dsh-session-projection` 的 host-only `register` 重载、客户端侧 `slot-contract`/`sessions`/ui-chat 若干处；agent-loop 那条「对 retry 是裸 `continue`」的注记此前指错了文件也指错了行，真址是 `packages/core/agent-loop/src/agent.ts:523-526`。退避阶梯保留：上游到 alpha.2 仍然不插任何延迟。
+- **局域网绑定下六条 `/_dsh/session-rescue/*` 路由整片 403**。宿主 0.2.1-alpha.2 把 `WebServer` 的 `Config.host` 从 `'127.0.0.1' | '0.0.0.0'` 换成任意真实网卡地址字面量，并在载入时拒掉通配地址；本包那句 `webServer.host === "0.0.0.0"` 因此恒为 false，`servingNonLoopback` 再也传不到信任闸门，非回环部署会被 Host 腿判成 `untrusted host authority`。类型声明放宽成 `string`，编译期抓不到，所以这道改判据只能落在检查与文档上。现改用 shared 的 `isNonLoopbackBindHost(webServer.host)`——规则与官方 `isLoopbackHost` 对齐，且不必对本包只做类型消费的宿主包做值导入。
+- 源码注释里钉住的上游坐标全部按安装态重核：`@deepseek-ai/dsh-session` 的 `id`/`header`/`snapshotEvents` 与那两枚 `@deprecated` 行号、`@deepseek-ai/dsh-host-webserver` 的类与 `register`、`dsh-session-projection` 的 host-only `register` 重载、客户端侧 `slot-contract`/`sessions`/ui-chat 若干处；agent-loop 那条「对 retry 只是 `continue`」的注记此前指错了文件也指错了行，真址是 `packages/core/agent-loop/src/agent.ts:523-526`。退避阶梯保留：上游到 alpha.2 仍然不插任何延迟。
 
 ### Added
 
-- `types/` 声明产物：新增 `build-types.mjs` 与 `tsconfig.types.json`，`exports["."]` 加 `types` 条件，`npm run build:types` 接进 `check`/`prepack`/`prepare`。声明里的相对 `.ts` 说明符由脚本改写成 `.js`——`tsc` 会把 NodeNext 的源码后缀原样抄进 `.d.ts`，留着它消费方就解析不到。
+- `types/` 声明产物：新增 `build-types.mjs` 与 `tsconfig.types.json`，`exports["."]` 加 `types` 条件，`npm run build:types` 接进 `check`/`prepack`/`prepare`。声明里的相对 `.ts`说明符由脚本改写成 `.js`——`tsc` 会把 NodeNext 的源码后缀原样抄进 `.d.ts`，留着它消费方就解析不到。
 - 发布面门禁：包根每份 `.md` 都必须在 `files` 里（npm 只无条件附带 `README*` 与 `LICENSE`）；声明入口存在、声明不比源码旧、声明不含本机绝对路径与 pnpm 内容寻址目录、声明里的相对说明符指向产物后缀。
-- registry 与宿主发现面门禁：`keywords`/`homepage`/`bugs`/`repository` 四项与包名同源于同一个仓库归属；`engines.node` 存在且 `engines.dsh` 与 peer 的 dsh 同值（宿主装插件时校验的是 peer，从 dsh 0.1.7-rc 起还包括 `@deepseek-ai/dsh-*`）；`dsh` 段的 `manifestVersion`/`bundle.patch`/`client.platform` 齐备且 patch 文件随包发出；`files` 不打包源码面。
-- `test/dist-size.test.ts`：给 `host.js`、`client.js` 与入口声明设体积预算（按实测上浮约 25%）。产物刻意不 minify——压缩会抹掉跨包说明符字符串，让「依赖必须外部化」那两条断言变成恒绿。
-- 注释卫生门禁扩展：除日期外，再禁本机绝对路径、评审条目号、决策来源与修复过程的簿记、退役叙事，存量一并清掉。
+- registry 与宿主发现机制门禁：`keywords`/`homepage`/`bugs`/`repository` 四项与包名同源于同一个仓库归属；`engines.node` 存在且 `engines.dsh` 与 peer 的 dsh 同值（宿主装插件时校验的是 peer，从 dsh 0.1.7-rc 起还包括 `@deepseek-ai/dsh-*`）；`dsh` 段的 `manifestVersion`/`bundle.patch`/`client.platform` 齐备且 patch 文件随包发出；`files` 不打包源码范围。
+- `test/dist-size.test.ts`：给 `host.js`、`client.js` 与入口声明设体积预算（按实测值加约 25%）。产物刻意不 minify——压缩会抹掉跨包说明符字符串，让「依赖必须外部化」那两条断言变成永远通过。
+- 注释卫生检查扩展：除日期外，再禁本机绝对路径、评审条目号、决策来源与修复过程的簿记、退役叙事，存量一并清掉。

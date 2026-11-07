@@ -3,7 +3,7 @@
 /// <reference types="node" />
 // 构建 host.js：rolldown 把 host.ts 及其 `./lib/*` 依赖打成单文件 ESM，落在**包根**
 // （与源码同目录，故 `import.meta.dirname` 的语义与源码态完全一致）。
-// 编排（依赖段外部化、输出守卫、region 正典化、moduleIds 结构性判据）统一住在
+// 编排（依赖段外部化、输出守卫、region 路径规范化、moduleIds 结构性判据）统一实现在
 // @jayyuen66/dsh-plugin-shared/lib/build-host，一处可改；本文件只声明本仓的入口、产物
 // 与生成头。为什么必须有打包这一步、为什么外部化按包名段判——见 shared 同名切面的
 // 文件头。不产 .d.ts：插件包对外没有 TS API——dsh 按包名载入运行，没有人 import 它。
@@ -14,7 +14,7 @@ import { invokedDirectly, writeArtifact } from "@jayyuen66/dsh-plugin-shared/lib
 
 const root = import.meta.dirname;
 
-// 入口名与产物名各只有一处真源：入口表、取产物、落盘与日志都从这两个常量派生。
+// 入口名与产物名各只有一处唯一来源：入口表、取产物、写到磁盘与日志都从这两个常量派生。
 // 此前 "host.js" 在四处各自手写，改产物名时漏一处就是「构建成功却写错文件」。
 const HOST_SOURCE = "host.ts";
 const HOST_OUTPUT = "host.js";
@@ -54,7 +54,7 @@ if (invokedDirectly(import.meta.filename)) {
   try {
     await main();
   } catch (error) {
-    // 落盘在构建成功之后，所以走到这里时既有 host.js 一定没被改动——把这条说清楚，
+    // 写到磁盘在构建成功之后，所以走到这里时既有 host.js 一定没被改动——把这条说清楚，
     // 免得把「构建失败」误读成「产物被写坏」。
     console.error("[build-host.mjs] 构建失败，既有 host.js 未被改动：", error);
     process.exitCode = 1;

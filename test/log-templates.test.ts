@@ -5,8 +5,8 @@
 // 分支日志在用例里根本不会被触发。这个文件补的是反向那一半：现扫一遍源码，把清单拿去
 // 逐条对齐，清单漏条、多出陈旧条目、顺序错位都当场红。
 //
-// 扫描口径与清单的写出方式一致：取每个 console.* 调用的首个模板字面量，插值按花括号配对
-// 整体归一成占位符（多行模板里的换行与缩进折叠成单空格）。用模板字面量之外的形态打印
+// 扫描规则与清单的写出方式一致：取每个 console.* 调用的首个模板字面量，插值按花括号配对
+// 整体归一成占位符（多行模板里的换行与缩进归一成一个空格）。用模板字面量之外的形态打印
 // 日志的调用也算红：那种日志没有可对齐的骨架，账本对它恒判未认领。
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -17,11 +17,11 @@ import { LOG_SKELETONS, claimsLog, PLACEHOLDER } from "./log-templates.ts";
 
 const PKG_ROOT = path.resolve(import.meta.dirname, "..");
 
-/** 账本覆盖的扫描面：宿主侧模块（客户端日志不进这个账本）。 */
+/** 账本覆覆盖的扫描范围：宿主侧模块（客户端日志不进这个账本）。 */
 const SCAN_ROOTS: readonly string[] = ["lib"];
 
-// 方法集与文件头「每个 console.* 调用」的口径一致：group/trace/table/dir 也收，
-// 源码里真用了它们时账本就得接——漏检比多检更难查（当前扫描面只有 info/warn/error）。
+// 方法集与文件头「每个 console.* 调用」的规则一致：group/trace/table/dir 也收，
+// 源码里真用了它们时账本就得接——漏检比多检更难查（当前扫描范围只有 info/warn/error）。
 const CONSOLE_CALL = /\bconsole\.(?:info|warn|error|log|debug|group|trace|table|dir)\(/gu;
 
 async function collectTypeScript(dir: string): Promise<string[]> {
@@ -143,12 +143,12 @@ describe("日志骨架清单与源码同源", () => {
     assert.notEqual(
       skeletons.length,
       0,
-      "扫描面里一个 console.* 调用都没找到：扫描口径坏了，不是清单干净",
+      "扫描面里一个 console.* 调用都没找到：扫描规则坏了，不是清单干净",
     );
     assert.deepEqual(LOG_SKELETONS, skeletons, "清单与源码漂移：按源码重排或补上漏掉的条目");
   });
 
-  it("清单不是空转：按骨架填值后必被认领，且首端锚死", () => {
+  it("清单不是没有实际校验：按骨架填值后必被认领，且首端锚死", () => {
     assert.notEqual(
       LOG_SKELETONS.length,
       0,
@@ -159,7 +159,7 @@ describe("日志骨架清单与源码同源", () => {
       const filled = skeleton.replaceAll(PLACEHOLDER, "填值");
       assert.equal(claimsLog(filled), true, `按骨架填出来的日志没被认领：${skeleton}`);
       // 正文自带换行也要被认领：匹配式带 `s` 旗标，`.*` 跨得过换行。调用方（账本）是否先
-      // 折叠空白与这条判据无关——不写下来，它就只是一条没人守着的隐式契约。
+      // 调用方（账本）是否先归一空白与这条判据无关——不写下来，它就只是一条没人守着的隐式契约。
       assert.equal(
         claimsLog(
           skeleton.endsWith(PLACEHOLDER) ? `${filled}\n尾行` : filled.replace("填值", "首行\n次行"),

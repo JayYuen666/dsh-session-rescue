@@ -1,6 +1,6 @@
 // test/schema-coverage.ts —— 卡片字段覆盖门禁（多包共用，复制式分发，同 client-freshness.ts）。
 //
-// 背景：host.ts 的 `Config` schema 声明 N 个设置字段（隐式注册，可编辑面 = 标了
+// 背景：host.ts 的 `Config` schema 声明 N 个设置字段（隐式注册，可输入区 = 标了
 // `.volatile()` 的那些），client 卡片只渲染 M 个（M < N）→ 那 N-M 个字段用户无法从 UI
 // 触及，只能改 profile 补丁或读源码。此处踩坑：quality-gate 的 `memoryFeedback`
 // （功能性开关——host.ts 的 `if (cfg.memoryFeedback !== false)` 决定是否把门禁失败写入
@@ -11,7 +11,7 @@
 // allowUnbound 里的每一项确实未被绑定（防止"挂名豁免"绕过门禁）。
 //
 // 门禁语义刻意是「全部 schema 字段绑定或有理由豁免」，而不是只收 `.volatile()` 字段：
-// 非 volatile 字段靠豁免表显式记账，豁免的过时与缺理由都由断言侧判红；单仓收紧成
+// 非 volatile 字段靠豁免表显式记录下来，豁免的过时与缺理由都由断言侧判红；单仓收紧成
 // volatile-only 会让复制分发的各仓夹具失同步。
 //
 // 用法（各包 test/build-client.test.ts 的覆盖门禁用例里取证据后断言）：
@@ -22,7 +22,7 @@
 //
 // 绑定识别是"出现即算绑定"的宽松启发式（见 boundFieldsIn），取舍方向写死在这里：
 // 多认（注释/字符串外的同名调用）→ 门禁更宽松，是已知代价；少认（组件是 .tsx、
-// 字段名在别的惯用法里）→ 功能性缺失被放过，是真漏拦。所以注释先剥掉再扫
+// 字段名在别的惯用法里）→ 功能性缺失被放过，是真漏拦。所以先移除注释再扫
 // （被注释掉的旧绑定不许算数），扩展名白名单收 .tsx，剩下的假阳性靠豁免表
 // 反向校验与人工审查兜。
 
@@ -138,7 +138,7 @@ interface BracketWalk {
  * 非字面量位置的一步。交回 `true` 表示刚收到配平的右括号（区段到此结束）。
  *
  * 拆出来是因为主循环里「跳过字面量」与「数括号」两件事混在一起时认知复杂度会越过
- * 本仓 sonarjs 的门槛，读的人还得同时记住两个状态。
+ * 本仓 sonarjs 的阈值，读的人还得同时记住两个状态。
  */
 function bracketStep(
   state: BracketWalk,
@@ -253,7 +253,7 @@ const BLOCK_DEPTH_DELTA = new Map<string, number>([
 
 /**
  * `${…}` 里再嵌一层反引号 —— 模板串的嵌套状态本扫描器没实现，插值里的反引号会让字符串
- * 提前收尾，之后那段代码被当成字符串吃掉，括号因此走偏。
+ * 提前收尾，之后那段代码被当成字符串处理掉，括号因此走偏。
  *
  * 普通插值（`` `a${x}b` ``）不算：插值里的括号整个落在字符串跨度内，本来就不参与配平，
  * 结果与实现一致。这里只点真正认不得的那一形。
@@ -266,7 +266,7 @@ function nestedInterpolationAt(body: string, index: number): boolean {
 /**
  * 块体里本扫描器认不得的构造，逐条点名。
  *
- * 裸露的 `/` 意味着正则字面量（`/['"]/`、`/\d+/` 这类）：literalAt 只认引号与注释，
+ * 不在字符串里的 `/` 意味着正则字面量（`/['"]/`、`/\d+/` 这类）：literalAt 只认引号与注释，
  * 正则体里的引号会把它带进错误的字符串状态，之后 `//` 又被读成行注释——括号深度于是走偏，
  * 字段全集静默缩成子集，而门禁只报「某个字段没绑定」。
  * 这两种写法一律交人确认，而不是让扫描器猜。
@@ -369,7 +369,7 @@ function fieldsOfSchemaArgument(hostTs: string, argument: string): string[] {
  *
  * 绑定识别的两条正则都要扫**这条之后**的文本：被注释掉的旧代码、废弃分支里的
  * `field: 'x'` / `set('x')` 会算成"已绑定"，卡片明明没有那个控件却过门禁——这是漏拦
- * （假绿）。字符串里的内容不抹：要认的字段名本身就写在字符串里（`set("retryMax")`），
+ * （误判通过）。字符串里的内容不抹：要认的字段名本身就写在字符串里（`set("retryMax")`），
  * 抹了等于一个都认不出。
  */
 function stripComments(src: string): string {
@@ -450,7 +450,7 @@ function hostSchemaFields(source: string): { fields: string[]; unresolved: strin
   return { fields: [...fields], unresolved };
 }
 
-/** 捕获组取值（严格模式下 matchAll 捕获为 `string | undefined`，这里收口为 string）。 */
+/** 捕获组取值（严格模式下 matchAll 捕获为 `string | undefined`，这里统一处理为 string）。 */
 function group(match: RegExpExecArray, index: number): string {
   return match[index] ?? "";
 }
@@ -500,7 +500,7 @@ function walk(dir: string): string[] {
     return out;
   }
   for (const entry of entries) {
-    // 测试/规格/夹具里的字段名是期望值不是绑定面，算进来会把「卡片漏绑」洗成绿。
+    // 测试/规格/夹具里的字段名是期望值不是绑定环节，算进来会把「卡片漏绑」洗成绿。
     const isTestCase = /\.(?:test|spec)\.[^.]+$/u.test(entry.name) || entry.name === "__fixtures__";
     const usable = entry.name !== "node_modules" && !entry.isSymbolicLink() && !isTestCase;
     const filePath = path.join(dir, entry.name);

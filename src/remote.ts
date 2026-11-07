@@ -1,8 +1,8 @@
-// src/remote.ts —— 设置卡读/写**宿主侧救援状态**的那一面（官方 Typert Remote 的消费侧）。
+// src/remote.ts —— 设置卡读写**宿主侧救援状态**的入口（官方 Typert Remote 的消费端）。
 //
 // 六条 HTTP 端点的方法版：state / cancel / toggle / resume / retryProviders / retryPolicy。
 // descriptor 手写、参数走 strict 形状校验，结果走 src-json；宿主侧由源模式按方法签名
-// 推参数名。`remote` 是可选读面：没有它时卡片照常渲染，只把数据面显示为读不到。
+// 推参数名。`remote` 是可选读取接口：没有它时卡片照常渲染，只把数据那一栏显示为读不到。
 import type {
   InvocationDescriptor,
   RemoteResult,
@@ -186,7 +186,7 @@ function buildRescueReader(ctx: RemoteHost, remote: RemoteMounter): RescueReader
   let mounted: Promise<unknown> | undefined;
   const namespaceOf = async (): Promise<RescueNamespace> => {
     // 失败不留缓存：`mounted ??=` 只判 undefined，一次 $mount 失败会把那枚已 reject 的
-    // Promise 永久留在这里，此后每次读面都立刻以同一个旧错误失败——网关晚一步就绪
+    // Promise 永久留在这里，此后每次读取接口都立刻以同一个旧错误失败——网关晚一步就绪
     // 也会让整张卡永久「读不到」，只能刷新页面重来。失败时清掉，下一次调用重新尝试。
     mounted ??= remote.$mount({
       package: PACKAGE_NAME,
@@ -227,7 +227,7 @@ function buildRescueReader(ctx: RemoteHost, remote: RemoteMounter): RescueReader
   };
 }
 
-/** 造读取器；当前部署没有远程面时 undefined（卡片只显示读不到）。 */
+/** 造读取器；当前部署没有远程通道时 undefined（卡片只显示读不到）。 */
 export function createRescueReader(ctx: RemoteHost): RescueReader | undefined {
   const remote = ctx.get?.(REMOTE_SERVICE);
   return isMounter(remote) ? buildRescueReader(ctx, remote) : undefined;

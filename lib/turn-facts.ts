@@ -3,7 +3,7 @@
  * （`reviewLastTurn`、`preFireCheck` 的 newer-turn veto、`turnOpenerSource` 的
  * 链式/Schedule 判定）折成一枚官方 `sessionProjections` 单元。
  *
- * 走投影而不是 `ctx.sessionQuery.observeSession()`（quality-gate 用的那条面）：后者是
+ * 走投影而不是 `ctx.sessionQuery.observeSession()`（quality-gate 用的那一条）：后者是
  * **异步**的，而本包的「触发前校验」与紧随其后的注入同处一个同步块——那正是本包不变量
  * 的支点（quality-gate 能 await 是因为它的读点在 `@mode serial` 监听器内，本包的在宿主
  * 定时器回调里）。`stateOf()` 同步交出已物化的当前态（installed
@@ -13,7 +13,7 @@
  * 等价性是本模块的全部要害，做法是**只在能被精确复现时才采信投影**，否则交回
  * `undefined` 让调用方回退本文件同处的扫描函数（扫描 = 迁移前的实现，一字未改语义）：
  *   - `turn/end` 定稿时若对不上**最近一条** `turn/start`（轮次号不等、end 缺号、
- *     或折叠窗口里压根没见过 start——崩溃恢复/冷启动只给半截日志就是这个形状），
+ *     或增量折叠（`applyEvent`）的窗口里压根没见过 start——崩溃恢复/冷启动只给半截日志就是这个形状），
  *     该行的 `aligned` 为 false ⇒ `reviewFromFacts` 交回 undefined ⇒ 回退扫描。
  *     不采用「粘性 degenerate」：一次异常不该让整条会话永久失去投影，而读侧要的
  *     恰好只是**最后一条** end 的证据。
@@ -30,7 +30,7 @@ import type { SessionEvent, SessionHeader, SessionLogOffset } from "@deepseek-ai
 import type { ProjectionDefinition } from "@deepseek-ai/dsh-session-projection";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import type { TurnReview } from "./turn-review.ts";
-// 未闭合口径必须与同步扫描同源（test/property/turn-facts.property.test.ts 钉着两侧逐项
+// 未闭合规则必须与同步扫描同源（test/property/turn-facts.property.test.ts 钉着两侧逐项
 // 同解）；事件读取器与白名单统一在 lib/event-fields.ts，两处不再各抄一份。
 import {
   directStr,
@@ -94,7 +94,7 @@ export interface EndRow {
   aligned: boolean;
 }
 
-/** 投影态：全平面 JSON 值（官方单元契约：持久化缓存前提），`stateSchema` 校验每一份回填。 */
+/** 投影态：整份 JSON 值（官方单元契约：持久化缓存前提），`stateSchema` 校验每一份回填。 */
 export interface RescueFacts {
   /** 最后一条 turn/end 的定稿；从未 turn/end ⇒ null（等价 reviewLastTurn 的 empty）。 */
   end: EndRow | null;

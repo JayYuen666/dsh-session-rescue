@@ -131,7 +131,7 @@ describe("reviewLastTurn — todo 清单（最新快照 last-wins）", () => {
       turnEnd(1, "completed"),
     ]);
     assert.equal(result.openTodos, 0);
-    // 「安全忽略」的两个方向分开钉（与 openCountOf 的口径一致）：
+    // 「安全忽略」的两个方向分开钉（与 openCountOf 的规则一致）：
     //   · 非数组载荷 = 不可用快照，倒扫跳过，最后一次**合法**快照仍然生效；
     //   · 数组载荷（哪怕元素全非法）= 可用快照（0 项未闭合），按 last-wins 覆盖——
     //     上面第一段断言的 0 正是它。
@@ -144,7 +144,7 @@ describe("reviewLastTurn — todo 清单（最新快照 last-wins）", () => {
   });
 
   it("不认识的 status 不计入未闭合（未知状态 ≠ 未完成）", () => {
-    // 白名单口径：只有官方那三个取值里的 pending/in_progress 算没做完。
+    // 白名单规则：只有官方那三个取值里的 pending/in_progress 算没做完。
     // 收「status !== "completed"」的话，宿主将来新增的 cancelled、载荷里拼错的
     // compelted、甚至空串都会被算成「还有活没干」——正常收尾的回合被读成没做完，
     // 自动续跑就会追着用户问「继续」。
@@ -160,7 +160,7 @@ describe("reviewLastTurn — todo 清单（最新快照 last-wins）", () => {
     assert.equal(result.openTodos, 0);
   });
 
-  it("未闭合口径仍然只认 pending 与 in_progress 两个", () => {
+  it("未闭合规则仍然只认 pending 与 in_progress 两个", () => {
     const result = reviewLastTurn([
       todoWrite([DONE, OPEN, DOING, { content: "d", status: "cancelled" }]),
       turnEnd(1, "completed"),
@@ -278,7 +278,7 @@ describe("reviewLastTurn — 等待用户（必须抑制续跑）", () => {
       toolCall(1, "c1", "bash"),
       toolResult(1, "c1"),
       turnEnd(1, "completed"),
-      // 轮 2 既没有 turn/start，调用也不带 turn：没有窗口可信，只能按保守侧收口。
+      // 轮 2 既没有 turn/start，调用也不带 turn：没有窗口可信，只能按保守侧统一处理。
       ev("tool/call", { name: "ask_user_question" }),
       turnEnd(2, "completed"),
     ]);

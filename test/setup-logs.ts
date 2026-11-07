@@ -19,7 +19,7 @@ import { claimsLog, LOG_PREFIX } from "./log-templates.ts";
 const PKG_PREFIX = LOG_PREFIX;
 
 /** 插件会用到的 console 级别（联合类型取属性，避免以字符串索引 Console）。
- *  带上 debug：`log-templates.test.ts` 的源码扫描认这一级，接管面不跟上的话，
+ *  带上 debug：`log-templates.test.ts` 的源码扫描认这一级，接管处不跟上的话，
  *  一条 console.debug 会被骨架清单要求登记、却在运行时逃过账本两条断言。 */
 export type LogLevel = "info" | "warn" | "error" | "log" | "debug";
 export const LEVELS: readonly LogLevel[] = ["info", "warn", "error", "log", "debug"];
@@ -48,7 +48,7 @@ function spyLevel(level: LogLevel): void {
   console[level] = (...args: unknown[]) => {
     // 只认首参：本包每条 console.* 的骨架就是它的模板字面量（首个实参），后续实参是插值进去
     // 的值——把它们也拼进来会让「整条骨架对齐」这条认领判据永远对不上（骨架结尾的标点之后
-    // 还会多出值）。落盘的一律是首参，其余实参留在 extra 里（堆栈就藏在那儿）。
+    // 还会多出值）。写到磁盘的一律是首参，其余实参留在 extra 里（堆栈就藏在那儿）。
     const [first, ...rest] = args;
     records.push({
       level,

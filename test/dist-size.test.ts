@@ -1,15 +1,15 @@
 // test/dist-size.test.ts —— 产物体积闸门。
 //
 // 为什么要有：`npm run check` 的顺序是 build 在 test 之前，所以这道门读到的是**当轮刚产出**
-// 的产物，不是上一次遗留的。它挡的是「有人往某个切面里塞进大对象字面量或整段查表」这类
+// 的产物，不是上一次遗留的。它挡的是「有人往某个构建切面里塞进大对象字面量或整段查表」这类
 // 回退——体积不是行为，任何现有用例都不会因此变红，所以必须有一把单独的尺子。
 //
-// 预算怎么定的：取当前实测值上浮约 25%。留这 25% 是给正常演进的——加一条规则、改一句文案
+// 预算怎么定的：取当前实测值上加约 25%。留这 25% 是给正常演进的——加一条规则、改一句文案
 // 不该立刻要求改预算；翻倍一定会顶穿。确需突破时改这些常量并写明理由。
 //
 // 明确不做的事：**不开 minify**。压缩后的产物里跨包说明符字符串（`from "@deepseek-ai/dsh-brand"`
 // 与 `from "@jayyuen66/dsh-plugin-shared/lib/record"`）会双双消失，于是 test/build-host.test.ts 那
-// 两条「跨包依赖必须外部化」的断言从「被内联了也不报」变成恒绿——它们防的正是 isRecord /
+// 两条「跨包依赖必须外部化」的断言从「被内联了也不报」变成永远通过——它们防的正是 isRecord /
 // brandString 这类单点被就地复制成多份。省下的体积不值得废掉两道真门禁，所以产物保持可读，
 // 体积改用预算盯着。
 import { describe, it } from "vitest";
@@ -62,7 +62,7 @@ function readArtifact(file: string): Buffer {
  *
  * 不递归是刻意的：types/ 顶层就是宿主读到的那份入口声明，`lib/` 一层是它派生的依赖，
  * 量级与变更频率都不同。只对顶层求和，就不必去减一个可能为空的子目录——那种写法在子目录
- * 为空时得到 0、断言恒真，而一条永远绿的闸门比没有闸门更坏：它让人以为有护栏。
+ * 为空时得到 0、断言永远成立，而一条永远绿的闸门比没有闸门更坏：它让人以为有护栏。
  *
  * @returns 字节合计
  */
@@ -70,11 +70,11 @@ function entryDeclarationBytes(): number {
   const dir = path.join(pkgDir, "types");
   assert.ok(existsSync(dir), "types/ 不存在：请先 npm run build:types");
   const entries = readdirSync(dir).filter((name) => name.endsWith(".d.ts"));
-  // 空匹配 ⇒ 求和 0 ⇒ 断言恒真：入口声明的扩展名或落点一变（如 .d.mts、types/lib/），
+  // 空匹配 ⇒ 求和 0 ⇒ 断言永远成立：入口声明的扩展名或位置一变（如 .d.mts、types/lib/），
   // 这道门就该当场红，而不是安静地量了个零。
   assert.ok(
     entries.length > 0,
-    "types/ 顶层没有 .d.ts 声明：入口声明改名或挪位了，请修这条过滤再量，别让闸门量空转绿",
+    "types/ 顶层没有 .d.ts 声明：入口声明改名或挪位了，请修这条过滤再量，别让检查在没有实际测量时显示通过",
   );
   return entries.reduce((sum, name) => sum + readFileSync(path.join(dir, name)).byteLength, 0);
 }

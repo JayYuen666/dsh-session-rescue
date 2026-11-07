@@ -37,7 +37,7 @@ function emptyTrace(): Trace {
   return { definition: undefined, legacyReads: 0, handleReads: 0, disposals: 0 };
 }
 
-/** 读口本身不是某些用例的判据面时的 publish。 */
+/** 读口本身不是某些用例的判据时的 publish。 */
 function ignoreReader(): void {
   // 这些用例只观察释放与日志，读口交出去之后不再调用。
 }
@@ -210,7 +210,7 @@ describe("mountFactsReader：失败路径", () => {
       unhandled.push(reason);
     };
     // 负例控制由变异实测做过：把 release 里那段 try/catch 去掉（只 await disposed），这条用例
-    // 当场红——拒绝漏成 unhandledRejection，vitest 自己就把用例判失败。所以「零条」不是空转。
+    // 当场红——拒绝漏成 unhandledRejection，vitest 自己就把用例判失败。所以「零条」不是没有实际校验。
     process.on("unhandledRejection", onUnhandled);
     try {
       const trace = emptyTrace();

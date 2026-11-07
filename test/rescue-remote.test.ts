@@ -1,5 +1,5 @@
-// 客户端读面（官方 Typert Remote）的直测：descriptor 与宿主标记对质、边界码器、
-// 命名空间缺口的报错面，以及六个读方法的位置传参。真实卡片链路在 test/client-ui.test.ts。
+// 客户端读取接口（官方 Typert Remote）的直测：descriptor 与宿主标记对质、边界码器、
+// 命名空间缺口的报错内容，以及六个读方法的位置传参。真实卡片链路在 test/client-ui.test.ts。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { Context } from "@deepseek-ai/cordis";
@@ -15,7 +15,7 @@ const MOUNT_FAILED = /mount failed/u;
 const SERVICE_KEY = `remote.${NAMESPACE}`;
 
 /** 替身只造 createRescueReader / SessionRescueRemoteService 读得到的那几个成员；
- *  返回 unknown 把「形状未全量校验的替身」摆在明面上（never 会假装对任何形参都成立，
+ *  返回 unknown 把「形状未全量校验的替身」摆在明处上（never 会假装对任何形参都成立，
  *  宿主 ApplyRuntime 增删字段时这里得不到任何反馈）。调用点显式收窄。 */
 function runtimeOf(): unknown {
   return {
@@ -56,7 +56,7 @@ function namespaceOf(overrides: Record<string, unknown> = {}): {
   calls: RecordedCall[];
 } {
   const calls: RecordedCall[] = [];
-  // 读方法不收参（参数在码器层验，调用面全是零参）：不设 args 形参，免得读代码的人
+  // 读方法不收参（参数在码器层验，调用点全是零参）：不设 args 形参，免得读代码的人
   // 以为 state/resume/retryProviders 能带参。
   const ok =
     (method: string, value: unknown): (() => Promise<unknown>) =>
@@ -112,7 +112,7 @@ function readerOf(
   return { reader, mounts };
 }
 
-describe("客户端读面（官方 Typert Remote）", () => {
+describe("客户端读取接口（官方 Typert Remote）", () => {
   it("六条 descriptor 与宿主标记逐项对质", () => {
     const service = new SessionRescueRemoteService(new Context(), runtimeOf() as never);
     const markers = remoteMethods(service)
@@ -174,11 +174,11 @@ describe("客户端读面（官方 Typert Remote）", () => {
     }
   });
 
-  it("宿主上下文没有注册口 → 只少掉读面，不抛错", () => {
+  it("宿主上下文没有注册口 → 只少掉读取接口，不抛错", () => {
     assert.equal(installSessionRescueRemote({} as never, runtimeOf() as never), false);
   });
 
-  it("没有 remote 读面或它没有挂载口 → undefined", () => {
+  it("没有 remote 读取接口或它没有挂载口 → undefined", () => {
     assert.equal(createRescueReader({}), undefined);
     assert.equal(createRescueReader({ get: () => null }), undefined);
     assert.equal(createRescueReader({ get: () => ({ $mount: 42 }) }), undefined);
@@ -244,7 +244,7 @@ describe("客户端读面（官方 Typert Remote）", () => {
       code: "unavailable",
       message: "gateway down",
     });
-    // 带参方法（cancel）的失败走同一条折算：端点口径一致，重构不得丢掉 cause。
+    // 带参方法（cancel）的失败走同一条折算：端点规则一致，重构不得丢掉 cause。
     const cancelFailure = await reader.cancel("s1").catch((error: unknown) => error);
     assert.ok(cancelFailure instanceof Error);
     assert.match(cancelFailure.message, /conflict: session gone/u);

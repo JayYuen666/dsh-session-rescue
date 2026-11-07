@@ -15,7 +15,7 @@ export type RescueKind = "resume" | "continue" | "unfinished";
 /** 配额用尽的拒因（onFailure 决策的 reason 位）；测试与调用方都按它认，不抄字面量。 */
 export const MAX_RESUMES_REASON = "max-resumes";
 
-/** 跨版本脏快照的 kind 可能是空串（见 `PendingRecord` 的注释）：快照读面、结算与
+/** 跨版本脏快照的 kind 可能是空串（见 `PendingRecord` 的注释）：快照读取接口、结算与
  *  恢复路径共用这一条回落，别在三处各写一遍。 */
 export function rescueKindOf(kind: RescueKind | ""): RescueKind {
   return kind || "resume";
@@ -24,7 +24,7 @@ export function rescueKindOf(kind: RescueKind | ""): RescueKind {
 /** 调度决策：判别联合——`skip` 必带 reason、`schedule` 必带 fireAt/delayMs/chained。
  *  状态机自己发出的每条决策都填满字段，所以「全可选的单一 interface」那种写法会逼
  *  调用方补出 `decision.reason ?? "unknown"`、`decision.delayMs ?? 0` 这类永远走不到
- *  的兜底分支：缺字段在类型面上就该不可能。 */
+ *  的兜底分支：缺字段在类型上就该不可能。 */
 export type FailureDecision =
   | { readonly action: "skip"; readonly reason: string; readonly retryAfterMs?: number }
   | {
@@ -274,7 +274,7 @@ export class ResumeScheduler {
     return true;
   }
 
-  /** 用户取消（UI 按钮 / Remote 读面）：释放定时器，清待办，不增 count。 */
+  /** 用户取消（UI 按钮 / Remote 读取接口）：释放定时器，清待办，不增 count。 */
   public cancel(sessionId: string): { cancelled: boolean; reason?: string; turn?: number } {
     const rec = this.sessions.get(sessionId);
     if (rec === undefined) {
@@ -354,7 +354,7 @@ export class ResumeScheduler {
     counts.unfinished = 0;
   }
 
-  /** 配额读写的落点：记录在位就是记录上的 counts，记录已被淘汰就是记忆里那一份。
+  /** 配额读写的位置：记录在位就是记录上的 counts，记录已被淘汰就是记忆里那一份。
    *  少了这一层，「先被淘汰、之后才来一次成功」的会话会被记忆里的旧计数锁住——
    *  成功复位不掉，下次重建记录又把它当成烧满配额的会话接回去。 */
   private quotaOf(sessionId: string): Record<RescueKind, number> | undefined {
@@ -365,7 +365,7 @@ export class ResumeScheduler {
     return this.quotaMemo.get(sessionId);
   }
 
-  /** JSON 安全快照，供 state 读面序列化。 */
+  /** JSON 安全快照，供 state 读取接口序列化。 */
   public stateSnapshot(): Record<string, SessionSnapshot> {
     const nowTime = this.now();
     const out: Record<string, SessionSnapshot> = {};
@@ -409,7 +409,7 @@ export class ResumeScheduler {
   }
 
   /** 记录「本会话这一轮的终态已处理过」。返回 false = 这一轮并不比上次处理的更新，
-   *  即**旧轮重放**：真宿主在 `turn/start` 或 `turn/end` 落盘失败的支线上照样会走一次
+   *  即**旧轮重放**：真宿主在 `turn/start` 或 `turn/end` 写到磁盘失败的支线上照样会走一次
    *  `agent/status → idle`（packages/core/agent-loop/src/agent.ts:307-309 与 :388-389，
    *  前者根本不写任何回合边界行），而读侧只能取「日志里最后一条 turn/end」。
    *  没有这道水位就会拿上一轮的旧终态再走一遍：`onSuccess` 把配额复位成「那一轮真跑
@@ -417,7 +417,7 @@ export class ResumeScheduler {
   public noteTurnHandled(sessionId: string, turn: number): boolean {
     // 与 schedule 同一道容量闸门：满且淘汰不出空闲记录时**不新建**。没有这一条时，
     // 每一条走到回合终态的会话都会经 `rec()` 插入一条记录，200 条全忙的长驻实例里
-    // Map 只增不减——注释声明的「防无界膨胀」只在排期那一侧成立。
+    // Map 只增不减——注释声明的「防无界膨胀」只在排期这一步成立。
     // 该会话这一轮仍按「新回合」交回 true：它的水位与配额记不下，但它此后同样不会被
     // 排期（schedule 的容量判据会跳过），少了这枚记录不改变注入判据。
     if (!this.sessions.has(sessionId) && !this.hasCapacity(sessionId)) {

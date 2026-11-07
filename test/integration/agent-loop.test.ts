@@ -2,7 +2,7 @@
 // 适配器 + 官方 dsh-llm-mock-server 的故障脚本，插件走正常 `ctx.plugin` 装配。
 //
 // 这一层钉的是「插件对宿主事件流的想象是否为真」：单测里的事件序列是手搓字面量，
-// 顺序、载荷、终态落盘时机都由测试作者决定；这里全部由真 agent-loop 决定。
+// 顺序、载荷、终态写到磁盘时机都由测试作者决定；这里全部由真 agent-loop 决定。
 // 官方 mock server 的 behavior 就是真报文（429/5xx/断流/max_tokens/配额…），
 // 所以「瞬时失败 → 自动续跑 → 这一轮真跑成功」是本机上真发生过的事。
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -50,7 +50,7 @@ interface ObservedFailure {
   [RETRY_AFTER_FIELD]?: number | undefined;
 }
 
-/** 一次真失败的观测面。不整体留 `agent/error` 载荷：那里的 `agent` 是 cordis 代理，
+/** 一次真失败可观测的地方。不整体留 `agent/error` 载荷：那里的 `agent` 是 cordis 代理，
  *  整体序列化会撞上「cannot get property toJSON without inject」。 */
 interface ObservedError {
   turn: number | undefined;
@@ -69,8 +69,8 @@ interface Rig {
 
 let rig: Rig | undefined;
 
-/** 失败面投影：交回的不是对象时每一位都读成 undefined，于是断言侧不必区分
- *  「没有失败面」与「失败面缺某一位」。 */
+/** 失败投影：交回的不是对象时每一位都读成 undefined，于是断言侧不必区分
+ *  「没有失败」与「失败缺某一位」。 */
 function observedFailure(raw: unknown): ObservedFailure {
   const face =
     typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : undefined;
@@ -102,7 +102,7 @@ async function boot(
   });
   const ctx = new Context();
   try {
-    // settings 用记账替身（真 SettingsForms 要 loader+profileContext，属另一层的装配面）；
+    // settings 用记录下来替身（真 SettingsForms 要 loader+profileContext，属另一层的装配）；
     // 其余宿主服务全是真身。
     ctx.provide("settings", {
       describe: () => [],
@@ -167,7 +167,7 @@ async function boot(
 }
 
 /** 在插件**之后**挂一个 `agent/request-error` 观察者：cordis 首个注册者最外层，
- *  插件的处理端在外面——本探针只在插件让位调用 next() 时才被调用到。
+ *  插件的处理端在外面——本探测替身只在插件让位调用 next() 时才被调用到。
  *  这里只记录宿主交回的 `retryPolicy` 位，然后 next() 原样放行，不参与决策。 */
 function probeRequestError(ctx: Context, sink: { policy: unknown }[]): void {
   const scoped = ctx as unknown as {
@@ -242,15 +242,15 @@ describe("真 AgentLoop 下的自动续跑", () => {
     const { agent, server } = rig;
     await send(agent, "first task");
     // 回合失败后插件armed 定时器（本处取 schema 下限 1000ms）；等它 fire 并跑完第二轮。
-    // 锚点必须含「第二轮已发出」：救援消息在 followup 投递时就落盘，而第二轮请求是
-    // 异步的——只等消息落盘就 whenIdle，慢机上会在 agent 尚未起跑时提前 resolve。
+    // 锚点必须含「第二轮已发出」：救援消息在 followup 发送时就写到磁盘，而第二轮请求是
+    // 异步的——只等消息写到磁盘就 whenIdle，慢机上会在 agent 尚未起跑时提前 resolve。
     await expect(
       waitFor(() => rescueMessages(agent).length > 0 && server.requests.length >= 2, within(6000)),
     ).resolves.toBe(true);
     await agent.whenIdle();
     expect(rig.server.requests).toHaveLength(2);
     expect(agent.status).toBe("idle");
-    // 官方适配器交回的限流面（单测里的形状以此为证）：provider 给 Retry-After 时
+    // 官方适配器交交回的限流载荷（单测里的形状以此为证）：provider 给 Retry-After 时
     // `failure.providerRetryAfterMs` 也在场，本包的请求级退避就认它。
     expect(rig.failures).toHaveLength(1);
     expect(rig.failures[0]?.name).toBe("LlmError");
@@ -277,7 +277,7 @@ describe("真 AgentLoop 下的自动续跑", () => {
     rig = await boot(["quota_exceeded", "success"]);
     const { agent } = rig;
     await send(agent, "budget-burning task");
-    // 真宿主交出来的失败面：code 由适配器归一（llm-deepseek/src/transport.ts:30 的
+    // 真宿主交出来的失败：code 由适配器归一（llm-deepseek/src/transport.ts:30 的
     // `isQuotaExceededError(detail) || status === 402`），单测里那几枚
     // `code:"insufficient_quota"` 的字面量并不是宿主真实交回的形。
     expect(rig.failures).toHaveLength(1);
@@ -296,7 +296,7 @@ describe("真 AgentLoop 下的自动续跑", () => {
   }, 60_000);
 
   it("真 deepseek 适配器总会解析出一份重试策略 ⇒ 本包的请求级阶梯让位", async () => {
-    // 探针事实：完全不配 retryPolicy 时适配器仍按 `resolveRetryPolicy(undefined)` 交回
+    // 探测到的事实：完全不配 retryPolicy 时适配器仍按 `resolveRetryPolicy(undefined)` 交回
     // 一份默认策略（mode:normal / maxRetries:5 / 码表含 RATE_LIMIT），于是 host.ts 的
     // 「宿主已解析出策略 ⇒ 重试归官方 llm-retry」这条判据成立。两条推论只有真宿主
     // 能给：本包阶梯不是这个适配器的兜底路径（那条路只有单测能造），而 profile 若没装

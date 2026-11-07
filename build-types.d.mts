@@ -1,6 +1,6 @@
 // build-types.mjs 的声明（供 test/publish-manifest.test.ts 从 TS 侧类型化导入）。
-// 门禁用的两个纯函数真源在 shared（本脚本只是运行期转导出），类型也从同一处取：
-// 手抄签名的那一版会在 shared 改签名时静默过期——本文件此前就是这么漂移的。
+// 门禁用的两个纯函数唯一来源在 shared（本脚本只是运行期转导出），类型也从同一处取：
+// 手抄签名的那一版会在 shared 改签名时不做声地过期——本文件此前就是这么漂移的。
 export {
   canonicalizeDeclarationSpecifiers,
   listDeclarations,

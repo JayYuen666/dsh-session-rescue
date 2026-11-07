@@ -7,7 +7,7 @@ import {
 } from "../lib/failure-classify.ts";
 import type { FailureLike } from "../lib/failure-classify.ts";
 
-/** 宿主事件载荷在类型面上是 `unknown`（`agent/error` 的 `error.failure`）：真实
+/** 宿主事件载荷在类型上是 `unknown`（`agent/error` 的 `error.failure`）：真实
  *  载荷可以带本插件契约之外的字段（pi-ai 的原始错误就带 OpenAI 式 `type`），也
  *  可以根本不是对象（普通 Error 无 `.failure`）。测试经这道窄门把这类形状交给
  *  守卫，而不是把 `FailureLike` 契约放宽回 `unknown`（那会重新逼出生产代码里
@@ -58,7 +58,7 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
   });
 
   it("402 按 QUOTA 同一支判：无证据永久，随信限速措辞可翻成瞬时", () => {
-    // 裸 402：账单侧「先付钱」，没有随信证据就是永久。
+    // 只有 402：账单侧「先付钱」，没有随信证据就是永久。
     const bare = classifyFailure({ code: "", message: "", status: 402 });
     assert.equal(bare.transient, false);
     assert.match(bare.reason, /402/u);
@@ -100,7 +100,7 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
         `该判限速：${message}`,
       );
     }
-    // 整个正文就是一个 429（清空了 code）：这是宿主交回的裸形态，仍要判限速。
+    // 整个正文就是一个 429（清空了 code）：这是宿主交回的不带上下文的形态，仍要判限速。
     assert.equal(classifyFailure({ code: "", message: "429" }).transient, true);
   });
 
@@ -413,7 +413,7 @@ describe("looksRateLimitish（观察性日志用）", () => {
   it("疑似限流措辞命中", () => {
     assert.equal(looksRateLimitish({ code: "QUOTA", message: "quota_exceeded" }), true);
     // 余额耗尽的措辞不是「疑似限流」：它已被分类器判永久且理由明确，再报一条只会
-    // 变成噪声，并往 lesson 总线写一条假教训。
+    // 多出一条无用的告警，并往 lesson 总线写一条假教训。
     assert.equal(looksRateLimitish({ code: "QUOTA", message: BALANCE_TEXT }), false);
     assert.equal(looksRateLimitish({ message: "balance exhausted" }), false);
     assert.equal(looksRateLimitish({ message: "all fine" }), false);
