@@ -67,7 +67,7 @@ jobs:
       # 这样 artifact 存储配额或并发写入限制挡住留档时，本轮体检结论已经交到面板上。
       # 两步都不做 continue-on-error——留档失败也是一次真失败，只是不该由它决定结论有没有送到。
       - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: results.sarif
       - name: Upload artifact
