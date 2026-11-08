@@ -42,21 +42,15 @@ const wireSessionsArbitrary = fc.oneof(
 
 const NO_ACTIONS: DockActionSignals = {
   canStopReask: false,
-  canEdit: false,
-  canRetry: false,
-  canContinue: false,
-  editing: false,
   hostActionFailed: false,
+  sessionStarted: true,
 };
 
 function actionsOf(flags: boolean[]): DockActionSignals {
   return {
     canStopReask: flags[0] === true,
-    canEdit: flags[1] === true,
-    canRetry: flags[2] === true,
-    canContinue: flags[3] === true,
-    editing: flags[4] === true,
-    hostActionFailed: flags[5] === true,
+    hostActionFailed: flags[1] === true,
+    sessionStarted: true,
   };
 }
 
@@ -259,7 +253,7 @@ describe("轮询档位与退避（数值）", () => {
 
 describe("dock 渲染决策（信号组合）", () => {
   it("hasContent 恰等于「有区块要渲染」；toggle=unknown 恰等于「快照不在场」", () => {
-    const flagsArbitrary = fc.array(fc.boolean(), { minLength: 6, maxLength: 6 });
+    const flagsArbitrary = fc.array(fc.boolean(), { minLength: 2, maxLength: 2 });
     /** 三种快照形态各自被抽到的次数：漏抽一支，那一支的判据就没有实际校验。 */
     const seen = { absent: 0, empty: 0, pending: 0 };
     const rescueArbitrary = fc.oneof(
@@ -294,10 +288,6 @@ describe("dock 渲染决策（信号组合）", () => {
           decision.pending !== null ||
           decision.showToggleRow ||
           actions.canStopReask ||
-          actions.canEdit ||
-          actions.canRetry ||
-          actions.canContinue ||
-          actions.editing ||
           actions.hostActionFailed;
         assert.equal(decision.hasContent, anyBlock, "hasContent 必须恰等于「有区块要渲染」");
         // 快照未就绪时 toggle 只能是中性态、开关行只能是隐藏（把「还没同步到」显示成

@@ -4,6 +4,28 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.10
+
+一轮围绕「手动接续入口与请求级分工」的调整：回合级动作迁到回合尾部，dock 只留会话级三件；请求级限流重试改为先问下游、下游放行才接手；新增默认关闭的插话续跑与配额耗尽提示。三类自动注入的判定语义不变。
+
+### Changed
+
+- **回合级动作迁到 `conversation.chat.turnTail`**（`src/client-entry.ts`）：编辑重发 / 重试 / 发送续写从输入框上方的 dock 移到最新完成回合的操作行（与一方 deliverables / plan / schedule 同栈）；dock 只保留续跑倒计时横幅 / 停止并重问 / 每会话开关。`lastCompletedUserTarget` 与 `failureOfLastTurn` 在会话运行中交回 null，动作行随整块隐藏，与迁移前「运行中不出回合级动作」一致。
+- **停止重问改为先改文本再停**：按钮展开草稿（预填最后一条用户消息，Esc 收起、⌘/Ctrl+Enter 确认），失败时草稿保留、错误行就地显示；成功后才收起。
+- **失败原因行不再由本包重复渲染**：宿主 transcript 的 `turn-error` / `turn-max-tokens` 节点已经渲染 code 与 message，动作行里那一份逐字重复的文本删除。
+- **宿主内置重试在途时重试按钮改为整块隐藏**：此前的禁用态与 composer 此刻的「继续生成」主按钮并存没有增量信息。
+- **每会话开关改用设置卡同款 switch**（`.dsu-switch`，样式随唯一的 `<style>` 与 `CARD_UI_CSS` 一起注入）；hero 空态（转录为空且不在跑）不显示开关行，第一条消息发出后立即回显。
+- **请求级限流重试改为「先问下游」**（`host.ts`）：先 `await next()`，下游交回 `{ kind: "retry" }` 就原样采纳（官方 `llm-retry` 的码表过滤、`Retry-After`、抖动与持久事件全部保留）；下游放行（码表外、次数耗尽、`Retry-After` 超过策略上限、abort 或条目失效）才由本包阶梯接手。原先「宿主解析出 `retryPolicy` 就让位」的判据在真宿主上恒真，已删除。`Retry-After` 超过本包封顶（默认 30 秒）时不再委托 `next()`，请求按终态收束；`next()` 只问一次。
+- **重试档位 `default` 改为显式写官方默认策略**：不再 `unset`——settings 的 user section 与行配置同文档，`unset` 会把插件接管前手写的 `retryPolicy` 一并删掉；代价是官方将来调整默认值时该 provider 不自动跟随。设置卡在覆盖非规范形状（疑似手写）的配置前先弹确认。
+- **`agent/disposed` 的按会话清理集中到 `handleAgentDisposed`**：新增撤掉耗尽位，其余既有台账（请求计数、失败线路、每会话开关、投影告警去重位、待兑 pass、挂起快照）原样释放。
+- **文案与产物预算**：插件列表标题改为「会话自动接续 / Session auto-continue」；`HOST_BUDGET_BYTES` 按实量重定为 144 KB。
+
+### Added
+
+- **插话续跑（实验，默认关）**：`unfinishedSteerMode` 打开后，回合将收尾而该回合自己写的清单仍未闭合时，经 `agent.steer` 在同一回合内续做；与补跑共用 `maxUnfinished` 配额。等用户（`ask_user_question`）、Schedule 开启的回合与 goal 轮一律让路；调度器已有待办时不叠加。设置字段由十三项增至十四项。
+- **配额耗尽升级提示**：`/state` 的会话行新增 `blocked` 位（`kind` + 造次失败轮），客户端经 `shell.overlay` 弹一次提示，按「会话 → 轮次:类别」去重；正常完成回合（补跑为清单闭合）后撤位，再次耗尽会再报。
+- **崩溃恢复的手动接续**：回合终态为 `interrupted`（宿主崩溃修复给孤儿回合补写的闭合标记）时，回合尾部落一个「继续中断的回合」按钮，纯手动；live 中止（`aborted`）不出现。
+
 ## 0.1.9
 
 修复 0.1.8 引入的 web 启动隐患：卡片组件收回 `client.js` 内联，移除对 `@jayyuen66/dsh-plugin-shared/client` 的模块表外置与 `cordis.patch.yml` 里的 shared 供应行。调度、恢复与投影的判定逻辑不变。

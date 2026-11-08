@@ -77,6 +77,9 @@ async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
     await ctx.plugin(
       plugin as never,
       {
+        // 请求级阶梯在本层关掉（requestRetryMax: 0）：e2e 钉的是回合级救援链（链式
+        // 例外、双会话配额），限流失败现在会被阶梯在回合内先救活，前提就不成立了。
+        requestRetryMax: 0,
         resumeDelayMs: 1000,
         resumeCooldownMs: 5000,
         continueDelayMs: 500,

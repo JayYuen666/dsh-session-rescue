@@ -1,4 +1,4 @@
-// src/remote.ts —— 设置卡读写**宿主侧救援状态**的入口（官方 Typert Remote 的消费端）。
+// src/remote.ts —— 设置卡读写**宿主侧接续状态**的入口（官方 Typert Remote 的消费端）。
 //
 // 六条 HTTP 端点的方法版：state / cancel / toggle / resume / retryProviders / retryPolicy。
 // descriptor 手写、参数走 strict 形状校验，结果走 src-json；宿主侧由源模式按方法签名

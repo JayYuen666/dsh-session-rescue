@@ -34,7 +34,11 @@ import type {
 // 不载入的话 `SessionStandardProps` 上根本看不见这四位。
 import type { UseChat } from "@deepseek-ai/dsh-client-ui-chat/client";
 import type { SessionSnapshotSelector } from "@deepseek-ai/dsh-client-ui-session/client";
-import type { LocaleDictOf, SessionStandardProps } from "@deepseek-ai/dsh-client-ui-slots";
+import type {
+  LocaleDictOf,
+  PropsRuntime,
+  SessionStandardProps,
+} from "@deepseek-ai/dsh-client-ui-slots";
 // 会话对象层的官方面：`binding()` 借出**已被 retain** 的 binding（返回 `SessionBinding`
 // 本身，其 `.session` 才是 `SessionFace`），`fork()` 交回 `SessionId`，`using()` 在一段
 // 操作周围自己持有引用（新 fork 出的子会话此刻还没有任何视图引用它，故走 using 而不是
@@ -53,6 +57,11 @@ import type { SessionId } from "@deepseek-ai/dsh-session/types";
 import type { TextBlock } from "@deepseek-ai/dsh-llm";
 import type { SlotRegistry } from "@deepseek-ai/dsh-client-ui-renderer/client";
 import type { ConfigForm } from "@deepseek-ai/dsh-client-ui-settings/client";
+// shell.overlay 的 SlotMap 条目由 dsh-client-ui-layout merge（其 lib/types/client/index.d.ts
+// 的 `declare module '@deepseek-ai/dsh-client-ui-slots'`）：空名 type import 只为载入那条
+// 增强（类型-only，产物里被擦掉），槽名因此才有编译期检查。
+// oxlint-disable-next-line import/no-empty-named-blocks, unicorn/require-module-specifiers -- 见上
+import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
 import {
   failureOfLastTurn,
   hostRetryPending,
@@ -60,7 +69,7 @@ import {
   lastUserNode,
   userText,
 } from "../lib/transcript.ts";
-import type { CompletedUserTarget, TurnFailure } from "../lib/transcript.ts";
+import type { CompletedUserTarget } from "../lib/transcript.ts";
 // 视图形状在 lib/turn-scope.ts（transcript.ts 的 failureOfLastTurn 从那层读法往上组合，
 // 形状必须留在读法那一层才不构成两个模块互相引用），本文件的 view 装箱与 dock 决策
 // 吃的仍是同一份投影。
@@ -139,23 +148,48 @@ const BUNDLE_PKG = "@jayyuen66/dsh-session-rescue";
 // 发给模型的重发/续写正文（dock 两个按钮产出）不再定义在模块常量里，而是取自
 // UI_MESSAGES 双语字典（语言由官方 ctx.locale 决定，见 apply 的 bind）。
 
+/** 主操作按钮的 class（编辑重发 / 停止重问确认 / 崩溃恢复三处同款，sonarjs 门要求单一来源）。 */
+const SR_PRIMARY_BUTTON_CLASS = "sr-button sr-primary";
+
 const CSS = [
-  ".sr-row{display:flex;align-items:center;gap:6px;padding:2px 0;align-self:flex-start}",
-  ".sr-button{appearance:none;border:1px solid var(--dsw-alias-border,#d8dbe2);color:var(--dsw-alias-label-secondary,inherit);background:transparent;border-radius:4px;padding:0 8px;font:inherit;font-size:12px;line-height:20px;cursor:pointer}",
-  ".sr-button:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05))}",
-  ".sr-button:disabled{opacity:.5;cursor:not-allowed}",
-  ".sr-primary{border-color:var(--dsw-alias-brand-primary,#2f6fed);color:var(--dsw-alias-brand-primary,#2f6fed)}",
+  ".sr-row{display:flex;align-items:center;gap:8px;padding:2px 0}",
+  // 开关行的 switch 靠右对齐（标签居左、控制件居右，与官方设置行同构）。
+  ".sr-row .dsu-switch{margin-left:auto;flex:none}",
+  ".sr-button{appearance:none;border:1px solid var(--dsw-alias-border,#d8dbe2);color:var(--dsw-alias-label-secondary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-radius:6px;padding:2px 10px;font:inherit;font-size:12px;line-height:20px;cursor:pointer;transition:background .12s ease,border-color .12s ease}",
+  ".sr-button:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05));border-color:var(--dsw-alias-border-l3,#c9ced8)}",
+  ".sr-button:active:not(:disabled){background:var(--dsw-alias-fill-tertiary,rgba(0,0,0,.08))}",
+  ".sr-button:disabled{opacity:.45;cursor:not-allowed}",
+  ".sr-primary{border-color:var(--dsw-alias-brand-primary,#2f6fed);color:var(--dsw-alias-brand-primary,#2f6fed);font-weight:500}",
+  ".sr-primary:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(47,111,237,.06))}",
   ".sr-button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6fed);outline-offset:1px}",
-  ".sr-editor{display:flex;flex-direction:column;gap:6px;padding:6px 0}",
+  ".sr-editor{display:flex;flex-direction:column;gap:6px}",
   ".sr-textarea{width:100%;min-height:72px;resize:vertical;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-fill-primary,transparent);border:1px solid var(--dsw-alias-border-l3,#d8dbe2);border-radius:6px;padding:8px;box-sizing:border-box}",
+  ".sr-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6fed);outline-offset:-1px}",
   ".sr-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
   ".sr-error{font-size:12px;color:var(--dsw-alias-text-danger,#d33)}",
-  // dock 宽度对齐会话内容列（与 ._0Z7gsa_column 同款居中约束）
-  ".sr-dock{box-sizing:border-box;width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;gap:4px;padding:4px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
+  // dock 面板：官方 QueueDock 同款——玻璃底 + 0.5px 顶边框 + 只有上圆角，负 margin
+  // 贴住输入卡（下边由输入卡自己的顶边框收口），宽度按 composer 的 inset 体系算。
+  ".sr-dock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance,16px)*2 - var(--dsh-composer-dock-inset,8px)*2);max-width:calc(var(--dsh-composer-card-max-width,var(--dsh-chat-content-width,748px)) - var(--dsh-composer-dock-inset,8px)*2);margin:0 auto calc(0px - var(--dsh-composer-stack-gap,6px) - 3px);display:flex;flex-direction:column;gap:6px;padding:6px var(--dsh-composer-dock-inset,8px) 8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit);background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));backdrop-filter:var(--dsw-menu-backdrop-filter,none);border:0.5px solid var(--dsw-alias-border-l1,#d8dbe2);border-bottom:none;border-radius:var(--dsw-radius-lg,10px) var(--dsw-radius-lg,10px) 0 0}",
   // 上面这条 display:flex 会盖掉 UA 的 [hidden]{display:none}：没有内容时容器不会隐藏，
   // 仍以 padding 占一行高度。显式补一条，hidden 才是真的隐藏。
   ".sr-dock[hidden]{display:none}",
-  ".sr-banner{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border,#d8dbe2);border-radius:6px;padding:4px 8px}",
+  // turnTail 操作行：回合尾部的轻量条（不做整卡，避免与消息操作行争视觉权重）。
+  // 按钮用 ghost 形态（无边框、hover 才起底）：紧贴宿主的消息图标操作行，盒子按钮
+  // 在这里会显得突兀。主操作（继续中断的回合）保留品牌色文字以区分层级。
+  ".sr-tail{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:4px;padding:2px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
+  ".sr-tail .sr-button{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,inherit)}",
+  ".sr-tail .sr-button:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05));border-color:transparent}",
+  ".sr-tail .sr-button:active:not(:disabled){background:var(--dsw-alias-fill-tertiary,rgba(0,0,0,.08))}",
+  ".sr-tail .sr-primary{color:var(--dsw-alias-brand-primary,#2f6fed)}",
+  // 倒计时横幅：玻璃面板上的行内强调——品牌色状态点，不再套盒子（面板本身已是容器）
+  ".sr-banner{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:var(--dsw-radius-md,6px);background:var(--dsw-alias-fill-secondary,rgba(47,111,237,.05))}",
+  ".sr-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-brand-primary,#2f6fed)}",
+  ".sr-bannerText{flex:1;min-width:0}",
+  // 耗尽提示（shell.overlay 条目）：悬浮层本体 pointer-events:none，子元素自动恢复；
+  // 容器自己钉在 frame 右上角，不随滚动走。
+  ".sr-toasts{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;max-width:360px;z-index:30}",
+  ".sr-toast{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border,#d8dbe2);border-left:3px solid var(--dsw-alias-text-danger,#d33);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 4px 12px rgba(0,0,0,.1);font-size:12px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
+  ".sr-toastText{flex:1;min-width:0}",
 ].join("\n");
 
 // ── host 状态轮询（自排循环：有 pending 走 1s、空闲走 5s；无订阅或页签隐藏即停）
@@ -676,10 +710,18 @@ interface DockProps extends Pick<SessionStandardProps, "sessionId"> {
   t: Translate;
 }
 
-function useTranscriptView(props: DockProps): TranscriptView {
-  const legacy = props.useChat((snap) => snap.legacy);
-  const running = props.useSession((snap) => snap.running);
-  const removed = props.useSession((snap) => snap.removed);
+/** dock 与 turnTail 两个槽位条目共用的 transcript 读法输入：四位 standard kit 里
+ *  本包真正读的两位。两个槽位都是 scope session，官方把同一组合成进 props
+ *  （dsh-client-ui-slots 的 ScopeStandardProps + ui-chat 贡献的 useChat 席位）。 */
+interface TranscriptKit {
+  useChat: UseChat;
+  useSession: SessionSnapshotSelector;
+}
+
+function useTranscriptView(kit: TranscriptKit): TranscriptView {
+  const legacy = kit.useChat((snap) => snap.legacy);
+  const running = kit.useSession((snap) => snap.running);
+  const removed = kit.useSession((snap) => snap.removed);
   return {
     nodes: legacy.nodes,
     turnEnds: legacy.turnEnds,
@@ -704,8 +746,9 @@ function errText(result: ErrShape, t: Translate): string {
   return prefix + (result.message ?? t("actionFailed"));
 }
 
-// ── 编辑 / 重试 / 续写统一入口：只放 dock（list 槽无链冲突；也避免与一方
-//    deliverables/better-sidebar 的 turnTail 链冲突、按钮重复出现）────────
+// ── 编辑 / 重试 / 续写统一入口：回合级动作挂 conversation.chat.turnTail
+//    （每个完成回合的操作行上方，与一方 deliverables/plan/schedule 同栈），
+//    输入框上方的 dock 只留会话级三件（横幅 / 停止重问 / 每会话开关）────────
 
 interface EditorProps {
   sessionId: SessionId;
@@ -760,7 +803,7 @@ function RescueEditor(props: EditorProps): ReactNode {
     "button",
     {
       type: "button",
-      className: "sr-button sr-primary",
+      className: SR_PRIMARY_BUTTON_CLASS,
       disabled: busy || draft.trim() === "",
       onClick: () => void run(() => actions.sendSameSession(sessionId, draft)),
     },
@@ -829,8 +872,9 @@ function bannerElement(
       : t(copy.active, { secs: Math.max(1, Math.ceil(pending.remainingMs / 1000)) });
   return createElement(
     "div",
-    { key: "banner", className: "sr-banner" },
-    createElement("span", null, bannerText),
+    { key: "banner", className: "sr-banner", role: "status" },
+    createElement("span", { className: "sr-dot", "aria-hidden": "true" }),
+    createElement("span", { className: "sr-bannerText" }, bannerText),
     createElement(
       "button",
       { type: "button", className: "sr-button", disabled: busy, onClick: onCancel },
@@ -839,8 +883,9 @@ function bannerElement(
   );
 }
 
-/** 停止重问行。 */
-function stopReaskElement(
+/** 停止重问行（收起态：一个按钮）。导出仅供单测（busy/错误两个分支经 dock 装配
+ *  已不可达：在途确认只在草稿态发生）。 */
+export function stopReaskElement(
   busyStop: boolean,
   stopError: string | null,
   onStop: () => void,
@@ -858,50 +903,91 @@ function stopReaskElement(
   );
 }
 
-/** 编辑/重试/续写操作行。 */
+/** 停止重问的草稿行（展开态）：先改文本再停。预填最后一条用户消息，Esc 收起、
+ *  ⌘/Ctrl+Enter 确认（与编辑重发同一套键盘约定）。失败时草稿保留、错误行就地显示。 */
+function stopReaskDraftElement(props: {
+  draft: string;
+  busyStop: boolean;
+  stopError: string | null;
+  onDraft: (next: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+  t: Translate;
+}): ReactNode {
+  const { draft, busyStop, stopError, onDraft, onConfirm, onCancel, t } = props;
+  const onKeyDown = (ev: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      onCancel();
+    } else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      if (draft.trim() !== "") {
+        onConfirm();
+      }
+    }
+  };
+  const confirmButton = createElement(
+    "button",
+    {
+      type: "button",
+      className: SR_PRIMARY_BUTTON_CLASS,
+      disabled: busyStop || draft.trim() === "",
+      onClick: onConfirm,
+    },
+    busyStop ? t("stopping") : t("stopAndReask"),
+  );
+  const cancelButton = createElement(
+    "button",
+    { type: "button", className: "sr-button", disabled: busyStop, onClick: onCancel },
+    t("cancel"),
+  );
+  return createElement(
+    "div",
+    { key: "stop-draft", className: "sr-editor" },
+    createElement("textarea", {
+      className: "sr-textarea",
+      value: draft,
+      autoFocus: true,
+      onChange: (ev: React.ChangeEvent<HTMLTextAreaElement>) => {
+        onDraft(ev.target.value);
+      },
+      onKeyDown,
+    }),
+    createElement("div", { className: "sr-row" }, confirmButton, cancelButton),
+    stopError === null ? null : createElement("div", { className: "sr-error" }, stopError),
+  );
+}
+
+/** 编辑/重试/续写操作行（turnTail 条目内）。宿主重试在途时重试按钮整个不渲染
+ *  （隐藏而非禁用：composer 主按钮此刻已是「继续生成」，两个可用入口并存没有
+ *  增量信息），所以这里不再有 isHostPending 的禁用/等待分支。 */
 interface DockActionsProps {
   canEditDock: boolean;
   canRetryDock: boolean;
   canContinueDock: boolean;
-  isHostPending: boolean;
+  /** 崩溃恢复（owner 终态为 interrupted）：出「继续中断的回合」按钮，纯手动。 */
+  canResumeInterrupted: boolean;
   busy: boolean;
   error: string | null;
-  /** 本轮失败原因行（code/message 都缺时为 null，不出行）。 */
-  reason: string | null;
   /** 本轮跑过工具/命令：重试会重做副作用，按钮 title 需说明。 */
   hasTools: boolean;
   onEdit: () => void;
   onRetry: () => void;
   onContinue: () => void;
+  onResumeInterrupted: () => void;
   t: Translate;
 }
 
-/** 重试按钮的 title / 文本：两态各一条文案，提成模块级函数是为了不把 t() 嵌进
+/** 重试按钮的 title：跑过工具时补副作用提示。提成模块级函数是为了不把 t() 嵌进
  *  createElement 的参数位（unicorn/max-nested-calls 上限 3）。 */
 function retryButtonTitle(unit: DockActionsProps): string {
-  if (unit.isHostPending) {
-    return unit.t("hostRetryPendingTitle");
-  }
   return unit.hasTools
     ? `${unit.t("retryTitle")}（${unit.t("retrySideEffectTitle")}）`
     : unit.t("retryTitle");
 }
 
-/** 本轮失败原因行：code 与 message 都在就拼「code: message」，只有其一就单显，
- *  都缺（例如中断轮，轮内没有错误文本）就不出行。 */
-function failureReasonText(failure: TurnFailure | null, t: Translate): string | null {
-  if (failure === null) {
-    return null;
-  }
-  const detail =
-    failure.code !== null && failure.message !== null
-      ? `${failure.code}: ${failure.message}`
-      : (failure.message ?? failure.code);
-  return detail === null ? null : t("failureReason", { detail });
-}
-
 function retryButtonText(unit: DockActionsProps): string {
-  return unit.isHostPending ? unit.t("retryWaiting") : unit.t("retry");
+  return unit.t("retry");
 }
 
 function dockActionsElement(unit: DockActionsProps): ReactNode {
@@ -919,7 +1005,7 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
         {
           type: "button",
           className: "sr-button",
-          disabled: unit.busy || unit.isHostPending,
+          disabled: unit.busy,
           title: retryButtonTitle(unit),
           onClick: unit.onRetry,
         },
@@ -939,66 +1025,77 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
         t("continueOutput"),
       )
     : null;
+  const interruptedButton = unit.canResumeInterrupted
+    ? createElement(
+        "button",
+        {
+          type: "button",
+          className: SR_PRIMARY_BUTTON_CLASS,
+          disabled: unit.busy,
+          title: t("resumeInterruptedTitle"),
+          onClick: unit.onResumeInterrupted,
+        },
+        t("resumeInterrupted"),
+      )
+    : null;
   return createElement(
     "div",
     { key: "dock-actions", className: "sr-row" },
     editButton,
     retryButton,
     continueButton,
+    interruptedButton,
+    // 失败原因不在这里重复展示：宿主 transcript 的 turn-error/max-tokens 节点已经
+    // 把 code 与 message 渲染在原因行上（本行曾与之逐字重复）。
     unit.error === null ? null : createElement("span", { className: "sr-error" }, unit.error),
-    unit.reason === null ? null : createElement("span", { className: "sr-hint" }, unit.reason),
   );
 }
 
-/** 开关行三态文案（action=false → 状态展示，action=true → 按钮动作名）。
+/** 开关行三态文案（状态展示，拼进 sessionToggleLabel 的 {state} 位）。
  *  用 `Record<ToggleState, …>` 查表而不是 if/三元链：`unknown` 只出现在
- *  `rescueKnown === false` 的那一帧，而 decideDockState 里 `showToggleRow ===
- *  rescueKnown`，所以开关行在 unknown 态根本不渲染——分支写法的那几条 unknown
- *  支永远测不到。查表既保留三态文案（将来行显示出来也仍是中性 “—” + 等待提示），
- *  又不存在不可达分支。三张表按 t 现取（语言切换即时生效，不必重挂载组件）。 */
+ *  `rescueKnown === false` 的那一帧，而 decideDockState 里 `showToggleRow` 还要
+ *  会话已开始，所以开关行在 unknown 态同样不渲染——分支写法的那几条 unknown
+ *  支永远测不到。查表保留三态文案（将来行显示出来也仍是中性 “—”）。 */
 function toggleStatusTexts(t: Translate): Record<ToggleState, string> {
   return { on: t("toggleStateOn"), off: t("toggleStateOff"), unknown: t("toggleNeutral") };
-}
-function toggleActionTexts(t: Translate): Record<ToggleState, string> {
-  return { on: t("toggleTurnOff"), off: t("toggleTurnOn"), unknown: t("toggleNeutral") };
 }
 function toggleWaitingTitles(t: Translate): Record<ToggleState, string> {
   // on/off 没有等待提示（空 title 即不显气泡），只有快照未就绪才提示稍后再试。
   return { on: "", off: "", unknown: t("toggleWaiting") };
 }
 
-function toggleLabel(t: Translate, toggle: ToggleState, action: boolean): string {
-  return (action ? toggleActionTexts(t) : toggleStatusTexts(t))[toggle];
-}
-
 /** 每会话开关行（三态：on=开启 / off=已关闭 / unknown=快照未就绪）。
- *  unknown 时按钮禁用、文案取中性 "—"，避免把「还没同步到」显示成「已关闭」；
- *  busy = 写通道在途，toggle 是翻转语义，第二次点击会把刚设好的状态再翻回去。 */
+ *  控件是设置卡同款 switch（.dsu-switch 样式随 CARD_UI_CSS 注入 dock，靠右对齐）：
+ *  状态文字在标签里，开关本体只承载动作。unknown 时开关禁用、标签显示中性 "—"，
+ *  避免把「还没同步到」显示成「已关闭」；busy = 写通道在途，toggle 是翻转语义，
+ *  往返中再点一次会把刚设好的状态翻回去。 */
 function toggleRowElement(
   toggle: ToggleState,
   busy: boolean,
   onToggle: () => void,
   t: Translate,
 ): ReactNode {
-  // 三处取文案先落成变量：嵌进 createElement 参数位会超 max-nested-calls 上限。
-  const label = t("sessionToggleLabel", { state: toggleLabel(t, toggle, false) });
-  const actionLabel = toggleLabel(t, toggle, true);
-  const waitingTitle = toggleWaitingTitles(t)[toggle];
+  // 文案先落成变量：嵌进 createElement 参数位会超 max-nested-calls 上限。
+  const label = t("sessionToggleLabel", { state: toggleStatusTexts(t)[toggle] });
+  const switchButton = createElement(
+    "button",
+    {
+      type: "button",
+      role: "switch",
+      className: "dsu-switch",
+      "aria-checked": toggle === "on",
+      "aria-label": label,
+      disabled: toggle === "unknown" || busy,
+      title: toggleWaitingTitles(t)[toggle],
+      onClick: onToggle,
+    },
+    createElement("span", { className: "dsu-knob" }),
+  );
   return createElement(
     "div",
     { key: "toggle", className: "sr-row" },
     createElement("span", { className: "sr-hint" }, label),
-    createElement(
-      "button",
-      {
-        type: "button",
-        className: "sr-button",
-        disabled: toggle === "unknown" || busy,
-        title: waitingTitle,
-        onClick: onToggle,
-      },
-      actionLabel,
-    ),
+    switchButton,
   );
 }
 
@@ -1010,15 +1107,16 @@ interface ActionSink {
 
 /** 一次业务动作的通用 外壳（停止重问 / 编辑重发 / 重试 / 续写共用同一套
  *  busy-重入保护与错误呈现；原本 dock 里两份逐字重复的实现）。
- *  失败两条都要覆盖：结果 `{ok:false}`（宿主拒绝）与 reject（服务抛错）。 */
+ *  失败两条都要覆盖：结果 `{ok:false}`（宿主拒绝）与 reject（服务抛错）。
+ *  返回是否成功——重问草稿只在成功后收起，失败要把草稿留给用户改完再试。 */
 async function runAction(
   busy: boolean,
   sink: ActionSink,
   t: Translate,
   promiseFactory: () => Promise<ActionResult | ActionFailure>,
-): Promise<void> {
+): Promise<boolean> {
   if (busy) {
-    return;
+    return false;
   }
   sink.setBusy(true);
   sink.setError(null);
@@ -1027,10 +1125,13 @@ async function runAction(
     sink.setBusy(false);
     if (!result.ok) {
       sink.setError(errText(result, t));
+      return false;
     }
+    return true;
   } catch (error) {
     sink.setBusy(false);
     sink.setError(error instanceof Error ? error.message : String(error));
+    return false;
   }
 }
 
@@ -1071,8 +1172,135 @@ function useHostActions(
   return { busy, error, run };
 }
 
-/** dock：倒计时横幅 / 停止重问 / 编辑重试续写 / 每会话开关。
- *  排队行不在这里：官方 `dsh-client-ui-conversation` 自己就往同一道
+// ── 接续耗尽的升级提示（shell.overlay toast）────────────────────────────────
+// dock（session 侧）从 /state 快照发现本会话的 blocked 位出现 → 推一条进这里；
+// shell.overlay 上的 RescueToastHost 只渲染这份内存台账。overlay 条目不订阅 /state——
+// 轮询仍只由 dock 的订阅驱动，无会话视图时零轮询（quota-notice 的分工同款）。
+
+export interface RescueToastItem {
+  seq: number;
+  kind: string;
+}
+
+interface RescueToastStore {
+  items: RescueToastItem[];
+  listeners: Set<() => void>;
+  nextSeq: number;
+  push: (kind: string) => void;
+  dismiss: (seq: number) => void;
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => RescueToastItem[];
+}
+
+/** toast 台账上限：即时信息不是台账，超限丢最旧。 */
+const MAX_TOASTS = 4;
+
+/** 已弹过 toast 的「会话 → 轮次:类别」去重位：跨 remount（会话切走再切回）也不重复弹
+ *  同一次耗尽。按会话覆盖写；超过硬上限时整表清空（去重是体验优化而不是正确性面，
+ *  清空的最坏后果是极端场景下一次重复提示）。导出仅供单测（上限分支需要一个
+ *  200 键的前置态，从渲染侧造不出来）。 */
+export const lastToastedBySession = new Map<string, string>();
+export const MAX_LAST_TOASTED = 200;
+
+export const rescueToasts: RescueToastStore = {
+  items: [],
+  listeners: new Set(),
+  nextSeq: 0,
+  push(kind: string): void {
+    this.items = [...this.items, { seq: this.nextSeq, kind }].slice(-MAX_TOASTS);
+    this.nextSeq += 1;
+    for (const listener of this.listeners) {
+      listener();
+    }
+  },
+  dismiss(seq: number): void {
+    const next = this.items.filter((item) => item.seq !== seq);
+    if (next.length === this.items.length) {
+      return;
+    }
+    this.items = next;
+    for (const listener of this.listeners) {
+      listener();
+    }
+  },
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  },
+  getSnapshot(): RescueToastItem[] {
+    return this.items;
+  },
+};
+
+/** useSyncExternalStore 的模块级稳定引用（与 rescueStoreBinding 同一条纪律）。 */
+const rescueToastBinding = {
+  subscribe: (listener: () => void): (() => void) => rescueToasts.subscribe(listener),
+  getSnapshot: (): RescueToastItem[] => rescueToasts.getSnapshot(),
+};
+
+/** kind → toast 文案键（Map 挡原型键：kind 来自 host 载荷的不可信字符串）。 */
+const BLOCKED_TOAST_KEYS = new Map<string, keyof UiMessages>([
+  ["resume", "blockedResume"],
+  ["continue", "blockedContinue"],
+  ["unfinished", "blockedUnfinished"],
+]);
+const BLOCKED_TOAST_FALLBACK: keyof UiMessages = "blockedResume";
+
+/** toast 停留时长：比横幅长——它报的是「配额用尽」这种需要读完整句的状态。 */
+export const TOAST_HOLD_MS = 8000;
+
+function RescueToastItemView(props: { item: RescueToastItem; t: Translate }): ReactNode {
+  const { item, t } = props;
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      rescueToasts.dismiss(item.seq);
+    }, TOAST_HOLD_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [item.seq]);
+  const key = BLOCKED_TOAST_KEYS.get(item.kind) ?? BLOCKED_TOAST_FALLBACK;
+  const dismissButton = createElement(
+    "button",
+    {
+      type: "button",
+      className: "sr-button",
+      onClick: () => {
+        rescueToasts.dismiss(item.seq);
+      },
+    },
+    // 知会性浮层的关闭不取消任何状态，文案与横幅/编辑器的真「取消」分开。
+    t("toastDismiss"),
+  );
+  return createElement(
+    "div",
+    { className: "sr-toast", role: "status" },
+    createElement("span", { className: "sr-toastText" }, t(key)),
+    dismissButton,
+  );
+}
+
+/** shell.overlay 条目：耗尽提示宿主。root scope 拿不到会话身份，也拿不到会话
+ *  standard kit——它只渲染 dock 侧推过来的台账（quota-notice 同款分工）。 */
+function RescueToastHost(props: { t: Translate }): ReactNode {
+  const { t } = props;
+  const items = useSyncExternalStore(rescueToastBinding.subscribe, rescueToastBinding.getSnapshot);
+  if (items.length === 0) {
+    return null;
+  }
+  return createElement(
+    "div",
+    { className: "sr-toasts" },
+    items.map((item) => createElement(RescueToastItemView, { key: item.seq, item, t })),
+  );
+}
+
+/** dock：倒计时横幅 / 停止重问 / 每会话开关（会话级三件）。
+ *  回合级动作（编辑重发 / Fork 重发 / 重试 / 续写）已迁往 conversation.chat.turnTail
+ *  （RescueTurnTail）——它们作用于「最后失败回合」，与失败回合同址渲染才找得到对象。
+ *  排队行也不在这里：官方 `dsh-client-ui-conversation` 自己就往同一道
  *  `conversation.input.dock` 注册了 QueueDock（id="queue"，逐行编辑/删除/插话都有），
  *  本包再列一遍就是同一批消息显示两次。 */
 function RescueDockView(props: DockProps): ReactNode {
@@ -1082,17 +1310,10 @@ function RescueDockView(props: DockProps): ReactNode {
 
   const [busyStop, setBusyStop] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
-  const [dockEditing, setDockEditing] = useState(false);
-  const [dockBusy, setDockBusy] = useState(false);
-  const [dockError, setDockError] = useState<string | null>(null);
+  // 停止重问的草稿态：先改文本再停，预填最后一条用户消息（不再原样重发上一条）。
+  const [stopEditing, setStopEditing] = useState(false);
+  const [stopDraft, setStopDraft] = useState("");
   const host = useHostActions(sessionId, t);
-
-  const target = lastCompletedUserTarget(view);
-  const failure = failureOfLastTurn(view);
-  const isHostPending = failure !== null && hostRetryPending(view, failure.turn);
-  const canEditDock = target !== null && !view.running;
-  const canRetryDock = failure !== null && !view.running && failure.kind === "turn-error";
-  const canContinueDock = failure !== null && !view.running && failure.kind === "max-tokens";
 
   const lastNode = lastUserNode(view);
   const lastText = lastNode === null ? null : userText(lastNode.content);
@@ -1104,26 +1325,57 @@ function RescueDockView(props: DockProps): ReactNode {
   const decision = decideDockState(
     {
       canStopReask,
-      canEdit: canEditDock,
-      canRetry: canRetryDock,
-      canContinue: canContinueDock,
-      // 本地状态那两位：它们渲染在 dock 容器里，漏算就会让容器藏起自己正在显示的内容
-      // （编辑态在中途转成运行中时 `canEdit` 变假；写通道失败时 pending 可能已不在）。
-      editing: dockEditing && target !== null,
       hostActionFailed: host.error !== null,
+      // hero 空态（转录空且未在跑）不算已开始：开关行随 ③ 决策隐藏。
+      sessionStarted: view.nodes.length > 0 || view.running,
     },
     rescue,
     sessionId,
   );
   const { pending, toggle, showToggleRow, hasContent } = decision;
 
+  // 升级提示：本会话的 blocked 位出现（按 轮次:类别 去重）→ 推一条 toast。
+  // 去重位在模块级（lastToastedBySession）：跨 remount 也不重复弹同一次耗尽；
+  // 位撤掉后再耗尽（turn 前进）会再弹一次。
+  const sessionsMap = rescue?.sessions;
+  const sessionBlocked =
+    sessionsMap !== undefined && Object.hasOwn(sessionsMap, sessionId)
+      ? sessionsMap[sessionId]?.blocked
+      : undefined;
+  useEffect(() => {
+    if (sessionBlocked === undefined) {
+      return;
+    }
+    const dedupeKey = `${sessionBlocked.turn}:${sessionBlocked.kind}`;
+    if (lastToastedBySession.get(sessionId) === dedupeKey) {
+      return;
+    }
+    lastToastedBySession.set(sessionId, dedupeKey);
+    // 超硬上限整表清空：去重位是防重复提示的体验优化，不是正确性面——清空的最坏
+    // 后果是极端场景下一次重复提示，换来的是没有「理论上到不了的分支」要供着。
+    if (lastToastedBySession.size > MAX_LAST_TOASTED) {
+      lastToastedBySession.clear();
+    }
+    rescueToasts.push(sessionBlocked.kind);
+  }, [sessionBlocked, sessionId]);
+
+  // 运行态结束（canStopReask 变假）即收起草稿：下一轮展开时按当时的最后消息重新
+  // 预填，不带着上一轮的旧文本。
+  useEffect(() => {
+    if (!canStopReask) {
+      setStopEditing(false);
+    }
+  }, [canStopReask]);
+
   const doStopReask = async (reaskText: string): Promise<void> => {
-    await runAction(busyStop, { setBusy: setBusyStop, setError: setStopError }, t, () =>
+    const ok = await runAction(busyStop, { setBusy: setBusyStop, setError: setStopError }, t, () =>
       actions.stopAndReask(sessionId, reaskText),
     );
+    // 只在成功后收起：失败时草稿留在原地，错误行就地显示，用户改完再试。
+    if (ok) {
+      setStopEditing(false);
+    }
   };
-  const dockRun = (promiseFactory: () => Promise<ActionResult | ActionFailure>): Promise<void> =>
-    runAction(dockBusy, { setBusy: setDockBusy, setError: setDockError }, t, promiseFactory);
 
   const children: ReactNode[] = [];
 
@@ -1141,54 +1393,35 @@ function RescueDockView(props: DockProps): ReactNode {
 
   if (canStopReask) {
     // canStopReask 是 `view.running && lastText !== null` 的 const 别名，
-    // TS 据此把 lastText 收窄为 string（`doStopReask` 内那处 null 早退
-    // 因此永远走不到：唯一的调用点就在本分支内）。
-    children.push(stopReaskElement(busyStop, stopError, () => void doStopReask(lastText), t));
-  }
-
-  // 编辑 / 重试 / 续写主入口（唯一入口，dock 常驻）
-  if (dockEditing && target !== null) {
-    children.push(
-      createElement(
-        "div",
-        { key: "dock-edit", style: { padding: "4px 0" } },
-        createElement(RescueEditor, {
-          // key 带上会话与目标轮：草稿是 `useState(target.text)` 只初始化一次的局部状态，
-          // 而 dock 是常驻挂载点、React 按 key 复用组件实例。固定 key 下同一个实例会先后
-          // 服务不同会话/不同轮次，草稿于是留着上一轮（甚至上一会话）的文本——用户在 A
-          // 会话打了一半切到 B，B 的编辑框里显示的是 A 的内容，一点「重发」就把它发进 B。
-          key: `dock-edit:${sessionId}:${target.seq}`,
-          sessionId,
-          actions,
-          target,
-          t,
-          onDone: () => {
-            setDockEditing(false);
-            setDockError(null);
+    // TS 据此把 lastText 收窄为 string（两条分支内的使用因此都不必再判空）。
+    if (stopEditing) {
+      children.push(
+        stopReaskDraftElement({
+          draft: stopDraft,
+          busyStop,
+          stopError,
+          onDraft: setStopDraft,
+          onConfirm: () => void doStopReask(stopDraft),
+          onCancel: () => {
+            setStopError(null);
+            setStopEditing(false);
           },
+          t,
         }),
-      ),
-    );
-  } else if (canEditDock || canRetryDock || canContinueDock) {
-    children.push(
-      dockActionsElement({
-        canEditDock,
-        canRetryDock,
-        canContinueDock,
-        isHostPending,
-        busy: dockBusy,
-        error: dockError,
-        reason: failureReasonText(failure, t),
-        hasTools: failure?.hasTools === true,
-        t,
-        onEdit: () => {
-          setDockError(null);
-          setDockEditing(true);
-        },
-        onRetry: () => void dockRun(() => actions.sendSameSession(sessionId, t("retryText"))),
-        onContinue: () => void dockRun(() => actions.sendSameSession(sessionId, t("continueText"))),
-      }),
-    );
+      );
+    } else {
+      children.push(
+        stopReaskElement(
+          busyStop,
+          stopError,
+          () => {
+            setStopDraft(lastText);
+            setStopEditing(true);
+          },
+          t,
+        ),
+      );
+    }
   }
 
   // 开关行三态：on=开启 / off=已关闭 / unknown=快照未就绪（中性"—"，按钮禁用）
@@ -1215,6 +1448,116 @@ function RescueDockView(props: DockProps): ReactNode {
   // dock 容器常驻挂载（本地状态不随轮询 tick 丢失）；hasContent=false 时
   // 用 hidden 属性隐藏而非卸载组件——会话切换/快照空窗草稿不随轮次刷新而丢与 busy 标志。
   return createElement("div", { className: "sr-dock", hidden: !hasContent }, children);
+}
+
+// ── turnTail 条目：回合级接续动作（conversation.chat.turnTail）──────────────
+
+/**
+ * 槽位条目的 props：官方 `PropsRuntime<'conversation.chat.turnTail'>` 一位不出本地复述——
+ * owner 三件套（`turn`/`seq`/`openFile`，属主 `dsh-client-ui-chat` 的 contract/slots.ts）
+ * 与 session standard kit（`sessionId`/`useChat`/`useSession`/`useProjection`，由
+ * dsh-client-ui-session 与 ui-chat 两家 merge 进 `SessionStandardProps`）都从那一型取；
+ * 只有 `actions`/`t` 是本包经 slots.register 的 inject 面下发的自有注入位。
+ */
+type RescueTurnTailProps = PropsRuntime<"conversation.chat.turnTail"> & {
+  actions: Actions;
+  t: Translate;
+};
+
+/** turnTail：最新完成回合的操作行（编辑重发 / Fork 重发 / 重试 / 续写）。
+ *  槽位为每个完成回合各开一个 seat；只有「最新完成回合就是本 seat」那一格出内容，
+ *  其余回合按契约返回 null（"entries without content return null"）。
+ *  各按钮保留各自原判据（编辑不要求失败态——正常回合也能改写重发；重试/续写要求
+ *  对应的失败类别），与拆分前 dock 上的行为逐项一致。
+ *  hooks 必须先于 early return：同一 seat 的实例会先渲染 null、回合结束后再出内容，
+ *  hook 数量在两次渲染间必须一致。 */
+function RescueTurnTail(props: RescueTurnTailProps): ReactNode {
+  const { sessionId, actions, t, turn: location } = props;
+  const view = useTranscriptView(props);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // seat 与回合一一对应：只有「最新完成回合」的 seat 出内容，旧 seat 一律 null。
+  let lastTurn = -1;
+  for (const turnId of view.turnEnds.keys()) {
+    if (turnId > lastTurn) {
+      lastTurn = turnId;
+    }
+  }
+  if (location.turn !== lastTurn) {
+    return null;
+  }
+  const target = lastCompletedUserTarget(view);
+  const failure = failureOfLastTurn(view);
+  // 宿主重试（llm/retry 的 scheduled/started）在途 → 重试按钮整个隐藏而非禁用：
+  // composer 主按钮此刻已是「继续生成」，两个可用入口并存没有增量信息。
+  const isHostPending = failure !== null && hostRetryPending(view, failure.turn);
+  // 崩溃恢复：owner 终态 reason.kind === "interrupted"（宿主崩溃修复给孤儿回合补写的
+  // 闭合标记；live 中止走的是 aborted，不会命中）。判据读 owner 交来的 turn/end 事件
+  // 本体，不经客户端推断——transcript 视图里的 interrupted 助手节点与用户中止同形，
+  // 分不出崩溃与手停。回合运行中不出（此时的注入会被排队，且新回合可能已接续）。
+  const endData = fieldOf(location.end, "data");
+  const reasonOfEnd = fieldOf(endData, "reason");
+  const canResumeInterrupted = fieldOf(reasonOfEnd, "kind") === "interrupted" && !view.running;
+  const canEditDock = target !== null;
+  const canRetryDock = failure?.kind === "turn-error" && !isHostPending;
+  const canContinueDock = failure?.kind === "max-tokens";
+  if (!canEditDock && !canRetryDock && !canContinueDock && !canResumeInterrupted) {
+    return null;
+  }
+  const dockRun = (promiseFactory: () => Promise<ActionResult | ActionFailure>): Promise<boolean> =>
+    runAction(busy, { setBusy, setError }, t, promiseFactory);
+
+  const children: ReactNode[] = [];
+  if (editing && target !== null) {
+    children.push(
+      createElement(
+        "div",
+        { key: "tail-edit", style: { padding: "4px 0" } },
+        createElement(RescueEditor, {
+          // key 带上会话与目标轮：草稿是 `useState(target.text)` 只初始化一次的局部状态，
+          // 固定 key 下同一实例先后服务不同目标轮时，草稿会留着上一轮的文本
+          // （原 dock 编辑器同一条纪律）。
+          key: `tail-edit:${sessionId}:${target.seq}`,
+          sessionId,
+          actions,
+          target,
+          t,
+          onDone: () => {
+            setError(null);
+            setEditing(false);
+          },
+        }),
+      ),
+    );
+  } else {
+    children.push(
+      dockActionsElement({
+        canEditDock,
+        canRetryDock,
+        canContinueDock,
+        canResumeInterrupted,
+        busy,
+        error,
+        hasTools: failure?.hasTools === true,
+        t,
+        onEdit: () => {
+          setError(null);
+          setEditing(true);
+        },
+        onRetry: () => {
+          void dockRun(() => actions.sendSameSession(sessionId, t("retryText")));
+        },
+        onContinue: () => {
+          void dockRun(() => actions.sendSameSession(sessionId, t("continueText")));
+        },
+        onResumeInterrupted: () => {
+          void dockRun(() => actions.sendSameSession(sessionId, t("resumeInterruptedText")));
+        },
+      }),
+    );
+  }
+  return createElement("div", { className: "sr-tail" }, children);
 }
 
 // ── 配置入口（plugins.bundle.config，key = bundle 包名；0.1.6 起取代已删除的
@@ -1356,6 +1699,28 @@ function presetOfRow(row: RetryProviderRow): string {
   return "default";
 }
 
+/** 现行策略是否恰好是它所推断档位的规范形状（四档各自的精确取值）。
+ *  投影只有 mode/maxRetries/hasQuota 三位，手写配置（如 normal/10 自定义码表）
+ *  会被 presetOfRow 归到最近的档位；对非规范形状的行写档位会把那份手写配置整个
+ *  覆盖掉（settings 的 user section 与行配置同文档，没有历史可回滚），因此
+ *  非规范形状的行在写之前必须确认。盲区：恰好写成规范形状的手写配置检测不出来。
+ *  各档分支只补投影可辨的判据——mode/maxRetries 的其余约束已由 presetOfRow
+ *  的分流保证（always 已先行返回、off 已含 maxRetries===0、enhanced 已含
+ *  mode normal + hasQuota），再写一遍会产生测不到的死分支。 */
+function isCanonicalPreset(row: RetryProviderRow): boolean {
+  const preset = presetOfRow(row);
+  if (preset === "always") {
+    return true;
+  }
+  if (preset === "off") {
+    return !row.hasQuota;
+  }
+  if (preset === "enhanced") {
+    return row.maxRetries === 12;
+  }
+  return !row.hasQuota && row.maxRetries === 5;
+}
+
 /** 单行 provider 的档位下拉（选择先暂存，点「保存」批量写到磁盘）。 */
 function retryRowElement(
   row: RetryProviderRow,
@@ -1467,6 +1832,35 @@ function retryProvidersBody(
   );
 }
 
+/** 覆盖警告行：点名非规范形状（疑似手写）的 provider，给「仍要保存」与「取消」。
+ *  文案先落成常量、按钮先落成常量再进树：t() 与 createElement 的嵌套都在
+ *  max-nested-calls 限内，也让 RetryPolicySection 本体留在行数预算里。 */
+function overwriteWarnElement(
+  targets: readonly string[],
+  t: Translate,
+  onForce: () => void,
+  onDismiss: () => void,
+): ReactNode {
+  const warnText = t("presetOverwriteWarn", { providers: targets.join(t("failureJoiner")) });
+  const forceButton = createElement(
+    "button",
+    { type: "button", className: "sr-button sr-primary", onClick: onForce },
+    t("confirmSave"),
+  );
+  const dismissButton = createElement(
+    "button",
+    { type: "button", className: "sr-button", onClick: onDismiss },
+    t("cancel"),
+  );
+  return createElement(
+    "div",
+    { className: "sr-error", role: "alert" },
+    createElement("span", null, warnText),
+    forceButton,
+    dismissButton,
+  );
+}
+
 /** 保存条（保存/丢弃/状态提示）：保存中或脏数为 0 时两个按钮一起禁点。 */
 function retrySaveBar(props: {
   saving: boolean;
@@ -1524,10 +1918,17 @@ function retrySaveBar(props: {
 function RetryPolicySection(props: { t: Translate }): ReactNode {
   const { t } = props;
   const [state, setState] = useState<RetryPanelState>(null);
+  // 最近一次成功读到的 provider 行：写前确认按它逐行判「现行配置是否规范形状」。
+  // 与 state 分开存：pending 只在 ok 态下产生，saveAll 读这张表就不必再守 state 的形状。
+  const [rows, setRows] = useState<readonly RetryProviderRow[]>([]);
   // 保存条模式：改档位先暂存（provider → preset），点「保存」批量写到磁盘
   const [pending, setPending] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // 写前确认：暂存命中非规范形状（疑似手写）的现行配置时，第一次点「保存」
+  // 只亮警告行；「仍要保存」带 force 重入，「取消」只收警告、暂存保留。
+  const [confirming, setConfirming] = useState(false);
+  const [confirmTargets, setConfirmTargets] = useState<string[]>([]);
 
   // load 依赖 t（文案走 UI_MESSAGES），所以用 useCallback 把身份固定下来：它同时被挂载
   // 那一次和「保存成功后重读」调用，写成裸函数会让 useEffect 的依赖数组没法写对。
@@ -1549,6 +1950,7 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
         }
       }
       setState(fieldOf(parsed, "ok") === true ? { ok: true, providers } : { ok: false });
+      setRows(providers);
     } catch (error) {
       setState({ ok: false, error: String(error) });
     }
@@ -1559,10 +1961,23 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   }, [load]);
 
   const dirtyCount = Object.keys(pending).length;
-  const saveAll = async (): Promise<void> => {
+  const saveAll = async (force: boolean): Promise<void> => {
     if (dirtyCount === 0) {
       return;
     }
+    if (!force) {
+      // 覆盖警告的判定按行走（rows 来自最近一次成功加载的列表）：有暂存的行里只要有一条
+      // 现行配置不是规范形状，整批先确认——批量里混着规范行时多看一眼比漏报便宜。
+      const custom = rows
+        .filter((row) => pending[row.provider] !== undefined && !isCanonicalPreset(row))
+        .map((row) => row.provider);
+      if (custom.length > 0) {
+        setConfirmTargets(custom);
+        setConfirming(true);
+        return;
+      }
+    }
+    setConfirming(false);
     setSaving(true);
     setSaveError(null);
     const entries = Object.entries(pending);
@@ -1585,9 +2000,11 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   const discardAll = (): void => {
     setPending({});
     setSaveError(null);
+    setConfirming(false);
   };
 
   const changePreset = (row: RetryProviderRow, next: string): void => {
+    setConfirming(false);
     setPending((prev) => {
       const merged = { ...prev, [row.provider]: next };
       if (next === presetOfRow(row)) {
@@ -1598,17 +2015,33 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     });
   };
 
+  // 覆盖警告行：仅 confirming 且名单非空时渲染；组装在模块级 overwriteWarnElement。
+  const overwriteWarnRow =
+    confirming && confirmTargets.length > 0
+      ? overwriteWarnElement(
+          confirmTargets,
+          t,
+          () => {
+            void saveAll(true);
+          },
+          () => {
+            setConfirming(false);
+          },
+        )
+      : null;
+
   return createElement(
     Section,
     { title: t("retrySectionTitle"), hint: t("retrySectionHint") },
     retryProvidersBody(state, pending, saving, changePreset, t),
+    overwriteWarnRow,
     retrySaveBar({
       saving,
       dirtyCount,
       saveError,
       t,
       onSave: () => {
-        void saveAll();
+        void saveAll(false);
       },
       onDiscard: discardAll,
     }),
@@ -1832,6 +2265,11 @@ function buildUnfinishedSection(inputs: SectionInputs): ReactNode {
       hint: "openTodosHint",
       field: "resumeOnOpenTodos",
     }),
+    toggleField(inputs, {
+      label: "steerModeLabel",
+      hint: "steerModeHint",
+      field: "unfinishedSteerMode",
+    }),
     secondsField(inputs, {
       label: "unfinishedDelayLabel",
       hint: "unfinishedDelayHint",
@@ -1998,10 +2436,12 @@ export interface ClientCtx {
    * TS 对它做名义比较，测试替身永远满足不了整类型；`register` 逐字复用
    * `SlotCore['register']` 的两个重载，`inject` 是「按槽位声明生命周期装 effect」那一位
    *（collapse 跑 disposer、再次声明重跑工厂，契约写在同一份 `registry.d.ts` 里 `register` 的
-   * 文档注释上）。
-   * 于是本包的两位槽名都是**编译期受检**的：`conversation.input.dock` 由属主包
+   *  文档注释上）。
+   * 于是本包的三位槽名都是**编译期受检**的：`conversation.input.dock` 由属主包
    * `dsh-client-ui-conversation` merge（其 `contract/slots.d.ts` 的 `SlotMap` 里那条，list / scope
-   * session / owner `InputZone`），`plugins.bundle.config` 由 `dsh-client-ui-plugin-manager`
+   * session / owner `InputZone`），`conversation.chat.turnTail` 由 `dsh-client-ui-chat` merge
+   * （同文件族里那条，list / scope session / owner `TurnTailOwnerProps`），
+   * `plugins.bundle.config` 由 `dsh-client-ui-plugin-manager`
    * merge（经 `ConfigPageForm` 那一条 import 载入）。list 槽必须给 `id`、keyed 槽必须给
    * `key`——官方 `KindOptions` 按 `SlotMap[K]['kind']` 分发（旧本地镜像把两者都写成可选）。
    *
@@ -2121,7 +2561,8 @@ function apply(ctx: ClientCtx): void {
   const actions = createActions(ctx.sessions, () => ctx.get("uiWorkspace"), t);
 
   // 注册不加静默 try/catch：失败必须可见（chat-recovery 静默吞错是反模式）
-  // 编辑/重试/续写统一只在 dock（conversation.input.dock，list 槽无链冲突）
+  // 会话级三件在 dock（conversation.input.dock，list 槽）：order 30 排在官方 queue(20)
+  // 之后，不再像旧值 500 那样把本 dock 压到紧贴输入卡上沿。
   ctx.slots.inject("conversation.input.dock", () =>
     ctx.slots.register(
       {
@@ -2129,10 +2570,35 @@ function apply(ctx: ClientCtx): void {
         // dock 条目按本包条目 id（NS）登记——它既不是 bundle 包名（BUNDLE_PKG，
         // 见文件头「两个标识」纪律），也不是引用标签（REFERENCE_SOURCE_KEY）。
         id: NS,
-        order: 500,
+        order: 30,
         inject: () => ({ actions, t }),
       },
       RescueDockView,
+    ),
+  );
+
+  // 回合级动作的新家：conversation.chat.turnTail（每个完成回合的操作行上方，与一方
+  // deliverables(0)/schedule(20) 同栈；order 30 贴近操作行）。id 同样按条目 id（NS）
+  // 登记——两个 list 槽的条目 id 互不相干，都与 BUNDLE_PKG 无关。
+  ctx.slots.inject("conversation.chat.turnTail", () =>
+    ctx.slots.register(
+      {
+        name: "conversation.chat.turnTail",
+        id: NS,
+        order: 30,
+        inject: () => ({ actions, t }),
+      },
+      RescueTurnTail,
+    ),
+  );
+
+  // 接续耗尽的升级提示挂 shell.overlay（frame 级悬浮层，官方 quota-notice / forge toast
+  // 同位）。id 用本包命名空间前缀避免与既有条目相撞；条目只渲染 dock 侧推来的台账，
+  // 不订阅 /state——轮询仍只由 dock 的挂载驱动。
+  ctx.slots.inject("shell.overlay", () =>
+    ctx.slots.register(
+      { name: "shell.overlay", id: "session-rescue.toast", inject: () => ({ t }) },
+      RescueToastHost,
     ),
   );
 

@@ -238,7 +238,10 @@ describe("真 AgentLoop 下的自动续跑", () => {
   });
 
   it("限流失败后自动补一条救援消息，下一轮真跑成功", async () => {
-    rig = await boot(["rate_limit", "success"]);
+    // requestRetryMax: 0 把请求级阶梯关掉：本用例钉的是回合级续跑链（agent/error →
+    // followup），而限流失败在阶梯开着时会被请求级在回合内直接救活（见下一条用例），
+    // 回合根本不会失败、救援消息也无从产生。
+    rig = await boot(["rate_limit", "success"], { config: { requestRetryMax: 0 } });
     const { agent, server } = rig;
     await send(agent, "first task");
     // 回合失败后插件armed 定时器（本处取 schema 下限 1000ms）；等它 fire 并跑完第二轮。
@@ -295,26 +298,46 @@ describe("真 AgentLoop 下的自动续跑", () => {
     expect(rig.server.requests).toHaveLength(1);
   }, 60_000);
 
-  it("真 deepseek 适配器总会解析出一份重试策略 ⇒ 本包的请求级阶梯让位", async () => {
-    // 探测到的事实：完全不配 retryPolicy 时适配器仍按 `resolveRetryPolicy(undefined)` 交回
-    // 一份默认策略（mode:normal / maxRetries:5 / 码表含 RATE_LIMIT），于是 host.ts 的
-    // 「宿主已解析出策略 ⇒ 重试归官方 llm-retry」这条判据成立。两条推论只有真宿主
-    // 能给：本包阶梯不是这个适配器的兜底路径（那条路只有单测能造），而 profile 若没装
-    // dsh-llm-retry，一次 429 会零次重发直接终态。
-    // resumeDelayMs 抬到 30s：回合级续跑在本用例里仍会武装（那是设计内行为），
-    // 抬高延迟让「请求条数 === 1」的断言不再与 1s 的定时器赛跑——慢机上断言
-    // 只要落在延迟窗内就是确定的。
-    rig = await boot(["rate_limit", "success"], {
-      withAdapterPolicy: false,
-      config: { resumeDelayMs: 30_000 },
-    });
-    const { agent } = rig;
+  it("未装 llm-retry 的 profile：适配器策略在位但下游放行 → 本包阶梯在回合内接管限流", async () => {
+    // 两条真宿主事实在本用例合流：① 完全不配 retryPolicy 时适配器仍按
+    // `resolveRetryPolicy(undefined)` 交回一份默认策略（探测位可见）——但策略在位
+    // 不等于会重试；② 本装配没有官方 dsh-llm-retry（真 profile 可以不装它），waterfall
+    // 上除探测替身外只有本包——限流失败没人接，本包阶梯按 mock 的 Retry-After（1s）
+    // 在同一回合内重发，第二轮真跑成功。旧语义（按「有策略就让位」划线）下这一失败的
+    // 结局是零次重发直接终态，只能靠回合级续跑。
+    rig = await boot(["rate_limit", "success"], { withAdapterPolicy: false });
+    const { agent, server } = rig;
     const observed: { policy: unknown }[] = [];
     probeRequestError(rig.ctx, observed);
     await send(agent, "single shot task");
+    // 锚点含「第二轮已发出」：请求级重试与回合级续跑都会追加请求，等条件成立再收口。
+    await expect(waitFor(() => server.requests.length >= 2, within(6000))).resolves.toBe(true);
     await agent.whenIdle();
     expect(observed).toHaveLength(1);
     expect(observed[0]?.policy).toBeTypeOf("object");
-    expect(rig.server.requests).toHaveLength(1);
+    expect(server.requests).toHaveLength(2);
+    expect(agent.status).toBe("idle");
+    // 回合在请求级就被救活：没有 agent/error 之后的救援消息，回合级配额零消耗。
+    expect(rescueMessages(agent)).toHaveLength(0);
+  }, 60_000);
+
+  it("配额耗尽（maxResumes=0）→ 真宿主里 blocked 位进 /state（升级提示的数据源）", async () => {
+    // F2 的 host→/state 一段在真宿主里闭合：回合级续跑被 max-resumes 拒绝时，
+    // blocked 台账记下（kind + 造次失败轮），/state 的会话行带上 blocked 位。
+    // requestRetryMax: 0 同时关掉请求级阶梯——否则限流会在回合内被救活，agent/error
+    // 根本不发生。resumeDelayMs 抬高：即便有注入也不在断言窗口内触发。
+    rig = await boot(["rate_limit", "success"], {
+      config: { requestRetryMax: 0, maxResumes: 0, resumeDelayMs: 30_000 },
+    });
+    const { agent } = rig;
+    await send(agent, "quota zero task");
+    await agent.whenIdle();
+    expect(rig.failures).toHaveLength(1);
+    const remote = rig.ctx.get("sessionRescue") as
+      | { state: () => { sessions: Record<string, Record<string, unknown>> } }
+      | undefined;
+    expect(remote).toBeDefined();
+    const row = remote?.state().sessions[agent.session.id];
+    expect(row?.["blocked"]).toMatchObject({ kind: "resume", turn: 1 });
   }, 60_000);
 });

@@ -22,6 +22,8 @@ const TURN_START_EVENT = "turn/start";
 const USER_MESSAGE_EVENT = "user/message";
 const AGENT_ERROR_EVENT = "agent/error";
 const AGENT_REQUEST_ERROR_EVENT = "agent/request-error";
+const TODO_WRITE_EVENT = "todo/write";
+const AGENT_TURN_STOPPING_EVENT = "agent/turn-stopping";
 const AGENT_DISPOSED_EVENT = "agent/disposed";
 /** 设置文档变更事件名：locale 偏好缓存据此失效，宿主按命名空间逐条推送。 */
 const SETTINGS_UPDATED = "settings/document-updated";
@@ -59,6 +61,8 @@ interface MockAgent {
   session: { id: string; snapshotEvents: () => unknown[]; evs?: unknown[] };
   followup: (message: unknown) => void;
   followupCalls: unknown[];
+  steer: (message: unknown) => void;
+  steerCalls: unknown[];
 }
 
 interface MockInjectCtx {
@@ -408,6 +412,7 @@ function makeAgent(
   const followupCalls: unknown[] = [];
   const evs: unknown[] =
     (opts.session as { snapshotEvents?: () => unknown[] } | undefined)?.snapshotEvents?.() ?? [];
+  const steerCalls: unknown[] = [];
   const agent: MockAgent = {
     id,
     options: provider === undefined ? {} : { provider },
@@ -418,6 +423,10 @@ function makeAgent(
       followupCalls.push(msg);
     },
     followupCalls,
+    steer(msg) {
+      steerCalls.push(msg);
+    },
+    steerCalls,
   };
   return agent;
 }
@@ -522,7 +531,8 @@ function evResult(turn: number, callId: string): unknown {
 }
 function evTodo(todos: unknown): unknown {
   // 清单写入载荷只有 { todos }（清单类型契约），不带 turn。
-  return { type: "todo/write", seq: 3, time: 3, data: { todos } };
+  const event: unknown = { type: TODO_WRITE_EVENT, seq: 3, time: 3, data: { todos } };
+  return event;
 }
 /** 最短的"本回合自己写过清单"事件流：turn/start → todo/write → turn/end。 */
 function turnWithTodos(turn: number, kind: string, todos: unknown): unknown[] {
@@ -569,6 +579,7 @@ describe("settings 隐式注册（0.1.7：命名空间 = profile 条目 id）", 
       unfinishedDelayMs: 5000,
       unfinishedCooldownMs: 120_000,
       maxUnfinished: 2,
+      unfinishedSteerMode: false,
       // 字段化的请求级重试三值：默认与旧模块常量同值（5 次 / 该阶梯 / 30s 封顶），
       // 行为冻结。手写字面值而不引常量——引常量就成了自证，常量改了该先红。
       requestRetryMax: 5,
@@ -964,6 +975,42 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
     openRescueTurn(agent, 99);
     ctx.fire(AGENT_ERROR_EVENT, payload(agent, 99, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 3);
+  });
+});
+
+describe("配额耗尽的 blocked 位（/state 升级提示源）", () => {
+  let ctx: MockCtx;
+  beforeEach(() => {
+    ctx = createMockCtx();
+    applyPlugin(ctx);
+  });
+
+  it("max-resumes 拒绝 → /state 记 blocked；配额恢复（completed 回合）→ 位撤掉", () => {
+    ctx.scope.set({ maxResumes: 0 });
+    const agent = makeAgent("s1", "tokenrouter");
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    const body = remoteOf(ctx).state();
+    assert.deepEqual(
+      (body.sessions["s1"] as { blocked?: { kind: string; turn: number } }).blocked,
+      { kind: "resume", turn: 1 },
+      "耗尽被拒记入 blocked（kind + 造次失败轮）",
+    );
+    // completed 回合 → onSuccess 配额恢复 → 位撤掉（客户端下次耗尽会再报一次）
+    replaceEvent(agent, evTurnEnd(2, "completed"));
+    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    const st = remoteOf(ctx).state().sessions["s1"] as { blocked?: unknown };
+    assert.equal(st.blocked, undefined, "配额恢复即撤位");
+  });
+
+  it("toggle 关闭会话 → blocked 一并撤掉", () => {
+    ctx.scope.set({ maxResumes: 0 });
+    const agent = makeAgent("s2", "tokenrouter");
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    remoteOf(ctx).toggle({ sessionId: "s2" });
+    const st = remoteOf(ctx).state().sessions["s2"] as { blocked?: unknown };
+    assert.equal(st.blocked, undefined, "关掉的会话不再需要耗尽解释");
   });
 });
 
@@ -1434,7 +1481,7 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       ev.length = 0;
       ev.push(
         { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn } },
-        { type: "todo/write", seq: 2, time: 2, data: { todos } },
+        { type: TODO_WRITE_EVENT, seq: 2, time: 2, data: { todos } },
         { type: "turn/end", seq: 3, time: 3, data: { turn, reason: { kind: "completed" } } },
       );
     };
@@ -1636,6 +1683,7 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
       },
       nextNoop,
     );
+    await Promise.resolve();
     ctx.tick();
     assert.deepEqual(await action, { kind: "retry" });
     assert.equal(reads, 0, "重试途中不读活线，没有换到新选择的窗口");
@@ -1741,9 +1789,11 @@ describe("agent/request-error 请求级 429 重试", () => {
   }
 
   /** 触发一次 request-error 并推进退避定时器（mock 时钟）后取 action。
-   *  监听器同步注册退避 timer（Promise executor 同步执行），tick 后 await。 */
+   *  监听器先 `await next()`（采纳位）再武装退避 timer——后续注册发生在微任务里，
+   *  断言与 tick 之前必须先冲刷一轮微任务。 */
   async function fire(evt: unknown): Promise<unknown> {
     const result = reListener(ctx)(evt, nextNoop);
+    await Promise.resolve();
     ctx.tick();
     return result;
   }
@@ -1762,6 +1812,7 @@ describe("agent/request-error 请求级 429 重试", () => {
         return;
       }
       const result = listener(evt, nextNoop);
+      await Promise.resolve();
       box.tick();
       out.push(await result);
       return step(remaining - 1);
@@ -1788,12 +1839,64 @@ describe("agent/request-error 请求级 429 重试", () => {
     assert.deepEqual(act, retryAction);
   });
 
-  it("宿主已解析出 retryPolicy → 委托 next()，本包阶梯不参与（官方 llm-retry 优先）", async () => {
-    // 两条链共用同一个 waterfall，先返回 {kind:'retry'} 的赢。不让位就等于把官方那套
-    // （retryableCodes / providerRetryAfterMs / 抖动 / 持久化 llm/retry 事件）整体顶掉。
+  it("下游已返回 {kind:'retry'}（如官方 llm-retry 接手）→ 原样采纳，不占本阶梯名额", async () => {
+    // 分工是「先问下游、无人接再自己来」：llm-retry 愿意接的失败（码表内、次数未耗尽）
+    // 归它——本包采纳它的决策，码表过滤、Retry-After、抖动、持久 llm/retry 事件全部保留。
     const agent = makeAgent("re-policy", "sensenova");
-    let delegated = false;
+    const policy = {
+      mode: "normal",
+      maxRetries: 12,
+      retryableCodes: ["QUOTA"],
+      backoff: { initialDelayMs: 8000, maxDelayMs: 60_000, jitterRatio: 0.2 },
+    };
+    let nextCalled = false;
     const act = await reListener(ctx)(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider: "sensenova",
+        failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
+        retryPolicy: policy,
+        signal: undefined,
+      },
+      async () => {
+        nextCalled = true;
+        return retryAction;
+      },
+    );
+    assert.equal(nextCalled, true, "必须先问下游");
+    assert.deepEqual(act, retryAction, "采纳下游决策");
+    // 采纳不占本阶梯名额：下一次下游放行时，本阶梯仍从第 1 档（2s）起步。
+    const before = ctx.timers.length;
+    const second = reListener(ctx)(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider: "sensenova",
+        failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
+        retryPolicy: policy,
+        signal: undefined,
+      },
+      nextNoop,
+    );
+    await Promise.resolve();
+    assert.equal(ctx.timers.length, before + 1, "下游放行 → 本阶梯武装退避");
+    assert.equal(ctx.timers[before]?.ms, 2000, "采纳未占名额：仍从阶梯第 1 档起步");
+    const entry = ctx.timers[before];
+    assert.notEqual(entry, undefined, "下游放行后确已武装退避");
+    entry.fired = true;
+    entry.fn();
+    assert.deepEqual(await second, retryAction);
+  });
+
+  it("宿主解析了 retryPolicy 但下游放行（undefined）→ 本阶梯接管（最后一级）", async () => {
+    // llm 注册表对未配置的 provider 无条件补默认策略，「无策略 provider」在真宿主上
+    // 不存在；「下游放行」（码表外 QUOTA / 次数耗尽 / Retry-After 超限）才是接手信号。
+    const agent = makeAgent("re-takeover", "sensenova");
+    let delegated = false;
+    const pending = reListener(ctx)(
       {
         agent,
         turn: 1,
@@ -1803,18 +1906,59 @@ describe("agent/request-error 请求级 429 重试", () => {
         retryPolicy: {
           mode: "normal",
           maxRetries: 12,
-          retryableCodes: ["QUOTA"],
-          backoff: { initialDelayMs: 8000, maxDelayMs: 60_000, jitterRatio: 0.2 },
+          retryableCodes: ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"],
+          backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0.1 },
         },
         signal: undefined,
       },
       async () => {
         delegated = true;
-        // 下游的终结结论：undefined = 不重试。
+        // llm-retry 对码表外 QUOTA 的放行形：next() 交回 undefined（无 return 即隐式）。
       },
     );
-    assert.equal(delegated, true, "有 retryPolicy 时必须让位给下游");
-    assert.equal(act, undefined, "本包不返回 retry 决策");
+    await Promise.resolve();
+    ctx.tick();
+    assert.equal(delegated, true, "先问下游");
+    assert.deepEqual(await pending, retryAction, "下游不接，本阶梯是最后一级");
+  });
+
+  it("下游 next() 抛错 → 按无决策处理并 warn，本阶梯照常接手（Error 与非 Error 两面）", async () => {
+    const agent = makeAgent("re-throw", "sensenova");
+    const fireOnce = async (nextImpl: () => Promise<unknown>): Promise<unknown> => {
+      const pending = reListener(ctx)(
+        {
+          agent,
+          turn: 1,
+          step: 1,
+          provider: "sensenova",
+          failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
+          retryPolicy: undefined,
+          signal: undefined,
+        },
+        nextImpl,
+      );
+      await Promise.resolve();
+      ctx.tick();
+      return pending;
+    };
+    assert.deepEqual(
+      await fireOnce(async () => {
+        throw new Error("downstream boom");
+      }),
+      retryAction,
+      "reject(Error) 面",
+    );
+    // 名额已被上一次占用一枚：本枚从阶梯第二档起步，仍照常接手。
+    // 非 Error 拒绝的两条 lint 门在此豁免：被测路径就是「下游交回的不是 Error 对象」，
+    // 真宿主里适配器/中间件可能抛任何东西，字面串是它的最小替身。
+    assert.deepEqual(
+      await fireOnce(async () => {
+        // oxlint-disable-next-line unicorn/no-throw-literal, typescript/only-throw-error -- 见上
+        throw "raw-string-fail";
+      }),
+      retryAction,
+      "reject(非 Error) 面：warn 走 String(error) 分支",
+    );
   });
 
   it("文本含 429 / rate limit / quota 且无 status 字段（pi-ai 丢 status 形态）→ retry", async () => {
@@ -1878,7 +2022,7 @@ describe("agent/request-error 请求级 429 重试", () => {
     for (const [index, act] of acts.entries()) {
       assert.deepEqual(act, retryAction, `第 ${index + 1} 次仍重试`);
     }
-    // 第 6 次：超过上限，委托 next（并把计数清空）
+    // 第 6 次：超过上限，本阶梯按终态收束（并把计数清空）
     const act6 = await fireSequence(ctx, quotaEvt("re4"), 1);
     assert.equal(act6[0], undefined, "超上限不再重试");
   });
@@ -1899,7 +2043,7 @@ describe("agent/request-error 请求级 429 重试", () => {
       assert.deepEqual(act, retryAction, `回合2第${index + 1}次仍重试（计数已重置）`);
     }
     const round3 = await fireSequence(ctx, useAgent(), 1);
-    assert.equal(round3[0], undefined, "回合2第6次超上限委托 next");
+    assert.equal(round3[0], undefined, "回合2第6次超上限，本阶梯按终态收束");
   });
 
   it("退避：按尝试序取固定阶梯（2s/5s/10s/20s/30s），sleep 走宿主 timer（退避修复）", async () => {
@@ -1924,6 +2068,8 @@ describe("agent/request-error 请求级 429 重试", () => {
         },
         nextNoop,
       );
+      // 监听器先走采纳位（await next()）再武装退避：断言前冲刷一轮微任务。
+      await Promise.resolve();
       // 本轮恰注册一个退避 timer；记录其延迟再放行
       assert.equal(ctx.timers.length, before + 1, `第 ${5 - remaining + 1} 次重试注册了退避 timer`);
       delays.push(ctx.timers[before]?.ms);
@@ -1964,14 +2110,16 @@ describe("agent/request-error 请求级 429 重试", () => {
       retryPolicy: undefined,
       signal: stub,
     });
-    // 到点一支：退避定时器触发 → 摘监听，再委托 next()。
+    // 到点一支：退避定时器触发 → 摘监听，交回重试决策。
     const first = reListener(ctx)(armed("lk-fire"), nextNoop);
+    await Promise.resolve();
     assert.equal(counts.added, 1, "武装退避时登记一枚 abort 监听");
     ctx.tick();
     await first;
     assert.equal(counts.removed, 1, "计时到点这一支主动摘掉监听");
     // 卸载一支：effect 的释放器（runtime.backoffs 里那位）被调用时同样要摘。
     const second = reListener(ctx)(armed("lk-dispose"), nextNoop);
+    await Promise.resolve();
     assert.equal(counts.added, 2, "第二次武装又登记一枚");
     const live = remoteOf(ctx) as unknown as { runtime: { backoffs: Set<() => void> } };
     assert.ok(live.runtime.backoffs.size > 0, "在途的退避等待把释放器登记进了 backoffs");
@@ -1983,7 +2131,7 @@ describe("agent/request-error 请求级 429 重试", () => {
     await second;
   });
 
-  it("退避等待中 signal 已中止 → 委托 next() 终结，不重发", async () => {
+  it("退避等待中 signal 已中止 → 终结，不重发也不占名额", async () => {
     const agent = makeAgent("re-abort", "sensenova");
     let nextCalled = 0;
     const next = async (): Promise<undefined> => {
@@ -2005,7 +2153,7 @@ describe("agent/request-error 请求级 429 重试", () => {
     );
     ctx.tick();
     assert.equal(await result, undefined, "已中止不返回 retry");
-    assert.equal(nextCalled, 1, "委托 next");
+    assert.equal(nextCalled, 1, "next 在采纳位被问询一次");
   });
 
   it("enabled=false 时不重试，委托 next", async () => {
@@ -2094,11 +2242,21 @@ describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略�
     assert.equal(op.value.mode, "always");
   });
 
-  it("preset=default → mutate unset（回官方默认 5 次码表）", async () => {
+  it("preset=default → 显式写官方默认对象（不再 unset：user section 与行配置同文档，unset 会删手写策略）", async () => {
     await remoteOf(ctx).retryPolicy({ provider: "tokenrouter", preset: "default" });
-    const op = ctx.mutations[0]?.ops[0] as { op: string; path: string[] };
-    assert.equal(op.op, "unset");
+    const op = ctx.mutations[0]?.ops[0] as {
+      op: string;
+      path: string[];
+      value: Record<string, unknown>;
+    };
+    assert.equal(op.op, "set");
     assert.deepEqual(op.path, ["providers", "tokenrouter", "retryPolicy"]);
+    assert.deepEqual(op.value, {
+      mode: "normal",
+      maxRetries: 5,
+      retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
+      backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0.1 },
+    });
   });
 
   it("preset=off → maxRetries:0（官方码表不得为空，用零次达成关闭）", async () => {
@@ -2343,8 +2501,9 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
 // 它**拦不住**的（仍靠真实宿主启动或人工核对）：profile 里实际装配出来的条目 id
 // （本包 cordis.patch.yml 只是它的来源），以及"cordis 真把这份 Config 挂上了 runtime"。
 describe("0.1.7 隐式注册验收（volatile 字段投影）", () => {
-  /** session-rescue 条目该能编辑的十三项：三类注入各自的开关/延迟/冷却/配额 +
-   *  provider 排除表，一项都不该漏（漏一项 = 那项语义在设置卡上永远改不到）。 */
+  /** session-rescue 条目该能编辑的十四项：三类注入各自的开关/延迟/冷却/配额 +
+   *  provider 排除表 + steer 续跑开关，一项都不该漏（漏一项 = 那项语义在设置卡上
+   *  永远改不到）。 */
   const EDITABLE = [
     "chainResumeDelayMs",
     "continueCooldownMs",
@@ -2359,9 +2518,10 @@ describe("0.1.7 隐式注册验收（volatile 字段投影）", () => {
     "resumeOnOpenTodos",
     "unfinishedCooldownMs",
     "unfinishedDelayMs",
+    "unfinishedSteerMode",
   ];
 
-  it("volatileForm(Config) 的字段集恰为 session-rescue 条目的十三项可编辑字段", () => {
+  it("volatileForm(Config) 的字段集恰为 session-rescue 条目的十四项可编辑字段", () => {
     const form = volatileFormOf(plugin.Config as unknown as SchemaNode);
     assert.ok(form !== null, "没有任何 volatile 字段 → 宿主 describe() 整条跳过本条目");
     assert.deepEqual(form.toSorted(), EDITABLE, "投影字段集与设置卡预期可编辑项不一致");
@@ -2440,7 +2600,8 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
       if (remaining === 0) {
         return;
       }
-      const result = listener(retryEvt(agent), async () => "NEXT");
+      const result = listener(retryEvt(agent), nextNoop);
+      await Promise.resolve();
       localCtx.tick();
       results.push(await result);
       return step(remaining - 1);
@@ -2450,9 +2611,9 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
     for (const act of results) {
       assert.deepEqual(act, { kind: "retry" });
     }
-    // 第 6 次：计数耗尽 → 委托 next（返回 'NEXT'，不发 retry）
+    // 第 6 次：计数耗尽 → 本阶梯按终态收束（next 已在采纳位问过、交回 undefined）
     await step(1);
-    assert.equal(results[5], "NEXT");
+    assert.equal(results[5], undefined);
     // agent/disposed → 计数清零；同会话再次失败回到重试路径（若未清理则仍是耗尽）
     localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
     await step(1);
@@ -2707,7 +2868,7 @@ describe("官方 Typert Remote 读取接口", () => {
     ctx.agentsService.rootsList.push(agent);
     ctx.agentsService.byId.set("s1", agent);
     agent.session.evs?.push(evTurnEnd(1, "error"));
-    ctx.fire("agent/error", {
+    ctx.fire(AGENT_ERROR_EVENT, {
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
@@ -2882,5 +3043,217 @@ describe("调度器容量饱和的可观测性（capacity skip 升级 warn）", 
     register(ctx, overflow4);
     ctx.fire(AGENT_ERROR_EVENT, payload(overflow4, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(capacityWarnCount(), afterFirst + 1, "回落后 warn 必须重新武装");
+  });
+});
+
+/** 开放回合事件流：turn/start(2) + 本回合自己写的清单（1 项未闭合）。不捕获外层
+ *  变量（scoping 门），id 与附加事件由调用方给。 */
+function openTodoAgent(id: string, extra: unknown[] = []): MockAgent {
+  const events = [
+    { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: 2 } },
+    {
+      type: TODO_WRITE_EVENT,
+      seq: 2,
+      time: 2,
+      data: {
+        todos: [
+          { content: "a", status: "completed" },
+          { content: "b", status: "pending" },
+        ],
+      },
+    },
+    ...extra,
+  ];
+  return makeAgent(id, "tokenrouter", {
+    session: { id, snapshotEvents: () => events, evs: events },
+  });
+}
+
+describe("steer 续跑（agent/turn-stopping，默认关）", () => {
+  let ctx: MockCtx;
+  beforeEach(() => {
+    ctx = createMockCtx();
+    applyPlugin(ctx);
+  });
+
+  function fireStopping(agent: MockAgent, turn = 2, signal?: { aborted?: boolean }): void {
+    ctx.fire(AGENT_TURN_STOPPING_EVENT, { agent, turn, signal });
+  }
+
+  it("默认关 → 不 steer", () => {
+    const agent = openTodoAgent("st1");
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0, "unfinishedSteerMode 默认 false");
+  });
+
+  it("开启后：开放回合清单未闭合 → steer 同回合续做，补跑配额 -1", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st2");
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 1);
+    const msg = agent.steerCalls[0] as {
+      content?: { text?: string }[];
+      source?: { kind?: string };
+    };
+    assert.ok(String(msg.content?.[0]?.text).includes("清单"), "steer 正文讲清单未闭合");
+    assert.equal(msg.source?.kind, "plugin:session-rescue", "与注入同源");
+    const st = remoteOf(ctx).state().sessions["st2"] as { counts?: { unfinished?: number } };
+    assert.equal(st.counts?.unfinished, 1, "消耗补跑配额（与 unfinished 注入共轨）");
+  });
+
+  it("配额耗尽（maxUnfinished=0）→ 不 steer，回合照常收尾", () => {
+    ctx.scope.set({ unfinishedSteerMode: true, maxUnfinished: 0 });
+    const agent = openTodoAgent("st3");
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("开放回合在等用户（ask_user_question）→ 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st4", [
+      {
+        type: "tool/call",
+        seq: 3,
+        time: 3,
+        data: { turn: 2, step: 1, callId: "c1", name: "ask_user_question", arguments: "{}" },
+      },
+    ]);
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0, "等用户时不得插话");
+  });
+
+  it("开放回合由 Schedule 开启 → 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st5", [
+      {
+        type: USER_MESSAGE_EVENT,
+        seq: 3,
+        time: 3,
+        data: { role: "user", content: [], source: { kind: "schedule" } },
+      },
+    ]);
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("goal 轮（opener 是 goal）→ 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st6", [
+      {
+        type: USER_MESSAGE_EVENT,
+        seq: 3,
+        time: 3,
+        data: { role: "user", content: [], source: { kind: "goal" } },
+      },
+    ]);
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0, "round driver 还在 driving 时 steer 会打架");
+  });
+
+  it("开放回合清单已闭合（openTodos=0）→ 否决（open-todos）", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = makeAgent("st12", "tokenrouter", {
+      session: {
+        id: "st12",
+        snapshotEvents: () => [
+          { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: 2 } },
+          {
+            type: TODO_WRITE_EVENT,
+            seq: 2,
+            time: 2,
+            data: { todos: [{ content: "a", status: "completed" }] },
+          },
+        ],
+        evs: [],
+      },
+    });
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0, "清单闭合不续做");
+  });
+
+  it("没有开放回合（事件流以 turn/end 收尾）→ 无从判定即不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = makeAgent("st13", "tokenrouter", {
+      session: {
+        id: "st13",
+        snapshotEvents: () => [
+          { type: TURN_START_EVENT, seq: 1, time: 1, data: { turn: 2 } },
+          { type: "turn/end", seq: 2, time: 2, data: { turn: 2, reason: { kind: "completed" } } },
+        ],
+        evs: [],
+      },
+    });
+    register(ctx, agent);
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("steer 抛错 → 记错误日志，不炸监听", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st14");
+    register(ctx, agent);
+    agent.steer = (): void => {
+      throw new Error("steer-blast");
+    };
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("每会话开关关闭 → 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st7");
+    register(ctx, agent);
+    remoteOf(ctx).toggle({ sessionId: "st7" });
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("调度器已有已武装待办 → 不 steer（不叠加）", () => {
+    ctx.scope.set({ unfinishedSteerMode: true, resumeDelayMs: 30_000 });
+    const agent = openTodoAgent("st8");
+    register(ctx, agent);
+    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1, "先武装一发续跑待办");
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0, "有待办在等，不再叠加 steering");
+  });
+
+  it("turn 号与开放回合不符 → 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st9");
+    register(ctx, agent);
+    fireStopping(agent, 5);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("turn 号不可信（NaN）→ 归零后与开放回合不符，按 turn-mismatch 否决", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st15");
+    register(ctx, agent);
+    fireStopping(agent, Number.NaN);
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("signal 已中止 → 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st10");
+    register(ctx, agent);
+    fireStopping(agent, 2, { aborted: true });
+    assert.equal(agent.steerCalls.length, 0);
+  });
+
+  it("非根会话 → 不 steer", () => {
+    ctx.scope.set({ unfinishedSteerMode: true });
+    const agent = openTodoAgent("st11");
+    // 不注册进 roots：isRootAgent 判 false
+    fireStopping(agent);
+    assert.equal(agent.steerCalls.length, 0);
   });
 });

@@ -18,6 +18,11 @@ import type { Root } from "react-dom/client";
 import {
   rescueState,
   rescueStoreBinding,
+  rescueToasts,
+  lastToastedBySession,
+  MAX_LAST_TOASTED,
+  TOAST_HOLD_MS,
+  stopReaskElement,
   nextPollMs,
   backoffMs,
   ACTIVE_POLL_MS,
@@ -203,6 +208,10 @@ const HOST_REJECT_TEXT = "host rejected the write";
 // ── 槽位名：测试按名字取注册项，名字写错就是「取到 undefined ⇒ 用例没有实际校验」。 ──
 /** dock 的 list 槽位名。 */
 const DOCK_SLOT = "conversation.input.dock";
+/** 回合级动作的 list 槽位名（0.2.x 拆分：编辑/重试/续写从 dock 迁到这里）。 */
+const TURN_TAIL_SLOT = "conversation.chat.turnTail";
+/** 耗尽升级提示的 list 槽位名（frame 级悬浮层）。 */
+const TOAST_SLOT = "shell.overlay";
 /** 配置卡的 keyed 槽位名（0.1.6 起取代 settings.plugin.item）。 */
 const BUNDLE_CONFIG_SLOT = "plugins.bundle.config";
 
@@ -1046,34 +1055,49 @@ describe("apply 装配（幂等守卫 / slot 注册 / css effect）", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
-  it("注册 dock 与 settings 两个 slot；重复 apply 幂等", () => {
+  it("注册 dock、turnTail、toast 与 settings 四个 slot；重复 apply 幂等", () => {
     const ctx = applyWithCtx();
-    assert.equal(ctx.slots.size, 2);
+    assert.equal(ctx.slots.size, 4);
     clientApply(ctx as never);
-    assert.equal(ctx.slots.size, 2, "重复 apply 不得重复注册");
+    assert.equal(ctx.slots.size, 4, "重复 apply 不得重复注册");
     assert.equal(ctx.registers.length, 0, "slot factory 未调用前不注册");
-    // 触发 dock factory → 注册 conversation.input.dock
+    // 触发 dock factory → 注册 conversation.input.dock（order 30：排在官方 queue(20) 之后）
     ctx.slots.get(DOCK_SLOT)?.();
     assert.equal(ctx.registers.length, 1);
     assert.equal(ctx.registers[0]?.name, DOCK_SLOT);
-    assert.equal(ctx.registers[0].order, 500);
+    assert.equal(ctx.registers[0].order, 30);
+    // 触发 turnTail factory → 注册 conversation.chat.turnTail（回合级动作的新家）
+    ctx.slots.get(TURN_TAIL_SLOT)?.();
+    assert.equal(ctx.registers.length, 2);
+    assert.equal(ctx.registers[1]?.name, TURN_TAIL_SLOT);
+    assert.equal(ctx.registers[1].order, 30);
+    // 两个条目的 inject 面都要交全 actions/t：调用一遍，确认形状（漏一位就是运行时
+    // 组件读 props 时才炸）
+    const tailInject = ctx.registers[1].inject?.() as { actions?: unknown; t?: unknown };
+    assert.ok(tailInject.actions !== undefined && tailInject.t !== undefined, "turnTail inject 面");
+    // 触发 toast factory → 注册 shell.overlay（耗尽升级提示）
+    ctx.slots.get(TOAST_SLOT)?.();
+    assert.equal(ctx.registers.length, 3);
+    assert.equal(ctx.registers[2]?.name, TOAST_SLOT);
+    const toastInject = ctx.registers[2].inject?.() as { t?: unknown };
+    assert.ok(toastInject.t !== undefined, "toast inject 面");
     // config factory → 注册 plugins.bundle.config（0.1.6 新契约），cleanup 释放 scope
     const settingsFactory = ctx.slots.get(BUNDLE_CONFIG_SLOT);
     assert.ok(settingsFactory);
     const cleanup = settingsFactory();
-    assert.equal(ctx.registers.length, 2);
+    assert.equal(ctx.registers.length, 4);
     // 卡片注册项的 key 必须是 **bundle 包名**（宿主按包名派发 plugins.bundle.config，
     // 证据链见 test/profile-bundle.ts）；裸条目 id 只喂 configForms.get()（同文件
-    // 「apply 取配置表单」那条用例）。dock 那行的 `id: "session-rescue"` 是 list 槽的
+    // 「apply 取配置表单」那条用例）。三个 list 槽的 `id: "session-rescue"` 是各槽的
     // 条目 id，与本 key 无关。
-    assert.equal(ctx.registers[1]?.key, profileBundleName(), "设置卡按 bundle 包名 keyed");
+    assert.equal(ctx.registers[3]?.key, profileBundleName(), "设置卡按 bundle 包名 keyed");
     assert.notEqual(
-      ctx.registers[1].key,
+      ctx.registers[3].key,
       patchEntryId(),
       "key 写成不带包名的条目 id = 插件页永不出卡",
     );
     cleanup?.();
-    assert.equal(ctx.registers.length, 1, "unregister 生效");
+    assert.equal(ctx.registers.length, 3, "unregister 生效");
   });
 
   it("effect：apply claim 与 css 在卸载时清理", () => {
@@ -1376,6 +1400,21 @@ interface MountDockOptions {
 
 /** 挂载 dock：先复位全局 store 再写入 sessionState（useSyncExternalStore 真实订阅
  *  轮询（快慢档见 nextPollMs），stub 需路由 STATE_URL 保证内容不漂移；每次挂载都重新起一根 root）。 */
+/** dock 里的每会话开关（设置卡同款 switch：无文本内容，按角色取）。 */
+function dockSwitch(el: HTMLElement): HTMLButtonElement | null {
+  return el.querySelector<HTMLButtonElement>('[role="switch"]');
+}
+
+/** switch 的选中态读数（"true"/"false"/null）；选择器缺省为 dock 那枚。 */
+function switchChecked(el: HTMLElement, selector = '[role="switch"]'): string | null {
+  return el.querySelector<HTMLButtonElement>(selector)?.getAttribute("aria-checked") ?? null;
+}
+
+/** 会话已开始的视图（转录非空）：开关行只在已开始会话上渲染（③）。 */
+const withNode: Partial<DockView> = {
+  nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
+};
+
 async function mountDock(
   view: Partial<DockView>,
   sessionState: unknown,
@@ -1440,13 +1479,110 @@ async function mountDock(
   };
 }
 
+function turnTailComponent(): unknown {
+  const ctx = applyWithCtx();
+  ctx.slots.get(TURN_TAIL_SLOT)?.();
+  return ctx.registers[0]!.component;
+}
+
+function toastHostComponent(): unknown {
+  const ctx = applyWithCtx();
+  ctx.slots.get(TOAST_SLOT)?.();
+  return ctx.registers[0]!.component;
+}
+
+/** 清空 toast 台账与去重位（模块级状态，用例间互不串台）。 */
+function resetToasts(): void {
+  rescueToasts.items = [];
+  rescueToasts.nextSeq = 0;
+}
+
+/** turnTail 条目的 owner 测试替身：真实挂载时属主交 TurnLocation 全形；测试只消费
+ *  `turn` 号与（F1 判据的）`end.data.reason.kind` 两位，其余字段留给真实宿主。 */
+function turnTailOwnerForTest(
+  turn: number,
+  endReason: string | undefined,
+): Record<string, unknown> {
+  return {
+    turn,
+    ...(endReason === undefined
+      ? {}
+      : {
+          end: {
+            type: "turn/end",
+            data: { turn, reason: { kind: endReason } },
+          },
+        }),
+  };
+}
+
+/** 挂载 turnTail 条目：与 mountDock 同一套 view 替身，外加 owner 的回合号与（可选的）
+ *  owner 终态 reason.kind。turnTail 不读轮询快照，也不发 /state——无需 fetch 替身。 */
+async function mountTurnTail(
+  view: Partial<DockView>,
+  ownerTurn: number,
+  opts: { t?: Translate; endReason?: string } = {},
+): Promise<{
+  container: HTMLElement;
+  stub: ReturnType<typeof makeDockStub>;
+  rerender: (view2: Partial<DockView>) => Promise<void>;
+}> {
+  await unmountRoot();
+  const stub = makeDockStub();
+  const comp = turnTailComponent() as React.ComponentType<Record<string, unknown>>;
+  const propsFor = (view2: Partial<DockView>, ownerTurn2: number): Record<string, unknown> => ({
+    sessionId: "s1",
+    turn: turnTailOwnerForTest(ownerTurn2, opts.endReason),
+    seq: view2.turnEnds?.get(ownerTurn2) ?? 0,
+    openFile: (path: string): string => path,
+    actions: stub.actions,
+    t: opts.t ?? tZh,
+    useChat: (
+      sel: (snap: {
+        legacy: {
+          nodes: DockNode[];
+          turnEnds: Map<number, number>;
+          runningCalls: { turn?: number }[];
+        };
+      }) => unknown,
+    ) =>
+      sel({
+        legacy: {
+          nodes: view2.nodes ?? [],
+          turnEnds: view2.turnEnds ?? new Map<number, number>(),
+          runningCalls: view2.runningCalls ?? [],
+        },
+      }),
+    useSession: (sel: (snap: SessionSnapshot) => unknown) =>
+      sel({
+        running: view2.running ?? false,
+        removed: view2.removed ?? false,
+        lastAgentError: view2.lastAgentError ?? null,
+      }),
+  });
+  await mount(React.createElement(comp, propsFor(view, ownerTurn)));
+  return {
+    container: mountHost,
+    stub,
+    rerender: async (view2: Partial<DockView>) => {
+      await act(async () => {
+        root!.render(React.createElement(comp, propsFor(view2, ownerTurn)));
+      });
+    },
+  };
+}
+
 describe("RescueDockView 渲染决策", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
   it("宿主不带 slots 契约（useProjection 整个缺席）→ dock 照常渲染不抛错", async () => {
     // 0.1.5 之前的宿主没有 useProjection：inbox seat 缺席时排队读取接口回空而不是抛。
-    const { container } = await mountDock({}, { ok: true, sessions: {} }, { noProjection: true });
+    const { container } = await mountDock(
+      withNode,
+      { ok: true, sessions: {} },
+      { noProjection: true },
+    );
     assert.ok(container.textContent.length > 0, "dock 仍渲染出内容");
     assert.equal(container.textContent.includes("undefined"), false, "缺席的投影不漏进文案");
   });
@@ -1455,11 +1591,14 @@ describe("RescueDockView 渲染决策", () => {
     // 投影是宿主交进来的外部输入。这一炸炸掉的是整张 dock（用户连取消都点不到），
     // 而不是队列里的一行，所以宽容这条要有判据——本节标题此前是空头承诺。
     // 判据取「与空队列渲染得一模一样」：只断渲染出来了，半截文案漏进来也算过。
-    const baseline = await mountDock({ queue: [] }, { ok: true, sessions: {} });
+    const baseline = await mountDock({ ...withNode, queue: [] }, { ok: true, sessions: {} });
     const emptyText = baseline.container.textContent;
     assert.ok(emptyText.length > 0, "空队列基线本身要有内容，否则这组比对比不出东西");
     const expectEmptyLike = async (label: string, queue: unknown): Promise<void> => {
-      const bad = await mountDock({ queue: queue as never }, { ok: true, sessions: {} });
+      const bad = await mountDock(
+        { ...withNode, queue: queue as never },
+        { ok: true, sessions: {} },
+      );
       assert.equal(bad.container.textContent, emptyText, `${label}：坏形状要退化成空队列`);
       assert.equal(
         bad.container.textContent.includes("undefined"),
@@ -1521,79 +1660,7 @@ describe("RescueDockView 渲染决策", () => {
     assert.match(container.textContent, /连接中断，重连后将自动补跑/u, "挂起文案用 kind=补跑");
   });
 
-  it("turn-error 回合：可编辑 + 可重试；host 重试进行中按钮显示等待中", async () => {
-    const base = {
-      nodes: [
-        { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
-        { kind: TURN_ERROR_KIND, seq: 2, turn: 1, message: "boom", code: "X" },
-      ],
-      turnEnds: new Map([[1, 3]]),
-    };
-    const { container, rerender } = await mountDock(base, null);
-    assert.ok(buttonByText(container, "编辑"), "canEditDock");
-    const retry = buttonByText(container, RETRY_LABEL);
-    assert.ok(retry, "canRetryDock 渲染重试按钮");
-    // 失败原因是本轮自己的两个字段拼出来的，不再借会话级快照。
-    assert.match(container.textContent, /本轮失败原因：X: boom/u, "原因行");
-    assert.equal(retry.title, "在本会话重发重试指令", "本轮没跑过工具 ⇒ 标题不带副作用提示");
-    // host 重试进行中（同类失败回合有 model-retry 节点）→ 避让
-    await rerender({
-      ...base,
-      nodes: [...base.nodes, { kind: "model-retry", seq: 3, turn: 1, retryState: "started" }],
-    });
-    assert.ok(buttonContaining(container, "重试等待中"), "isHostPending 文案");
-  });
-
-  it("重试按钮：本轮跑过工具/命令时标题带副作用提示", async () => {
-    const { container } = await mountDock(
-      {
-        nodes: [
-          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
-          { kind: "tool-result", seq: 2, turn: 1 },
-          { kind: TURN_ERROR_KIND, seq: 3, turn: 1, message: "boom", code: "X" },
-        ],
-        turnEnds: new Map([[1, 4]]),
-      },
-      null,
-    );
-    const retry = buttonByText(container, RETRY_LABEL);
-    assert.ok(retry, "canRetryDock");
-    assert.match(retry.title, /本轮已执行过工具或命令，重试会重做这些副作用/u, "副作用提示");
-  });
-
-  it("max-tokens 回合：显示继续输出按钮", async () => {
-    const { container } = await mountDock(
-      {
-        nodes: [
-          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
-          { kind: "turn-max-tokens", seq: 2, turn: 1 },
-        ],
-        turnEnds: new Map([[1, 3]]),
-      },
-      null,
-    );
-    const continueBtn = buttonByText(container, "继续输出");
-    assert.ok(continueBtn, "canContinueDock");
-    // 该类的 code 固定、message 为空：原因行只带 code。
-    assert.match(container.textContent, /本轮失败原因：turn-max-tokens/u, "只有 code 的原因行");
-  });
-
-  it("interrupted 回合：轮内没有原因文本，不出原因行", async () => {
-    const { container } = await mountDock(
-      {
-        nodes: [
-          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
-          { kind: "assistant", seq: 2, turn: 1, content: [], interrupted: true },
-        ],
-        turnEnds: new Map([[1, 3]]),
-      },
-      null,
-    );
-    assert.ok(buttonByText(container, "编辑"), "编辑入口仍开");
-    assert.doesNotMatch(container.textContent, /本轮失败原因/u, "没有轮内原因就不出行");
-  });
-
-  it("running + 有最后用户消息：停止重问行；重试/编辑隐藏", async () => {
+  it("running + 有最后用户消息：停止重问先展开草稿，确认后按预填原文入队", async () => {
     const { container, stub } = await mountDock(
       {
         nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
@@ -1607,11 +1674,91 @@ describe("RescueDockView 渲染决策", () => {
     await act(async () => {
       stopBtn.click();
     });
+    const area = container.querySelector("textarea");
+    assert.ok(area, "先展开草稿再停（不直接原样重发）");
+    assert.equal(area.value, "go", "预填最后用户消息");
+    const confirmBtn = buttonContaining(container, "停止并重问");
+    assert.ok(confirmBtn, "草稿态的确认按钮");
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(confirmBtn).onClick();
+    });
     await act(async () => {
       await flush();
     });
     assert.equal(stub.calls[0]?.name, "stopAndReask");
-    assert.equal(stub.calls[0].args[1], "go", "重问文案用最后用户消息");
+    assert.equal(stub.calls[0].args[1], "go", "未改动时按预填原文入队");
+  });
+
+  it("停止重问草稿：可改文本后入队；Esc 收起；失败时草稿保留", async () => {
+    const { container, stub } = await mountDock(
+      {
+        nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
+        turnEnds: new Map([[2, 5]]),
+        running: true,
+      },
+      null,
+    );
+    const expand = buttonContaining(container, "停止并重问");
+    assert.ok(expand, "展开按钮");
+    await act(async () => {
+      expand.click();
+    });
+    const area = container.querySelector("textarea");
+    assert.ok(area);
+    // Esc 收起回按钮行
+    await act(async () => {
+      reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
+        area,
+      ).onKeyDown({ key: "Escape", preventDefault: () => void 0 });
+    });
+    assert.equal(container.querySelector("textarea"), null, "Esc 后收起");
+    // 重新展开 → 改文本 → 确认 → 发修改后的文本
+    const expand2 = buttonContaining(container, "停止并重问");
+    assert.ok(expand2, "再次展开");
+    await act(async () => {
+      expand2.click();
+    });
+    const area2 = container.querySelector("textarea");
+    assert.ok(area2, "重新展开");
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(area2).onChange({
+        target: { value: "换个问法" },
+      });
+    });
+    const confirm2 = buttonContaining(container, "停止并重问");
+    assert.ok(confirm2, "确认按钮");
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(confirm2).onClick();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(stub.calls[0]?.args[1], "换个问法", "发修改后的文本");
+    assert.equal(container.querySelector("textarea"), null, "成功后收起");
+    // 失败时草稿保留：下次展开前先造一次失败
+    const expand3 = buttonContaining(container, "停止并重问");
+    assert.ok(expand3, "再次展开");
+    await act(async () => {
+      expand3.click();
+    });
+    stub.actions.stopAndReask = async (): Promise<unknown> => ({
+      ok: false,
+      code: "busy",
+      message: "稍后再试",
+    });
+    const area3 = container.querySelector("textarea");
+    assert.ok(area3);
+    const confirm3 = buttonContaining(container, "停止并重问");
+    assert.ok(confirm3, "失败路径的确认按钮");
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(confirm3).onClick();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("busy: 稍后再试"), "失败文案就地显示");
+    const area4 = container.querySelector("textarea");
+    assert.ok(area4, "失败时草稿不收起");
   });
 
   it("开关行：off 显示已关闭与开启按钮；unknown 时不显示行", async () => {
@@ -1619,12 +1766,14 @@ describe("RescueDockView 渲染决策", () => {
       ok: true,
       sessions: { s1: { count: 0, lastFireAt: 0, pending: null, disabled: true } },
     };
-    const { container } = await mountDock({}, body);
+    const { container } = await mountDock(withNode, body);
     assert.ok(container.textContent.includes("已关闭"), "off 状态文案");
-    assert.ok(buttonByText(container, "开启") !== null, "off 时按钮为开启");
+    const sw = dockSwitch(container);
+    assert.ok(sw !== null, "off 时 switch 在行上");
+    assert.equal(switchChecked(container), "false", "off ⇒ switch 未选中");
     // rescue 快照未就绪（null）→ 无开关行
     const { container: v2 } = await mountDock({}, null);
-    assert.ok(!v2.textContent.includes("自动续跑（本会话）"), "unknown 态不显示开关行");
+    assert.ok(!v2.textContent.includes("自动接续（本会话）"), "unknown 态不显示开关行");
   });
 
   it("开关写通道在途：按钮禁用，第二次点击不再发请求", async () => {
@@ -1635,18 +1784,19 @@ describe("RescueDockView 渲染决策", () => {
       ok: true,
       sessions: { s1: { count: 0, lastFireAt: 0, pending: null, disabled: false } },
     };
-    const { container } = await mountDock({}, body, {
+    const { container } = await mountDock(withNode, body, {
       route: (url) =>
         url === STATE_URL
           ? { ok: true, body }
           : { ok: true, body: { ok: true }, wait: gate.promise },
     });
-    const toggleBtn = buttonByText(container, "关闭");
-    assert.ok(toggleBtn, "on 态按钮为关闭");
+    const toggleBtn = dockSwitch(container);
+    assert.ok(toggleBtn, "on 态 switch 在行上");
+    assert.equal(switchChecked(container), "true", "on ⇒ switch 选中");
     await act(async () => {
       toggleBtn.click();
     });
-    assert.equal(toggleBtn.disabled, true, "写通道在途时开关按钮禁用");
+    assert.equal(toggleBtn.disabled, true, "写通道在途时开关禁用");
     await act(async () => {
       toggleBtn.click();
     });
@@ -1675,7 +1825,7 @@ describe("RescueDockView 渲染决策", () => {
         },
       },
     };
-    const { container } = await mountDock({}, body, {
+    const { container } = await mountDock(withNode, body, {
       route: (url) =>
         url === STATE_URL
           ? { ok: true, body }
@@ -1687,7 +1837,7 @@ describe("RescueDockView 渲染决策", () => {
       cancelBtn.click();
     });
     assert.equal(cancelBtn.disabled, true, "取消在途时禁用");
-    assert.equal(buttonByText(container, "关闭")?.disabled, true, "同一次在途也禁用开关");
+    assert.equal(dockSwitch(container)?.disabled, true, "同一次在途也禁用开关");
     await act(async () => {
       cancelBtn.click();
     });
@@ -1699,12 +1849,185 @@ describe("RescueDockView 渲染决策", () => {
     assert.equal(cancelBtn.disabled, false, "落定后恢复可点");
   });
 
+  it("编辑重发入口已迁往 turnTail：dock 不再渲染动作行", async () => {
+    // 拆分后的判据：正常完成回合的操作行在失败回合的 tail seat 上，dock 里没有它。
+    const base = {
+      nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
+      turnEnds: new Map([[1, 3]]),
+    };
+    const { container } = await mountDock(base, { ok: true, sessions: {} });
+    assert.equal(buttonByText(container, "编辑"), null, "dock 不再有编辑按钮");
+    assert.equal(buttonByText(container, RETRY_LABEL), null, "dock 不再有重试按钮");
+    assert.equal(buttonByText(container, "发送续写"), null, "dock 不再有发送续写按钮");
+  });
+});
+
+describe("turnTail 条目渲染决策（回合级动作）", () => {
+  beforeEach(resetDomEnv);
+  afterEach(teardownDomEnv);
+
+  it("turn-error 回合：可编辑 + 可重试；宿主重试在途时重试按钮隐藏", async () => {
+    const base = {
+      nodes: [
+        { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
+        { kind: TURN_ERROR_KIND, seq: 2, turn: 1, message: "boom", code: "X" },
+      ],
+      turnEnds: new Map([[1, 3]]),
+    };
+    const { container, rerender } = await mountTurnTail(base, 1);
+    assert.ok(buttonByText(container, "编辑"), "canEditDock");
+    const retry = buttonByText(container, RETRY_LABEL);
+    assert.ok(retry, "canRetryDock 渲染重试按钮");
+    // 失败原因是本轮自己的两个字段拼出来的，不再借会话级快照。
+    // 失败原因不再由本包渲染：宿主 transcript 的 turn-error 节点已展示（重复显示已删）
+    assert.doesNotMatch(container.textContent, /本轮失败原因/u, "原因行不重复");
+    assert.equal(retry.title, "在本会话重发重试指令", "本轮没跑过工具 ⇒ 标题不带副作用提示");
+    // 宿主重试在途（同类失败回合有 model-retry 节点）→ 隐藏而非禁用：
+    // composer 主按钮此刻已是「继续生成」，两个可用入口并存没有增量信息。
+    await rerender({
+      ...base,
+      nodes: [...base.nodes, { kind: "model-retry", seq: 3, turn: 1, retryState: "started" }],
+    });
+    assert.equal(buttonByText(container, RETRY_LABEL), null, "宿主在途 ⇒ 重试按钮隐藏");
+    assert.ok(buttonByText(container, "编辑"), "编辑不受宿主重试影响");
+  });
+
+  it("重试按钮：本轮跑过工具/命令时标题带副作用提示", async () => {
+    const { container } = await mountTurnTail(
+      {
+        nodes: [
+          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
+          { kind: "tool-result", seq: 2, turn: 1 },
+          { kind: TURN_ERROR_KIND, seq: 3, turn: 1, message: "boom", code: "X" },
+        ],
+        turnEnds: new Map([[1, 4]]),
+      },
+      1,
+    );
+    const retry = buttonByText(container, RETRY_LABEL);
+    assert.ok(retry, "canRetryDock");
+    assert.match(retry.title, /本轮已执行过工具或命令，重试会重做这些副作用/u, "副作用提示");
+  });
+
+  it("max-tokens 回合：显示发送续写按钮", async () => {
+    const { container } = await mountTurnTail(
+      {
+        nodes: [
+          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
+          { kind: "turn-max-tokens", seq: 2, turn: 1 },
+        ],
+        turnEnds: new Map([[1, 3]]),
+      },
+      1,
+    );
+    const continueBtn = buttonByText(container, "发送续写");
+    assert.ok(continueBtn, "canContinueDock");
+    // 该类的 code 固定、message 为空：原因行只带 code。
+    assert.doesNotMatch(container.textContent, /本轮失败原因/u, "截断原因同样不重复");
+  });
+
+  it("interrupted 回合：轮内没有原因文本，不出原因行", async () => {
+    const { container } = await mountTurnTail(
+      {
+        nodes: [
+          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] },
+          { kind: "assistant", seq: 2, turn: 1, content: [], interrupted: true },
+        ],
+        turnEnds: new Map([[1, 3]]),
+      },
+      1,
+    );
+    assert.ok(buttonByText(container, "编辑"), "编辑入口仍开");
+    assert.doesNotMatch(container.textContent, /本轮失败原因/u, "没有轮内原因就不出行");
+  });
+
+  it("非最新完成回合的 seat → 返回 null（每个回合各有一个 seat，旧 seat 不出内容）", async () => {
+    // turnEnds 故意按降序插入：最大轮扫描的「不大于当前最大」分支也要走到。
+    const { container } = await mountTurnTail(
+      {
+        nodes: [
+          { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "第一轮" }] },
+          { kind: "user", seq: 4, turn: 2, content: [{ type: "text", text: "第二轮" }] },
+          { kind: TURN_ERROR_KIND, seq: 5, turn: 2, message: "boom", code: "X" },
+        ],
+        turnEnds: new Map([
+          [4, 6],
+          [1, 3],
+        ]),
+      },
+      1,
+    );
+    assert.equal(container.textContent, "", "旧 seat 不渲染任何内容");
+  });
+
+  it("正常完成回合（无失败）：只出编辑入口，无原因行", async () => {
+    const { container } = await mountTurnTail(
+      {
+        nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
+        turnEnds: new Map([[1, 3]]),
+      },
+      1,
+    );
+    assert.ok(buttonByText(container, "编辑"), "编辑不要求失败态");
+    assert.equal(buttonByText(container, RETRY_LABEL), null, "无失败 ⇒ 无重试");
+    assert.doesNotMatch(container.textContent, /本轮失败原因/u);
+  });
+
+  it("崩溃恢复：owner 终态为 interrupted → 出「继续中断的回合」，点击发恢复正文", async () => {
+    const { container, stub } = await mountTurnTail(
+      {
+        nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
+        turnEnds: new Map([[1, 3]]),
+      },
+      1,
+      { endReason: "interrupted" },
+    );
+    const btn = buttonByText(container, "继续中断的回合");
+    assert.ok(btn, "崩溃孤儿回合出手动接续按钮");
+    await act(async () => {
+      btn.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(stub.calls[0]?.name, "sendSameSession");
+    assert.ok(String(stub.calls[0].args[1]).includes("从中断处继续"), "发的是恢复正文");
+  });
+
+  it("用户中止（aborted 终态）不出崩溃恢复按钮", async () => {
+    // live 中止的终态是 aborted；interrupted 只由宿主崩溃修复追加——按 owner 终态分流。
+    const { container } = await mountTurnTail(
+      {
+        nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
+        turnEnds: new Map([[1, 3]]),
+      },
+      1,
+      { endReason: "aborted" },
+    );
+    assert.equal(buttonByText(container, "继续中断的回合"), null, "aborted 不是崩溃孤儿");
+    assert.ok(buttonByText(container, "编辑"), "编辑照常");
+  });
+
+  it("会话运行中不出现崩溃恢复按钮（整 seat 无可用入口即 null）", async () => {
+    const { container } = await mountTurnTail(
+      {
+        nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
+        turnEnds: new Map([[1, 3]]),
+        running: true,
+      },
+      1,
+      { endReason: "interrupted" },
+    );
+    assert.equal(buttonByText(container, "继续中断的回合"), null, "运行中不注入");
+    assert.equal(container.textContent, "", "无任何可用入口 ⇒ 整块 null");
+  });
+
   it("编辑重发：打开编辑器 → Escape 关闭；⌘Enter 发送", async () => {
     const base = {
       nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "hi" }] }],
       turnEnds: new Map([[1, 3]]),
     };
-    const { container, stub } = await mountDock(base, null);
+    const { container, stub } = await mountTurnTail(base, 1);
     const editBtn = buttonByText(container, "编辑");
     assert.ok(editBtn);
     await act(async () => {
@@ -1712,7 +2035,7 @@ describe("RescueDockView 渲染决策", () => {
     });
     let textarea = container.querySelector<HTMLTextAreaElement>("textarea");
     assert.ok(textarea, "编辑器含 textarea");
-    // Escape 关闭：onDone → dockEditing false → 编辑器卸载
+    // Escape 关闭：onDone → editing false → 编辑器卸载
     await act(async () => {
       reactProps<{ onKeyDown: (ev: { key: string; preventDefault: () => void }) => void }>(
         textarea!,
@@ -1745,6 +2068,165 @@ describe("RescueDockView 渲染决策", () => {
     });
     assert.equal(stub.calls[0]?.name, "sendSameSession");
     assert.equal(stub.calls[0].args[1], "重发内容");
+  });
+
+  it("blocked 位出现 → 推一条耗尽 toast；同一次耗绝不重复弹，位撤掉再耗尽再弹", async () => {
+    resetToasts();
+    const body = {
+      ok: true,
+      sessions: {
+        s1: {
+          count: 3,
+          lastFireAt: 0,
+          pending: null,
+          blocked: { kind: "resume", turn: 9 },
+        },
+      },
+    };
+    const { rerender } = await mountDock({}, body);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(rescueToasts.items.length, 1, "blocked 出现推一条");
+    assert.equal(rescueToasts.items[0]?.kind, "resume");
+    // 同一份快照重渲染：去重位挡住，不重复弹
+    await rerender({});
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(rescueToasts.items.length, 1, "同一次耗绝不重复弹");
+    // 位撤掉后再耗尽（turn 前进）→ 再弹一次；跨 remount 同样去重（模块级去重位）
+    const body2 = {
+      ok: true,
+      sessions: {
+        s1: {
+          count: 3,
+          lastFireAt: 0,
+          pending: null,
+          blocked: { kind: "resume", turn: 12 },
+        },
+      },
+    };
+    await mountDock({}, body2);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(rescueToasts.items.length, 2, "新的耗尽（turn 前进）再弹一次");
+    await mountDock({}, body2);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(rescueToasts.items.length, 2, "跨 remount 同一次耗尽也不重复弹");
+  });
+});
+
+describe("shell.overlay 上的耗尽提示宿主", () => {
+  beforeEach(resetDomEnv);
+  afterEach(teardownDomEnv);
+
+  it("到时自动清理（TOAST_HOLD_MS）；未知 seq 的 dismiss 是无操作", async () => {
+    resetToasts();
+    vi.useFakeTimers();
+    try {
+      const comp = toastHostComponent() as React.ComponentType<{ t: Translate }>;
+      await mount(React.createElement(comp, { t: tZh }));
+      await act(async () => {
+        rescueToasts.push("resume");
+      });
+      assert.match(mountHost.textContent, /自动续跑配额已用尽/u);
+      await act(async () => {
+        vi.advanceTimersByTime(TOAST_HOLD_MS);
+      });
+      assert.equal(mountHost.textContent, "", "到时自动清理");
+      // 未知 seq：无操作（不通知、不炸）
+      const before = rescueToasts.items.length;
+      rescueToasts.dismiss(999);
+      assert.equal(rescueToasts.items.length, before, "未知 seq 无操作");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("去重位超上限裁最旧（MAX_LAST_TOASTED）", async () => {
+    resetToasts();
+    lastToastedBySession.clear();
+    for (let i = 0; i < MAX_LAST_TOASTED; i += 1) {
+      // 前置键避开 s1：同名 set 只覆盖不增体积，超限裁剪支就测不到。
+      lastToastedBySession.set(`w${String(i)}`, `old-${String(i)}`);
+    }
+    // mountDock 固定以 "s1" 挂载 dock：blocked 记在 s1 名下，前置键不含 s1。
+    const body = {
+      ok: true,
+      sessions: {
+        s1: {
+          count: 0,
+          lastFireAt: 0,
+          pending: null,
+          blocked: { kind: "resume", turn: 1 },
+        },
+      },
+    };
+    await mountDock({}, body);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(rescueToasts.items.length, 1, "新键（s1）的耗尽照常上报");
+    assert.equal(lastToastedBySession.size, 0, "超上限整表清空（防重复位重置）");
+  });
+
+  it("未知 kind 回落 blockedResume 文案；收起态停止重问行的 busy 与错误分支", async () => {
+    resetToasts();
+    rescueToasts.push("weird-kind");
+    const comp = toastHostComponent() as React.ComponentType<{ t: Translate }>;
+    await mount(React.createElement(comp, { t: tZh }));
+    assert.match(mountHost.textContent, /自动续跑配额已用尽/u, "未知 kind 回落");
+    // 收起态停止重问行：busy 文案支 + stopError 非空支（dock 装配下不可达，直渲钉住）
+    await unmountRoot();
+    const row = stopReaskElement(true, "boom", (): void => undefined, tZh);
+    await mount(React.createElement("div", null, row));
+    assert.match(mountHost.textContent, /停止中…/u, "busy 支");
+    assert.match(mountHost.textContent, /boom/u, "错误支");
+  });
+
+  it("渲染台账文案；手动关闭即清空；超限丢最旧", async () => {
+    resetToasts();
+    const comp = toastHostComponent() as React.ComponentType<{ t: Translate }>;
+    await mount(React.createElement(comp, { t: tZh }));
+    assert.equal(mountHost.textContent, "", "空台账不出内容");
+    // push 触发订阅者 setState，必须在 act 里（否则 React 记 act 告警，日志门判红）
+    await act(async () => {
+      rescueToasts.push("resume");
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.match(mountHost.textContent, /自动续跑配额已用尽/u, "按 kind 取文案");
+    await act(async () => {
+      rescueToasts.push("unfinished");
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.match(mountHost.textContent, /自动补跑配额已用尽/u, "两条并存");
+    // 手动关闭最旧一条
+    await act(async () => {
+      buttonByText(mountHost, "知道了")!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(mountHost.textContent.includes("自动续跑配额已用尽"), false, "最旧一条已关");
+    // 超限丢最旧：台账只留 4 条
+    await act(async () => {
+      for (let i = 0; i < 5; i += 1) {
+        rescueToasts.push("continue");
+      }
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(rescueToasts.items.length, 4, "台账有界");
+    assert.equal(rescueToasts.items[0]?.kind, "continue", "最旧的被丢掉");
   });
 });
 
@@ -2066,7 +2548,7 @@ describe("RescueSettingsCard 设置卡", () => {
 
   it("清空数字栏（全选 + Delete）不上报 0：空草稿等于没填", async () => {
     // `Number("")` 是 **0**：不设这一道的话，抹掉 maxResumes 会被当成「设成 0」
-    // 记成改动并写到磁盘，那一类自动救援整段停用，而标签上看着还是一个正常的数。
+    // 记成改动并写到磁盘，那一类自动接续整段停用，而标签上看着还是一个正常的数。
     const { container, writes: setCalls } = await mountSettingsCard({
       enabled: true,
       maxResumes: 3,
@@ -2131,6 +2613,219 @@ describe("RetryPolicySection 重试策略区块", () => {
     const post = fetchCalls.find((entry) => entry.url === POLICY_URL);
     assert.ok(post, "落盘走 retry-policy POST");
     assert.equal((post.init.body as string).includes('"preset":"off"'), true, "body 携带档位");
+  });
+
+  it("非规范现行配置（手写形状）→ 首次保存只出覆盖警告不落盘，仍要保存才写", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [{ provider: "custom10", mode: "normal", maxRetries: 10, hasQuota: false }],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
+      }
+      return { ok: false, body: null };
+    });
+    await pickPreset(container, 0, "enhanced");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(
+      container.textContent.includes("custom10") && container.textContent.includes("覆盖"),
+      "警告行点名 provider 并说明覆盖后果",
+    );
+    assert.equal(
+      fetchCalls.some((entry) => entry.url === POLICY_URL),
+      false,
+      "警告态不落盘",
+    );
+    const force = buttonByText(container, "仍要保存");
+    assert.ok(force, "仍要保存按钮在警告行上");
+    await act(async () => {
+      force.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(
+      fetchCalls.filter((entry) => entry.url === POLICY_URL).length,
+      1,
+      "force 后按暂存落盘",
+    );
+    assert.equal(container.textContent.includes("覆盖"), false, "保存成功后警告收起");
+  });
+
+  it("覆盖警告上的取消：收警告、暂存保留、不落盘", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [{ provider: "custom10", mode: "normal", maxRetries: 10, hasQuota: false }],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
+      }
+      return { ok: false, body: null };
+    });
+    await pickPreset(container, 0, "enhanced");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("仍要保存"), "警告已亮出");
+    const dismiss = buttonByText(container, "取消");
+    assert.ok(dismiss);
+    await act(async () => {
+      dismiss.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(container.textContent.includes("仍要保存"), false, "警告收起");
+    assert.ok(container.textContent.includes("保存（1 个改动）"), "暂存保留，可改完再存");
+    assert.equal(
+      fetchCalls.some((entry) => entry.url === POLICY_URL),
+      false,
+      "取消路径不落盘",
+    );
+  });
+
+  it("撤销同时清掉确认态与暂存", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [{ provider: "custom10", mode: "normal", maxRetries: 10, hasQuota: false }],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
+      }
+      return { ok: false, body: null };
+    });
+    await pickPreset(container, 0, "enhanced");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    const discard = container.querySelector<HTMLButtonElement>('[data-field="retry-discard"]');
+    assert.ok(discard);
+    await act(async () => {
+      discard.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(container.textContent.includes("仍要保存"), false, "确认态随暂存一起清");
+    assert.equal(container.textContent.includes("保存（1 个改动）"), false, "暂存清空");
+  });
+
+  it("四档规范形状整批直存：不出警告，逐行落盘", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              { provider: "p-default", mode: "normal", maxRetries: 5, hasQuota: false },
+              { provider: "p-enhanced", mode: "normal", maxRetries: 12, hasQuota: true },
+              { provider: "p-always", mode: "always", maxRetries: 999, hasQuota: false },
+              { provider: "p-off", mode: "normal", maxRetries: 0, hasQuota: false },
+            ],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
+      }
+      return { ok: false, body: null };
+    });
+    // default(5/✗) → off；enhanced(12/✓) → off；always → off；off(0/✗) → enhanced
+    await pickPreset(container, 0, "off");
+    await pickPreset(container, 1, "off");
+    await pickPreset(container, 2, "off");
+    await pickPreset(container, 3, "enhanced");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(container.textContent.includes("仍要保存"), false, "规范形状不警告");
+    assert.equal(fetchCalls.filter((entry) => entry.url === POLICY_URL).length, 4, "四行逐项落盘");
+  });
+
+  it("非规范 enhanced/off 形状同样警告（15 次+QUOTA、0 次+QUOTA）", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              { provider: "p-enh15", mode: "normal", maxRetries: 15, hasQuota: true },
+              { provider: "p-offq", mode: "normal", maxRetries: 0, hasQuota: true },
+            ],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
+      }
+      return { ok: false, body: null };
+    });
+    await pickPreset(container, 0, "default");
+    await pickPreset(container, 1, "default");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(
+      container.textContent.includes("p-enh15") && container.textContent.includes("p-offq"),
+      "两个非规范形状的 provider 都进警告名单",
+    );
+    assert.equal(
+      fetchCalls.some((entry) => entry.url === POLICY_URL),
+      false,
+      "确认前不落盘",
+    );
   });
 
   it("provider 列表不可用（ok:false）→ 错误文案", async () => {
@@ -2464,7 +3159,8 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
   afterEach(teardownDomEnv);
 
   it("发送中禁重入；失败文案两态；reject 面两种", async () => {
-    const { container, stub } = await mountDock(twoTurnView, null);
+    // twoTurnView 的 turnEnds 键是 1 与 4：最新完成回合的 seat 按 4 取。
+    const { container, stub } = await mountTurnTail(twoTurnView, 4);
     await openEditor(container);
     const gate = makeGate();
     let sends = 0;
@@ -2527,7 +3223,7 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
   });
 
   it("forkAtSeq 非空才出 Fork 按钮；点击走 forkAndSend 并关闭编辑器", async () => {
-    const { container, stub } = await mountDock(twoTurnView, null);
+    const { container, stub } = await mountTurnTail(twoTurnView, 4);
     assert.equal(buttonByText(container, FORK_RESEND_LABEL), null, "编辑器未开时没有 fork");
     await openEditor(container);
     const forkBtn = buttonByText(container, FORK_RESEND_LABEL);
@@ -2541,19 +3237,19 @@ describe("RescueEditor 发送 / fork / 键盘路径", () => {
     assert.deepEqual(stub.calls[0]?.args, ["s1", 3, "第二轮草稿"]);
     assert.equal(container.querySelector("textarea"), null, "成功后关闭编辑器");
     // 第一轮（无更早的已结束轮）→ 不给 fork 入口
-    const { container: firstTurn } = await mountDock(
+    const { container: firstTurn } = await mountTurnTail(
       {
         nodes: [{ kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "第一轮" }] }],
         turnEnds: new Map([[1, 3]]),
       },
-      null,
+      1,
     );
     await openEditor(firstTurn);
     assert.equal(buttonByText(firstTurn, FORK_RESEND_LABEL), null, "第一轮禁止 fork");
   });
 
   it("键盘：⌘Enter 与 Ctrl+Enter 都发送；无关键与空白草稿不动作", async () => {
-    const { container, stub } = await mountDock(twoTurnView, null);
+    const { container, stub } = await mountTurnTail(twoTurnView, 4);
     await openEditor(container);
     await pressKey(container.querySelector("textarea")!, { key: "a" });
     assert.equal(stub.calls.length, 0, "无关按键不动作");
@@ -2594,9 +3290,9 @@ describe("dock 动作行与 host 写通道", () => {
   afterEach(teardownDomEnv);
 
   it("重试发出续跑文案；失败进错误条；无 target 时不出编辑入口", async () => {
-    const { container, stub } = await mountDock(
+    const { container, stub } = await mountTurnTail(
       { nodes: turnErrorNodes, turnEnds: new Map([[1, 3]]) },
-      null,
+      1,
     );
     assert.equal(buttonByText(container, "编辑"), null, "无用户消息 → 编辑按钮不渲染");
     let runs = 0;
@@ -2655,8 +3351,8 @@ describe("dock 动作行与 host 写通道", () => {
     assert.ok(container.textContent.includes("dock-bare"), "动作 reject(非 Error) 面");
   });
 
-  it("继续输出走同一个 外壳；成功时不显示错误条", async () => {
-    const { container, stub } = await mountDock(
+  it("发送续写走同一个 外壳；成功时不显示错误条", async () => {
+    const { container, stub } = await mountTurnTail(
       {
         nodes: [
           { kind: "user", seq: 1, turn: 1, content: [{ type: "text", text: "长文" }] },
@@ -2664,11 +3360,11 @@ describe("dock 动作行与 host 写通道", () => {
         ],
         turnEnds: new Map([[1, 3]]),
       },
-      null,
+      1,
     );
     assert.ok(buttonByText(container, "编辑"), "有 target → 编辑按钮在");
     await act(async () => {
-      buttonByText(container, "继续输出")!.click();
+      buttonByText(container, "发送续写")!.click();
     });
     await act(async () => {
       await flush();
@@ -2678,7 +3374,65 @@ describe("dock 动作行与 host 写通道", () => {
     assert.equal(container.querySelector(".sr-error"), null, "成功时错误条不渲染");
   });
 
-  it("停止重问：busy 文案 + 重入闸门 + 失败文案", async () => {
+  it("停止重问草稿键盘：⌘Enter 确认、空白草稿不动作、Esc 收起、Ctrl+Enter 确认", async () => {
+    const { container, stub } = await mountDock(
+      {
+        nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
+        turnEnds: new Map([[2, 5]]),
+        running: true,
+      },
+      null,
+    );
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
+    const area = container.querySelector("textarea");
+    assert.ok(area, "草稿已展开");
+    // 无关键不动作（Enter/modifier 之外的外层分支）
+    await pressKey(area, { key: "a" });
+    assert.equal(stub.calls.length, 0, "无关键不发送");
+    // ⌘Enter：预填原文入队
+    await pressKey(area, { key: "Enter", metaKey: true });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(stub.calls[0]?.name, "stopAndReask", "⌘Enter 确认按预填原文入队");
+    assert.equal(stub.calls[0].args[1], "go");
+    // 成功后收起 → 再展开 → 清空草稿 → ⌘Enter 不动作
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
+    const area2 = container.querySelector("textarea");
+    assert.ok(area2);
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(area2).onChange({
+        target: { value: "   " },
+      });
+    });
+    await pressKey(area2, { key: "Enter", metaKey: true });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(stub.calls.length, 1, "空白草稿不发送");
+    assert.ok(container.querySelector("textarea"), "编辑器仍在");
+    // Esc 收起
+    await pressKey(area2, { key: "Escape" });
+    assert.equal(container.querySelector("textarea"), null, "Esc 后收起");
+    // 重新展开（重新预填原文）→ Ctrl+Enter 同样确认（metaKey 之外的另一支）
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
+    const area3 = container.querySelector("textarea");
+    assert.ok(area3);
+    assert.equal(area3.value, "go", "重新展开按当时的最后消息预填");
+    await pressKey(area3, { key: "Enter", ctrlKey: true });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(stub.calls.length, 2, "Ctrl+Enter 同样确认");
+  });
+
+  it("停止重问：busy 文案 + 重入闸门（草稿展开后的确认按钮）", async () => {
     const { container, stub } = await mountDock(
       {
         nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
@@ -2696,17 +3450,19 @@ describe("dock 动作行与 host 写通道", () => {
     await act(async () => {
       buttonContaining(container, "停止并重问")!.click();
     });
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
     const waiting = buttonContaining(container, "停止中…");
     assert.ok(waiting, "busy 态文案");
     await act(async () => {
       reactProps<{ onClick: () => void }>(waiting).onClick();
     });
     assert.equal(stops, 1, "重入闸门只放行一次");
-    gate.release({ ok: false, code: "busy", message: "稍后再试" });
+    gate.release({ ok: true });
     await act(async () => {
       await flush();
     });
-    assert.ok(container.textContent.includes("busy: 稍后再试"), "stopError 渲染");
   });
 
   it("取消/开关被 host 拒绝（{ok:false}）→ 文案可见；成功时不留痕", async () => {
@@ -2721,7 +3477,7 @@ describe("dock 动作行与 host 写通道", () => {
         },
       },
     };
-    const { container } = await mountDock({}, body, {
+    const { container } = await mountDock(withNode, body, {
       route: (url) =>
         url.startsWith(CANCEL_URL) || url.startsWith(TOGGLE_URL)
           ? { ok: true, body: { ok: false, error: HOST_REJECT_TEXT } }
@@ -2735,14 +3491,14 @@ describe("dock 动作行与 host 写通道", () => {
     });
     assert.ok(container.textContent.includes("取消未生效"), "取消失败必须可见");
     await act(async () => {
-      buttonByText(container, "关闭")!.click();
+      dockSwitch(container)!.click();
     });
     await act(async () => {
       await flush();
     });
     assert.ok(container.textContent.includes("开关切换未生效"), "开关失败必须可见");
 
-    const { container: okHost } = await mountDock({}, body, {
+    const { container: okHost } = await mountDock(withNode, body, {
       route: (url) =>
         url === STATE_URL
           ? { ok: true, body }
@@ -2752,7 +3508,7 @@ describe("dock 动作行与 host 写通道", () => {
       buttonByText(okHost, "取消")!.click();
     });
     await act(async () => {
-      buttonByText(okHost, "关闭")!.click();
+      dockSwitch(okHost)!.click();
     });
     await act(async () => {
       await flush();
@@ -3034,7 +3790,7 @@ describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
     const container = await mountInjectedSettingsCard(ctx);
     const sw = container.querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR);
     assert.ok(sw);
-    assert.equal(sw.getAttribute("aria-checked"), "true");
+    assert.equal(switchChecked(container, ENABLE_TOGGLE_SELECTOR), "true");
     await act(async () => {
       sw.click();
     });
@@ -3053,9 +3809,7 @@ describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
       "touched 清空 → 回到无改动",
     );
     assert.equal(
-      container
-        .querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR)!
-        .getAttribute("aria-checked"),
+      switchChecked(container, ENABLE_TOGGLE_SELECTOR),
       "false",
       "显示值取自宿主快照回读",
     );
@@ -3392,10 +4146,10 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
   });
 
   it("en 字典渲染 dock：横幅倒计时与按钮都是英文，不残留中文", async () => {
-    const { container } = await mountDock({}, pendingBody, { t: tEn });
+    const { container } = await mountDock(withNode, pendingBody, { t: tEn });
     const text = container.textContent;
     assert.match(text, /auto-resume in 5s/u, "英文倒计时横幅");
-    assert.match(text, /Auto-resume \(this session\)/u, "英文开关行标题");
+    assert.match(text, /Auto-rescue \(this session\)/u, "英文开关行标题");
     assert.ok(buttonByText(container, "Cancel") !== null, "英文取消按钮");
     assert.doesNotMatch(text, /[一-鿿]/u, "整条 dock 不该混进中文");
   });

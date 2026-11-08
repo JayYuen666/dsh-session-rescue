@@ -34,7 +34,7 @@
 //   - 设置面是**隐式注册**的：命名空间 = profile 条目 id（`session-rescue`，
 //     见 cordis.patch.yml），可编辑项由导出 `Config` 上的 `.volatile()` 决定，内置默认
 //     逐字段落在 `.default()`（本包不调 `settings.register`，也不交 `{ base }` 底座）。
-//     十三项**全部**要标 volatile：漏一项就从设置卡上静默消失，全漏则整条不被投影
+//     十四项**全部**要标 volatile：漏一项就从设置卡上静默消失，全漏则整条不被投影
 //     （写入抛 `has no volatile fields`）——那等于用户再也打不开续跑开关。读侧一律
 //     `config.<field>.get()`（见 settingsOf），跨命名空间读只剩 `settings.describe()`。
 //
@@ -75,10 +75,10 @@ import {
   looksRateLimitish,
 } from "./lib/failure-classify.ts";
 import type { LlmFailureLike } from "./lib/failure-classify.ts";
-import { rescueKindOf, ResumeScheduler } from "./lib/resume-scheduler.ts";
+import { MAX_RESUMES_REASON, rescueKindOf, ResumeScheduler } from "./lib/resume-scheduler.ts";
 import type { PendingRecord, RescueKind, TimerDisposer } from "./lib/resume-scheduler.ts";
-import { reviewLastTurn } from "./lib/turn-review.ts";
-import type { TurnReview } from "./lib/turn-review.ts";
+import { reviewLastTurn, reviewOpenTurn } from "./lib/turn-review.ts";
+import type { OpenTurnReview, TurnReview } from "./lib/turn-review.ts";
 // 回合事实投影：投影单元 + 读侧换算 + 回退扫描（见 lib/turn-facts.ts）。
 import {
   asFacts,
@@ -222,8 +222,8 @@ const CHAIN_RESUME_DELAY_MS_DEFAULT = 60_000;
  *  拆 helper 时提升为模块常量——handleRequestError 是模块级受控函数，用到它们。 */
 const REQUEST_RETRY_MAX = 5;
 const REQUEST_RETRY_BACKOFF_MS: readonly number[] = [2000, 5000, 10_000, 20_000, 30_000];
-/** 本插件愿意代等的上限（= 阶梯封顶）。提供方 Retry-After 超过它就不等、
- *  直接委托 next()，让官方 llm-retry（其策略 maxDelayMs 可达 60s+）接手。 */
+/** 本插件愿意代等的上限（= 阶梯封顶）。提供方 Retry-After 超过它就不等，
+ *  请求按终态收束（官方 llm-retry 的策略 maxDelayMs 可达 60s+，它接手时轮不到这里）。 */
 const REQUEST_RETRY_BACKOFF_CAP_MS = 30_000;
 
 // 连接感知挂起快照的安全上限：防极端场景下数组无界增长。
@@ -287,7 +287,7 @@ export type SessionEventsLike = Pick<Session, "id"> &
  *   ——本插件只读待办，从不改待办。
  * - `session` 用本包的 Partial 投影而不是官方 `Session` 整类（名义类，见上）。
  */
-export interface RescueAgent extends Pick<Agent, "id" | "followup"> {
+export interface RescueAgent extends Pick<Agent, "id" | "followup" | "steer"> {
   options?: Agent["options"] | null;
   /** 模型选择的实际类型。旧宿主运行时没有这一位（读成 `undefined`），故按可选收。 */
   model?: Agent["model"] | null;
@@ -429,6 +429,23 @@ export type RequestErrorPayload = Partial<
 /** agent/request-error 返回值：{ kind:'retry' } 触发重发；undefined 终结。 */
 export type RequestErrorAction = { kind: "retry" } | undefined;
 
+/** waterfall 的终态结论（无人重发）。显式常量而非字面 `return undefined`：consistent-return
+ *  把字面 undefined 当 valueless return，与带值出口混用会被判不一致。 */
+const REQUEST_TERMINAL: RequestErrorAction = undefined;
+
+/**
+ * `agent/turn-stopping` 载荷＝官方 `Events` 的该条目（@deepseek-ai/dsh-agent 安装态
+ * `lib/types/runtime-types.d.ts`，`@mode serial`）：`{ agent: Agent; turn: number;
+ * signal: AbortSignal }`。监听者没有决策返回值——异议通过副作用 `agent.steer(...)`
+ * 表达，宿主在监听返回后重读 inbox 决定是否继续步进。本包只把 `agent` 换成
+ * RescueAgent 投影并整体 Partial 化（跨进程载荷逐项守卫，同 agent/error 的纪律）。
+ */
+export interface TurnStoppingPayload {
+  agent?: RescueAgent | null;
+  turn?: unknown;
+  signal?: { aborted?: boolean } | null;
+}
+
 /**
  * agents 服务的本插件读取接口 = 官方 `AgentRegistry`（installed
  * @deepseek-ai/dsh-agent/lib/types/index.d.ts:19-21 交出 `Context.agents`）的两枚成员投影：
@@ -513,6 +530,10 @@ export interface HostCtx {
         payload: RequestErrorPayload,
         next: () => Promise<RequestErrorAction>,
       ) => Promise<RequestErrorAction>,
+    ) => unknown) &
+    ((
+      event: "agent/turn-stopping",
+      listener: (payload: TurnStoppingPayload) => void | Promise<void>,
     ) => unknown) &
     ((
       event: "agent/disposed",
@@ -867,6 +888,9 @@ interface ApplyRuntime {
   requestProviders: Map<string, string>;
   /** 已就「投影形状被拒」报过一次的会话（`agent/disposed` 时随会话释放）。 */
   factsRejections: Set<string>;
+  /** 每会话最近一次「配额耗尽被拒」（ RescueKind → 造次失败轮）：/state 的 blocked 位，
+   *  供客户端弹一次升级提示。配额恢复（正常完成回合 / 清单闭合）或会话关闭时清除。 */
+  blocked: Map<string, { kind: RescueKind; turn: number }>;
   /** 在途的请求级退避 sleep 释放器集合：这些定时器不属于 scheduler，
    *  disposeAll() 管不到它们，插件卸载必须逐个回收，否则卸载后还会唤醒注入。 */
   backoffs: Set<() => void>;
@@ -908,7 +932,7 @@ interface TransientPassItem {
 
 /** 一次读全的解析后设置快照（旧 `settings.register` 返回 scope 的 `get()` 等价物）：
  *  续跑/续写/补跑三类注入按事件现读一份，纯值往下传，不必让每个消费方持有引用。
- *  十三项全是 `Config` 里的 volatile 字段（见文件末 configSchema），逐项 `.get()`
+ *  十四项全是 `Config` 里的 volatile 字段（见文件末 configSchema），逐项 `.get()`
  *  即当前值 —— 设置卡改完，下一次读即生效，不必重载插件。 */
 interface ResolvedSettings {
   enabled: boolean;
@@ -927,6 +951,7 @@ interface ResolvedSettings {
   unfinishedDelayMs: number;
   unfinishedCooldownMs: number;
   maxUnfinished: number;
+  unfinishedSteerMode: boolean;
   /** 部署值（非 volatile，装载期定值）：请求级 429 重试的次数上限。 */
   requestRetryMax: number;
   /** 部署值：退避阶梯（毫秒，超出档位取末档）。 */
@@ -935,7 +960,7 @@ interface ResolvedSettings {
   requestRetryBackoffCapMs: number;
 }
 
-/** 逐字段现读当前设置（引用不变、值可变）。schema 已给全部十三项 `.default()`，
+/** 逐字段现读当前设置（引用不变、值可变）。schema 已给全部十四项 `.default()`，
  *  故交进来的引用恒有值 —— 投影本身是否漏项由 test/host.test.ts 的验收用例守住。 */
 function settingsOf(config: PluginConfig): ResolvedSettings {
   return {
@@ -952,6 +977,7 @@ function settingsOf(config: PluginConfig): ResolvedSettings {
     unfinishedDelayMs: config.unfinishedDelayMs.get(),
     unfinishedCooldownMs: config.unfinishedCooldownMs.get(),
     maxUnfinished: config.maxUnfinished.get(),
+    unfinishedSteerMode: config.unfinishedSteerMode.get(),
     // 这三项是**非 volatile** 的部署值：cordis 交进来的是值而不是引用（改值随重启
     // 生效），所以这里不带 .get()。
     requestRetryMax: config.requestRetryMax,
@@ -1134,6 +1160,33 @@ function dropTransientPasses(runtime: ApplyRuntime, sessionId: string): void {
   );
 }
 
+/** agent/disposed：会话死亡即释放本会话的全部内存台账（请求级重试计数、失败线路、
+ *  每会话开关、投影告警去重位、耗尽位、待兑 pass、挂起快照）。前几表此前仅 idle /
+ *  重试耗尽时自洁（泄漏审计：LOW 级缓慢无界），显式清理后按会话严格有界。事件载荷与
+ *  gateway 那边的 auto-recall 同型（payload.agent.session.id；fork 收尾同样触发）。 */
+function handleAgentDisposed(
+  runtime: ApplyRuntime,
+  payloadRaw: {
+    agent?: { session?: { id?: unknown } } | null;
+  },
+): void {
+  const sid = payloadRaw.agent?.session?.id;
+  if (typeof sid !== "string" || sid === "") {
+    return;
+  }
+  runtime.requestRetryCounts.delete(sid);
+  runtime.requestProviders.delete(sid);
+  runtime.disabledSessions.delete(sid);
+  runtime.factsRejections.delete(sid);
+  runtime.blocked.delete(sid);
+  // 未兑的 pass 记录一并撤销：会话都没了，"之后跑成功"永不可能发生，
+  // 继续留着就是一条永不兑现的观察（且可能被误兑）。
+  dropTransientPasses(runtime, sid);
+  // 会话已不存在：挂起中的补发永不可能再发出，留着快照就是让调度器那条记录
+  // 永久不可淘汰（agent/disposed 是这张台账唯一的"会话死亡"信号）。
+  dropSuspended(runtime, sid);
+}
+
 /** lesson-loop pass 入参（总线契约的 pass 面；project 由 bus 内部按 cwd 推导，
  *  故 cwd 必须是 report 当时读到的那一份）。 */
 interface LessonPassInput {
@@ -1275,9 +1328,9 @@ function ladderPick(ladderMs: readonly number[], count: number): number {
   return pickedMs;
 }
 
-/** 本次重试该等多久（ms）。返回 null = 提供方要求等待超过本插件封顶，等不起，
- *  直接交回 next()（官方 llm-retry 的重试策略 maxDelayMs 更大，由它接手）。
- *  优先服从 provider 的 Retry-After（harness llm-retry/src/index.ts:227 同规则），
+/** 本次重试该等多久（ms）。返回 null = 提供方要求等待超过本插件封顶，本阶梯不接手，
+ *  请求按终态收束（官方 llm-retry 的策略 maxDelayMs 更大；它也没接时这一失败就终结）。
+ *  优先服从 provider 的 Retry-After（与 llm-retry 对 providerRetryAfterMs 的消费同一优先序），
  *  固定阶梯不得盖过它——429 带 `Retry-After: 120` 时若仍按 2s 重发，等于对着
  *  限流窗口继续砸请求。
  *  阶梯与封顶都由 entry config 交进来（cap 与 providerRetryAfterMs 同单位 ms），
@@ -1309,25 +1362,27 @@ function requestBackoffMs(
   return ladderPick(ladderMs, count);
 }
 
-/** agent/request-error：**适配器没解析出重试策略的 provider** 上的 429 自动重试
- *  （不打断模型运行）。waterfall 返回 {kind:'retry'} → agent-loop 同一回合重发；
- *  退避优先服从 provider Retry-After，否则走固定阶梯，超出封顶则委托 next()。
+/** agent/request-error：官方重试策略**拒绝接手**之后的最后一级限速重试（不打断模型
+ *  运行）。waterfall 返回 {kind:'retry'} → agent-loop 同一回合重发；退避优先服从
+ *  provider Retry-After，否则走固定阶梯，超出封顶则请求按终态收束。
  *
- *  与官方 llm-retry 的相对位置只有读 cordis 才说得准（不是"谁先返回谁赢"）：
- *  waterfall 按注册顺序成链，**首个注册者是最外层**（vendor/cordis/src/events.ts:234-243
- *  的 `cbs.shift()` 链），因此先注册的那位可以先决定"不 next()"从而让整条链不再往下走。
- *  官方 llm-retry 在 signal 已 abort 或其条目已 disposed 时就直接返回、**不调 next()**
- *  （llm-retry/src/index.ts:163、:250），那一窗内本包这段根本不被调用；而它的
- *  `always` 模式反过来**采纳**下游交回的决策（同文件 :212），不是抢在下游之前定终态。
- *  另一条只有真宿主能给的事实：deepseek 适配器即使不配 `retryPolicy` 也会按
- *  `resolveRetryPolicy(undefined)` 交回一份默认策略（test/integration/agent-loop.test.ts
- *  的探测替身），于是下面「宿主已解析出策略就让位」这条判据恒成立——本包阶梯实际只对
- *  不解析策略的适配器生效；profile 若没装 dsh-llm-retry，一次 429 会零次重发直接终态。
+ *  分工是「先问下游、无人接再自己来」（与官方 llm-retry `always` 模式的
+ *  settleDownstream 同款）：本函数先 `await next()` 把决策权交给链上其他监听者——
+ *  官方 llm-retry 愿意接的失败（码表内、次数未耗尽、Retry-After 在策略上限内）在这里
+ *  就归它，下游交回 {kind:'retry'} 就原样采纳；下游交回 undefined 说明没人接——llm-retry
+ *  对码表外的失败（默认码表不含 QUOTA）、normal 模式次数耗尽、Retry-After 超过策略
+ *  maxDelay、以及 signal 已 abort/条目已失效四种情形都会放行 `next()`——这时本函数的
+ *  阶梯才是唯一的接手者。compaction 等其他监听者的恢复决策同样被采纳。
  *
- *  与官方 llm-retry 的分工由宿主解析出的 `retryPolicy` 划线：有策略 → 委托，本函数不参与；
- *  无策略（`retryPolicy === undefined`）→ 官方自己也会 `return next()`，本函数的阶梯是唯一
- *  的兜底。与 agent/error（回合级续跑）互补：请求级先重试，耗尽仍失败才续跑。
- *  等待中 signal 中止 → 委托 next() 终结，不重发**也不占重试名额**。 */
+ *  为什么不能按「宿主有没有解析出 retryPolicy」划线：llm 注册表在适配器注册时对
+ *  未配置的 provider 无条件补一份默认策略（`providerRetryPolicy()` 为空也走
+ *  `resolveRetryPolicy(undefined)`，见 `AdapterRegistration.retryPolicy` 的非可选声明），
+ *  所以那个判据恒真、「无策略 provider」在真宿主上不存在——按它让位等于本阶梯永远
+ *  不可达。
+ *
+ *  `next()` 一次性：开始自查之后不能再调——采纳之后的任何出口都返回 undefined（终态）
+ *  或自己的 retry 决策。与 agent/error（回合级续跑）互补：请求级先重试，耗尽仍失败才续跑。
+ *  等待中 signal 中止 → 终结，不重发**也不占重试名额**。 */
 async function handleRequestError(
   runtime: ApplyRuntime,
   payload: RequestErrorPayload,
@@ -1358,20 +1413,32 @@ async function handleRequestError(
   if (!isRequestRetryWorthy(failure)) {
     return next();
   }
-  // 让位给官方 llm-retry：宿主已经为本次请求解析出 retryPolicy 时，重试归它。
-  //
-  // 两条链挂在同一个 waterfall 上，先返回 {kind:'retry'} 的那个赢，后注册的永远轮不到。
-  // 本插件的固定阶梯因此只能当**无策略 provider 的兜底**：不主动让位，等于把官方那套
-  // （retryableCodes 过滤、providerRetryAfterMs、抖动、写入持久日志的 llm/retry 事件）
-  // 整体顶掉，而设置卡上的 `default` 预设（unset）恰好就是「无策略」——那条路仍然归本包。
-  if (payload.retryPolicy !== undefined) {
-    return next();
+  // 先问下游：官方 llm-retry（与 compaction 等其他监听者）愿意接的失败在这里就归它们，
+  // 本函数原样采纳它们的决策——码表过滤、Retry-After、抖动、写入持久日志的 llm/retry
+  // 事件全部保留。下游抛错按「无决策」处理（与 llm-retry settleDownstream 的容错同向），
+  // 本阶梯照常接手。
+  let downstream: RequestErrorAction;
+  try {
+    // node/callback-return 在这里误报：next() 是 waterfall 的延续函数而不是 err-back
+    // 回调，await 它的落点就是下游结论本身，没有「调用后不返回」的形状可修。
+    // oxlint-disable-next-line node/callback-return -- 见上
+    downstream = await next();
+  } catch (error) {
+    console.warn(
+      `[session-rescue] ${agent.session.id}: downstream request-error recovery failed (${String(error instanceof Error ? error.message : error)}) — taking over with own ladder`,
+    );
+    downstream = undefined;
   }
+  if (downstream?.kind === "retry") {
+    return downstream;
+  }
+  // 下游放行（码表外 / 次数耗尽 / Retry-After 超限 / abort）→ 本阶梯是最后一级。
+  // `next()` 已消费：此后任何出口只能交回终态（REQUEST_TERMINAL）或自己的 retry 决策。
   const sessionId = agent.session.id;
   const retryCount = runtime.requestRetryCounts.get(sessionId) ?? 0;
   if (retryCount >= cfg.requestRetryMax) {
     runtime.requestRetryCounts.delete(sessionId);
-    return next();
+    return REQUEST_TERMINAL;
   }
   const delayMs = requestBackoffMs(
     retryCount,
@@ -1381,12 +1448,12 @@ async function handleRequestError(
   );
   if (delayMs === null) {
     console.info(
-      `[session-rescue] ${sessionId}: provider Retry-After ${String(failure.providerRetryAfterMs)}ms exceeds ${String(cfg.requestRetryBackoffCapMs)}ms cap — delegating to llm-retry`,
+      `[session-rescue] ${sessionId}: provider Retry-After ${String(failure.providerRetryAfterMs)}ms exceeds ${String(cfg.requestRetryBackoffCapMs)}ms cap — leaving the request terminal`,
     );
-    return next();
+    return REQUEST_TERMINAL;
   }
   // 退避等待：第 n 次重试取阶梯第 n 档；等待中回合被中止（用户停止/会话关闭）
-  // → 委托 next() 终结，不重发。名额只在真的要重发时才占用：先 ++ 再判 abort 的话，
+  // → 终结，不重发。名额只在真的要重发时才占用：先 ++ 再判 abort 的话，
   // 白等一场还要烧掉一次配额。
   if (delayMs > 0) {
     const abortedDuringWait = await sleepWithAbort(
@@ -1396,7 +1463,7 @@ async function handleRequestError(
       runtime.backoffs,
     );
     if (abortedDuringWait) {
-      return next();
+      return REQUEST_TERMINAL;
     }
   }
   runtime.requestRetryCounts.set(sessionId, retryCount + 1);
@@ -1461,6 +1528,11 @@ function scheduleInjection(runtime: ApplyRuntime, opts: InjectionOptions): void 
       return;
     }
     // skip（pending/配额/冷却）是正常流控，不是错误：log 级即可（旧用 error 级刷屏）。
+    // 配额耗尽额外登记进 blocked 台账：客户端据此弹一次「自动救援已用尽」的升级提示
+    // （此前这条只存在于 console，用户在界面上无从知晓为什么它不再救）。
+    if (decision.reason === MAX_RESUMES_REASON) {
+      runtime.blocked.set(sessionId, { kind, turn });
+    }
     console.info(`[session-rescue] ${sessionId}: auto-${kind} skipped (${decision.reason})`);
     return;
   }
@@ -1780,7 +1852,9 @@ function handleCompletedTurn(
   sessionId: string,
   opts: CompletedTurnOptions,
 ): void {
-  // completed：先重置失败配额——失败序列已断（A）。
+  // completed：先重置失败配额——失败序列已断（A）。配额恢复即撤掉 blocked 位
+  // （客户端的升级提示按「出现一次」去重，位撤掉后下次耗尽会再报一次）。
+  runtime.blocked.delete(sessionId);
   runtime.scheduler.onSuccess(sessionId);
   // 同一个成功信号也是 lesson-loop 的 pass：瞬时失败发生过、之后同 provider 的请求
   // 真的跑完了整个回合 → 退避重试这条规则被遵守。必须在下面的清单/开关判定**之前**
@@ -1792,6 +1866,8 @@ function handleCompletedTurn(
     return;
   }
   if (opts.openTodos === 0) {
+    // 补跑配额恢复，blocked 位一并撤掉。
+    runtime.blocked.delete(sessionId);
     runtime.scheduler.onTodosClosed(sessionId);
     return;
   }
@@ -1839,12 +1915,12 @@ function handleAgentStatus(
   if (!agent) {
     return;
   }
-  // 请求级 429 重试计数按会话累加且从不重置——长跑会话把零星 429
-  // 累加到 REQUEST_RETRY_MAX 后永久不再兜底重试（第 6 次直接交给 llm-retry，而
-  // sensenova 等 QUOTA 未配置 → 回合失败），且 Map 随会话增长泄漏。回合统一处理
-  // （status→idle）= 请求周期结束（重试循环内 status 恒为 running，不会误重置），
-  // 此处重置该会话计数——放在 root/disabled/review 判定之前，任何 idle 都清，兼防泄漏。
-  // 与下面 disabledSessions / scheduler 对同一值的用法同一信任档，不再单设 typeof 守卫。
+  // 请求级重试计数是「同一回合内」的量：回合统一处理（status→idle）= 请求周期结束
+  // （重试循环内 status 恒为 running，不会误重置），此处重置该会话计数——放在
+  // root/disabled/review 判定之前，任何 idle 都清，兼防 Map 随会话增长泄漏。
+  // 不重置的后果：长跑会话把零星 429 累加到 requestRetryMax 后，本阶梯对之后的失败
+  // 一律按终态收束。与下面 disabledSessions / scheduler 对同一值的用法同一信任档，
+  // 不再单设 typeof 守卫。
   const sessionId = agent.session.id;
   runtime.requestRetryCounts.delete(sessionId);
   const cfg = idleRescueGates(runtime, agent, sessionId);
@@ -1860,10 +1936,13 @@ function handleAgentStatus(
     return;
   }
 
-  // 用户中止/打断的回合既不调度也不重置配额（不消耗、不恢复，原样保留），并且要在 max-tokens
-  // 那一档之前统一处理。判只能落在这里：turn/end 到此刻才写到磁盘，从 agent/error 的事件里扫它是空扫。
-  // 下面 `!== "completed"` 那一档今天也会把这两种 reason 挡回去，所以这一支不是唯一闸门——
-  // 留着它是因为「用户中止」这个因由要显式成立，靠下一档的顺带效果兜住会在取值名单被改动时静默失效。
+  // `aborted`（用户/父级/hook 中止）与 `interrupted`（崩溃孤儿回合的修复闭合标记，由
+  // agent-loop resume 追加、loop 运行中从不发射——宿主 `TurnEndReasonMap` 的原文即
+  // "closed after the fact"）都不调度也不重置配额（不消耗、不恢复，原样保留），并且要在
+  // max-tokens 那一档之前统一处理。判只能落在这里：turn/end 到此刻才写到磁盘，从
+  // agent/error 的事件里扫它是空扫。下面 `!== "completed"` 那一档今天也会把这两种 reason
+  // 挡回去，所以这一支不是唯一闸门——留着它是因为「这两种终态不注入」要显式成立，
+  // 靠下一档的顺带效果会在取值名单被改动时静默失效。
   if (review.lastReasonKind === "aborted" || review.lastReasonKind === "interrupted") {
     return;
   }
@@ -1906,15 +1985,103 @@ function handleAgentStatus(
   });
 }
 
+/** steer 的开放回合判据簇：交回否决理由，null = 可以 steer。从 handleTurnStopping
+ *  拆出（complexity 门）：主函数只留开关与配额闸门，判据本体在这里逐项给因。 */
+function steerReviewVerdict(
+  runtime: ApplyRuntime,
+  agent: RescueAgent,
+  review: OpenTurnReview,
+  turn: number,
+): string | null {
+  if (review.turn === null || review.turn !== turn) {
+    return "turn-mismatch";
+  }
+  if (review.openTodos === null || review.openTodos === 0 || !review.todoUpdatedInTurn) {
+    return "open-todos";
+  }
+  if (review.awaitsUser) {
+    return "awaits-user";
+  }
+  if (review.scheduleDrivenTurn) {
+    return "schedule-driven";
+  }
+  if (openerKindOf(runtime, agent, review.turn) === GOAL_SOURCE_KIND) {
+    return "goal-driven";
+  }
+  return null;
+}
+
+/**
+ * agent/turn-stopping（serial）：steer 续跑模式——回合将收尾、开放回合自己写的清单
+ * 仍有未闭合项时，经 `agent.steer(...)` 注入一条 steering 消息让**同一回合**继续，
+ * 而不是收尾后再 followup 开新回合（与 unfinished 注入互补：steer 在边界之前拦下，
+ * 回合根本不结束，unfinished 那条路自然不再触发）。
+ *
+ * 判据与 unfinished 注入同向：全局开关、steerMode（默认关）、根会话、每会话开关、
+ * 调度器无已武装待办、补跑配额可用（steer 消耗 counts.unfinished，与 unfinished
+ * 注入共轨——配额耗尽即不再 steer，回合照常收尾）。开放回合的复盘读事件流本体
+ * （reviewOpenTurn）：此刻本回合还没有 turn/end，reviewLastTurn 那套读法够不着。
+ * goal 轮让路：round driver 在 driving 时有自己的续轮机制，steer 插进去会打架。
+ */
+function handleTurnStopping(runtime: ApplyRuntime, payload: TurnStoppingPayload): void {
+  const { agent } = payload;
+  if (!agent || payload.signal?.aborted === true) {
+    return;
+  }
+  const cfg = settingsOf(runtime.config);
+  if (!cfg.enabled || !cfg.unfinishedSteerMode) {
+    return;
+  }
+  if (!isRootAgent(runtime, agent)) {
+    return;
+  }
+  const sessionId = agent.session.id;
+  if (runtime.disabledSessions.has(sessionId) || runtime.scheduler.hasPending(sessionId)) {
+    return;
+  }
+  const review = reviewOpenTurn(readEvents(agent.session));
+  if (review === null) {
+    return;
+  }
+  const turn =
+    typeof payload.turn === "number" && Number.isSafeInteger(payload.turn) ? payload.turn : 0;
+  const veto = steerReviewVerdict(runtime, agent, review, turn);
+  if (veto !== null) {
+    console.info(`[session-rescue] ${sessionId}: steer vetoed (${veto})`);
+    return;
+  }
+  if (!runtime.scheduler.consumeUnfinishedQuota(sessionId, cfg.maxUnfinished)) {
+    console.info(`[session-rescue] ${sessionId}: steer skipped (max-unfinished) — turn will close`);
+    return;
+  }
+  runtime.msgSeq.value += 1;
+  try {
+    // steer 与 followup 同一消息形状（官方 `steer(input: UserMessage)`）；
+    // source.kind 与注入同源，客户端照 inject 行渲染。
+    agent.steer({
+      id: brandString<MessageId>(`${PLUGIN_NAME}-${Date.now()}-${runtime.msgSeq.value}`),
+      role: "user",
+      content: [{ type: "text", text: runtime.localeMessages().steerUnfinishedText }],
+      source: { kind: RESCUE_SOURCE_KIND },
+    });
+    console.info(
+      `[session-rescue] ${sessionId}: steer at turn ${String(turn)} (open todos) — continuing in-turn`,
+    );
+  } catch (error) {
+    console.error(`[session-rescue] ${sessionId}: steer failed: ${String(error)}`);
+  }
+}
+
 // ── 官方 llm-retry 策略读写通道 ────────────────────────────────────────────
 // 背景：pi-ai 对 429+insufficient_quota 归码 QUOTA（官方测试锁定语义），
 // 默认 retryableCodes 不含 QUOTA → llm-retry 放行 → 请求级 5 次瞬发耗尽 →
 // 回合失败。此通道把官方 provider 级 retryPolicy 配置表暴露到本插件设置卡：
 // GET 列出 llm-pi-ai 全部 providers 与当前策略摘要；POST 按 preset 经
 // settings.mutate 写到磁盘（validator 在写处把关，坏值 settings-rejected）。
-// preset → 官方 RetryPolicyConfig（retry-policy.ts:100 z.union([normal, always])）：
-//   default   → unset（回官方默认：normal 5 次，码表 RATE_LIMIT/SERVER/
-//               TIMEOUT/TRANSPORT/EMPTY_RESPONSE，500ms→10s）
+// preset → 官方 RetryPolicyConfig（z.union([normal, always])）：
+//   default   → 显式写官方默认对象（normal 5 次，码表 EMPTY_RESPONSE/RATE_LIMIT/
+//               SERVER/TIMEOUT/TRANSPORT，500ms→10s；不再 unset，理由见
+//               OFFICIAL_DEFAULT_RETRY_POLICY 处的注释）
 //   enhanced  → normal 12 次 + QUOTA + 8s→60s（settings.yaml 现行四家同款）
 //   always    → 官方无限重试（until success/cancellation/disposal）+ 5s→60s
 //   off       → normal maxRetries:0（码表非空校验所迫带单 RATE_LIMIT 占位）
@@ -1923,12 +2090,28 @@ function handleAgentStatus(
 // `RETRY_PRESETS["constructor"]` / `["toString"]` / `["__proto__"]` 在对象表上
 // 都**不是** undefined —— 400 闸门被原型键绕过，`value: undefined` 被发给
 // settings.mutate 并回 200。Map.get 只看自有条目，原型链无从命中。
-type RetryPreset =
-  | { readonly op: "set"; readonly value: Record<string, unknown> }
-  | { readonly op: "unset" };
+//
+// default 档显式写官方默认对象而不是 unset：0.2.2-rc.1 的 settings 把 user section
+// 持久化进 profile 的 patch 文档，与行配置同源，unset 是对文档删路径——会把插件
+// 接管之前手写的 retryPolicy 一并删掉（实测 sensenova 的 normal/10 自定义码表整块
+// 消失）。显式写默认值的代价：官方将来调默认时该 provider 不自动跟随，需重存一次。
+// 取值是 @deepseek-ai/dsh-llm lib/src/retry-policy.ts 的 DEFAULT_MAX_RETRIES=5、
+// DEFAULT_RETRYABLE_CODES、DEFAULT_INITIAL_DELAY_MS=500、DEFAULT_MAX_DELAY_MS=10s、
+// DEFAULT_JITTER_RATIO=0.1 的现量。
+interface RetryPreset {
+  readonly op: "set";
+  readonly value: Record<string, unknown>;
+}
+
+const OFFICIAL_DEFAULT_RETRY_POLICY: Record<string, unknown> = {
+  mode: "normal",
+  maxRetries: 5,
+  retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
+  backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0.1 },
+};
 
 const RETRY_PRESETS = new Map<string, RetryPreset>([
-  ["default", { op: "unset" }],
+  ["default", { op: "set", value: OFFICIAL_DEFAULT_RETRY_POLICY }],
   [
     "enhanced",
     {
@@ -1995,7 +2178,15 @@ function stateSessionsOf(runtime: ApplyRuntime): Record<string, unknown> {
   // 记录下来，只在最后一次性交出一个普通对象给序列化；`scheduler.stateSnapshot()` 的键只来自
   // 宿主会话 id（客户端传的 id 进不了调度器台账），不经过这条处理外部字符串的路径。
   const byId = new Map<string, Record<string, unknown>>(
-    Object.entries(snap).map(([id, rec]) => [id, { ...rec, disabled: disabledSessions.has(id) }]),
+    Object.entries(snap).map(([id, rec]) => [
+      id,
+      {
+        ...rec,
+        disabled: disabledSessions.has(id),
+        // 配额耗尽位（客户端升级提示的来源）：有记录才写，缺位即「没有在报耗尽」。
+        ...(runtime.blocked.has(id) ? { blocked: runtime.blocked.get(id) } : {}),
+      },
+    ]),
   );
   for (const id of disabledSessions) {
     if (!byId.has(id)) {
@@ -2102,6 +2293,8 @@ export class SessionRescueRemoteService extends TypertRemoteService {
         };
       }
       disabledSessions.add(sessionId);
+      // 会话被用户关掉：耗尽提示随之撤掉（关掉的会话不再需要「为什么不在救」的解释）。
+      this.runtime.blocked.delete(sessionId);
       this.runtime.scheduler.cancel(sessionId);
       dropSuspended(this.runtime, sessionId);
     }
@@ -2150,10 +2343,11 @@ export class SessionRescueRemoteService extends TypertRemoteService {
     if (known === null || !Object.hasOwn(known, provider)) {
       return { ok: false, error: "unknown provider", status: 400 };
     }
-    const op: SettingsPathOp =
-      mapped.op === "unset"
-        ? { op: "unset", path: ["providers", provider, "retryPolicy"] }
-        : { op: "set", path: ["providers", provider, "retryPolicy"], value: mapped.value };
+    const op: SettingsPathOp = {
+      op: "set",
+      path: ["providers", provider, "retryPolicy"],
+      value: mapped.value,
+    };
     const piAiRevision = this.runtime.svc.settings
       .describe()
       .find((row) => row.ns === PI_AI_NS)?.revision;
@@ -2229,6 +2423,9 @@ export interface PluginConfig {
   unfinishedDelayMs: Volatile<number>;
   unfinishedCooldownMs: Volatile<number>;
   maxUnfinished: Volatile<number>;
+  /** steer 续跑开关（默认关）：回合将收尾、开放回合清单未闭合时经 agent.steer 同回合
+   *  续做，而不是收尾后再 followup。消耗 counts.unfinished 配额（防失控同轨）。 */
+  unfinishedSteerMode: Volatile<boolean>;
   /** 部署值：请求级 429 自动重试的次数上限（非 volatile ⇒ 不进设置卡）。 */
   requestRetryMax: number;
   /** 部署值：退避阶梯毫秒数；数组是整体替换，行 config 要给完整的一份。 */
@@ -2244,7 +2441,7 @@ export interface PluginConfig {
  *   - `.volatile()` 决定字段是否进设置表单。宿主 `describe()` 只投影 volatile 字段
  *     （packages/settings/settings/src/schema.ts 的 volatileForm），全漏标则整条被跳过
  *     （settings/src/index.ts:308-309）、写入抛 `has no volatile fields`（:386）。
- *     十三项全是本卡的可编辑项，一个都不能漏（见 test/host.test.ts 的投影验收）。
+ *     十四项全是本卡的可编辑项，一个都不能漏（见 test/host.test.ts 的投影验收）。
  *   - `settings.register(ns, schema, { base })` 的「底座」层已被宿主移除：原 BUILTIN_BASE
  *     逐字段落成下面的 `.default()`（同值同源，cordis 装载期按它校验行 config 并填默认，
  *     再把 volatile 字段包成引用交给 apply）。
@@ -2269,6 +2466,10 @@ const configSchema = Schema.object({
   unfinishedDelayMs: Schema.natural().min(1000).max(300_000).default(5000).volatile(),
   unfinishedCooldownMs: Schema.natural().min(5000).max(3_600_000).default(120_000).volatile(),
   maxUnfinished: Schema.natural().min(0).max(20).default(2).volatile(),
+  // steer 续跑默认关：它在回合收尾边界上改写宿主行为（turn-stopping + steer），风险
+  // 面比三类注入宽（实验包 hooks-claude-code 用同一点位时自留了「必须自限」的 TODO），
+  // 配额与 unfinished 注入共轨兜住连跑；默认交给用户显式打开。
+  unfinishedSteerMode: Schema.boolean().default(false).volatile(),
   // 请求级 429 重试的三枚部署值。刻意不标 volatile —— 它们是「两部署可能想设不同
   // 值」的调优参数（官方 config.md:78-92），不是用户随时翻的开关，因此不进设置卡；
   // 默认与旧模块常量同值，行为冻结由 test/host.test.ts 的字面值钉住。
@@ -2293,7 +2494,7 @@ function apply(ctx: Context, config: PluginConfig): void {
   const svc: HostCtx = ctx;
 
   // 0.1.7 起命名空间是**隐式**的：宿主把本条目导出的 Config 里标了 `.volatile()` 的
-  // 十三项投影成设置表单，ns = profile 条目 id（`session-rescue`，见 cordis.patch.yml）。
+  // 十四项投影成设置表单，ns = profile 条目 id（`session-rescue`，见 cordis.patch.yml）。
   // 插件侧不再 register、也不再交 base（内置默认已逐字段落成 schema 的 `.default()`，
   // cordis 装载期按它校验行 config 并把引用交进上面的 config 参数），只剩一条页面策略：
   // 本包自带设置卡片，别让宿主再生成一份自动表单页。owner 必须显式传本插件 fiber
@@ -2311,6 +2512,8 @@ function apply(ctx: Context, config: PluginConfig): void {
   const requestProviders = new Map<string, string>();
   // 投影形状被拒的告警去重位（agent/disposed 时随会话释放）：降级是持续状态，报一次就够。
   const factsRejections = new Set<string>();
+  // 配额耗尽台账（/state 的 blocked 位来源；agent/disposed 时随会话释放）。
+  const blocked = new Map<string, { kind: RescueKind; turn: number }>();
   // locale 偏好读一次即缓存：跨命名空间读只剩 describe() 一条路，而它对每个活跃条目
   // 都要 schema.toJSON() + JSON.stringify 算 revision 再投影 value/base/user 三份。
   // 失效链：写配置 → app-boot/config-reload → SettingsForms invalidate() → 微任务里
@@ -2330,6 +2533,7 @@ function apply(ctx: Context, config: PluginConfig): void {
     requestRetryCounts,
     requestProviders,
     factsRejections,
+    blocked,
     backoffs: new Set<() => void>(),
     capacityWarned: { value: false },
     msgSeq: { value: 0 },
@@ -2397,38 +2601,28 @@ function apply(ctx: Context, config: PluginConfig): void {
     }, "session-rescue: rescue facts projection");
   });
 
-  // agent/disposed：会话结束即释放本会话的请求级重试计数、每会话开关与待兑 pass
-  // 台账。前两表此前仅 idle/重试耗尽时自洁（泄漏审计：LOW 级缓慢无界），
-  // 显式清理后按会话严格有界。事件载荷与 gateway 那边的 auto-recall 同型
-  // （payload.agent.session.id；fork 收尾同样触发）。
+  // agent/disposed：会话结束即按会话释放各张内存台账（清理项见 handleAgentDisposed）。
   svc.on("agent/disposed", (payloadRaw) => {
-    const sid = payloadRaw.agent?.session?.id;
-    if (typeof sid !== "string" || sid === "") {
-      return;
-    }
-    requestRetryCounts.delete(sid);
-    requestProviders.delete(sid);
-    disabledSessions.delete(sid);
-    factsRejections.delete(sid);
-    // 未兑的 pass 记录一并撤销：会话都没了，"之后跑成功"永不可能发生，
-    // 继续留着就是一条永不兑现的观察（且可能被误兑）。
-    dropTransientPasses(runtime, sid);
-    // 会话已不存在：挂起中的补发永不可能再发出，留着快照就是让调度器那条记录
-    // 永久不可淘汰（agent/disposed 是这张台账唯一的"会话死亡"信号）。
-    dropSuspended(runtime, sid);
+    handleAgentDisposed(runtime, payloadRaw);
   });
 
-  // ── 请求级 429 自动重试（规则：所有平台的 429 限流都自动
-  //    重试、不打断模型运行，等待按阶梯退避）。agent/request-error 是
+  // ── 请求级最后一级限流重试（规则：官方策略拒绝接手的限流失败由本包
+  //    在回合内重试，不打断模型运行，等待按阶梯退避）。agent/request-error 是
   //    waterfall：返回 {kind:'retry'} → agent-loop 同一回合重发该请求——
-  //    已核实 agent-loop 对 retry 只是 continue（packages/core/agent-loop/src/agent.ts:523-526
-  //    只有 `action?.kind !== 'retry'` 才抛，否则 `continue`，无任何延迟），
-  //    不退避的 5 连发会加重限流。退避走固定阶梯（对齐官方 llm-retry 量纲：
+  //    已核实 agent-loop 对 retry 只是 continue（packages/core/agent-loop/src/agent.ts
+  //    的 waterfall 消费段：只有 `action?.kind !== 'retry'` 才抛，否则 `continue`），
+  //    不退避的连发会加重限流。退避走固定阶梯（对齐官方 llm-retry 量纲：
   //    首退避短、逐级拉长、30s 封顶），sleep 用宿主 timer（插件卸载可回收、
-  //    测试 tick 可控）；sleep 期间 signal 中止 → 委托 next() 终结，不重发。
+  //    测试 tick 可控）；sleep 期间 signal 中止 → 终结，不重发。
   //    0.2.1-alpha.2 起每次 attempt 都会在同回合补一条 runtime-context
-  //    `user/message`（同文件 :425-440，`contextAdmitted` 改为按 attempt 复位，
-  //    alpha.1 那份是整回合一次），代价是重发的 token 数——阶梯的次数上限就是它的上限。
+  //    `user/message`（agent-loop 的 pre-step 注入，`contextAdmitted` 按 attempt 复位），
+  //    代价是重发的 token 数——阶梯的次数上限就是它的上限。
+  // ── steer 续跑（默认关）：turn-stopping serial 边界咨询，steer 表达异议；
+  //    闸门与配额语义见 handleTurnStopping。
+  svc.on("agent/turn-stopping", (payloadRaw) => {
+    handleTurnStopping(runtime, payloadRaw);
+  });
+
   svc.on("agent/request-error", (payloadRaw, next) =>
     handleRequestError(runtime, payloadRaw, next),
   );
@@ -2455,6 +2649,7 @@ function apply(ctx: Context, config: PluginConfig): void {
   svc.effect(
     () => () => {
       scheduler.disposeAll();
+      blocked.clear();
       // 退避 sleep 的定时器不归 scheduler：disposeAll 只回收调度器待办，
       // 这些在途 sleep 必须逐个结算为「已中止」，否则插件卸载后它照样唤醒。
       const pending: (() => void)[] = [...runtime.backoffs];

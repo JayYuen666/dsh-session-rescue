@@ -878,3 +878,24 @@ describe("挂起中的记录不得被台账淘汰（防失控闸门不能被静�
     scheduler.releaseSuspended("never-seen");
   });
 });
+
+describe("hasPending / consumeUnfinishedQuota（steer 模式的两个读口）", () => {
+  it("hasPending：无记录 / 空闲 / 有待办 三态各自成立", () => {
+    const scheduler = new ResumeScheduler();
+    assert.equal(scheduler.hasPending("s1"), false, "无记录 ⇒ 无待办");
+    scheduler.onFailure({ sessionId: "s1", turn: 1, delayMs: 10, cooldownMs: 10, maxResumes: 3 });
+    assert.equal(scheduler.hasPending("s1"), true, "已排期待办在场");
+    scheduler.settle("s1", "fired");
+    assert.equal(scheduler.hasPending("s1"), false, "结算后回到空闲");
+  });
+
+  it("consumeUnfinishedQuota：配额内扣减，耗尽即拒，onTodosClosed 恢复", () => {
+    const scheduler = new ResumeScheduler();
+    assert.equal(scheduler.consumeUnfinishedQuota("s1", 2), true, "第 1 次可用");
+    assert.equal(scheduler.consumeUnfinishedQuota("s1", 2), true, "第 2 次可用");
+    assert.equal(scheduler.consumeUnfinishedQuota("s1", 2), false, "达到上限即拒");
+    // 与 unfinished 注入共轨：清单闭合即恢复
+    scheduler.onTodosClosed("s1");
+    assert.equal(scheduler.consumeUnfinishedQuota("s1", 2), true, "恢复后再次可用");
+  });
+});

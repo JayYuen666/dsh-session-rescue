@@ -51,6 +51,10 @@ jobs:
         uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           languages: ${{ matrix.language }}
+          # actions 专用 bundle 资产当前在 releases 上返回 502，而同一版本的完整 bundle
+          # 可用（javascript-typescript 格本来就用它）。两格统一指到完整 bundle；抬
+          # codeql-action 版本时一并复核这个 URL。
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.4/codeql-bundle-linux64.tar.zst
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:

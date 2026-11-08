@@ -365,6 +365,26 @@ export class ResumeScheduler {
     return this.quotaMemo.get(sessionId);
   }
 
+  /** 该会话是否有已武装的待办注入（steer 模式的让路判据之一：既有待办在等，
+   *  不再在同一回合里叠加一次 steering）。 */
+  public hasPending(sessionId: string): boolean {
+    const pending = this.sessions.get(sessionId)?.pending;
+    return pending !== undefined && pending !== null;
+  }
+
+  /** steer 续跑消耗补跑配额（与 unfinished 注入共享同一道闸门与恢复路径）。
+   *  交回 false = 配额不足（`counts.unfinished >= maxUnfinished`），调用方放弃 steer、
+   *  让回合照常收尾。配额由 onSuccess（正常完成回合）不恢复、onTodosClosed（清单闭合）
+   *  恢复——与 unfinished 注入完全同轨，防失控语义也一致。 */
+  public consumeUnfinishedQuota(sessionId: string, maxUnfinished: number): boolean {
+    const rec = this.rec(sessionId);
+    if (rec.counts.unfinished >= maxUnfinished) {
+      return false;
+    }
+    rec.counts.unfinished += 1;
+    return true;
+  }
+
   /** JSON 安全快照，供 state 读取接口序列化。 */
   public stateSnapshot(): Record<string, SessionSnapshot> {
     const nowTime = this.now();

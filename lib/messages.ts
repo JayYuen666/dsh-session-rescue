@@ -18,6 +18,8 @@ export interface SessionRescueMessages {
   readonly continueText: string;
   /** 注入给模型的待办补跑正文（completed 回合但清单未闭合）。 */
   readonly unfinishedText: string;
+  /** steer 续跑的正文（回合将收尾、开放回合清单未闭合；经 agent.steer 注入同回合续做）。 */
+  readonly steerUnfinishedText: string;
   /** lesson-loop 的 unfinished-turn detail 模板（`{count}` 插值未闭合条数）。 */
   readonly unfinishedLessonDetail: string;
   /** lesson-loop 的 max-tokens 截断 detail。 */
@@ -31,6 +33,8 @@ export const MESSAGES: MessagesCatalog<SessionRescueMessages> = {
     continueText: "请从截断处继续输出，不要重复已输出的内容。",
     unfinishedText:
       "[自动续跑] 上一步正常结束，但你刚更新的任务清单里仍有未完成的项。请从清单中未完成的第一项继续执行：不要重做已完成的工作、不要重复确认、也不要输出本条提示。",
+    steerUnfinishedText:
+      "[自动续跑] 你的任务清单里仍有未完成的项，本回合先不要收尾。请从清单中未完成的第一项继续执行：不要重做已完成的工作、不要重复确认、也不要输出本条提示。",
     unfinishedLessonDetail: "回合 completed 但本回合更新的任务清单仍有 {count} 项未完成",
     maxTokensLessonDetail: "回合以 max-tokens 截断收尾，输出未完整送达",
   },
@@ -46,6 +50,10 @@ export const MESSAGES: MessagesCatalog<SessionRescueMessages> = {
       "[auto-resume] The previous step ended normally, but the task list you just updated still has open " +
       "items. Continue executing from the first open item: do not redo finished work, do not re-confirm, " +
       "and do not echo this message.",
+    steerUnfinishedText:
+      "[auto-resume] Your task list still has open items — do not close this turn yet. Continue " +
+      "executing from the first open item: do not redo finished work, do not re-confirm, and do not " +
+      "echo this message.",
     // 不把复数名词硬连在 {count} 后面：count=1 时 "1 open items" 是语法错误，而这条 detail
     // 会被持久化进 lesson-loop（不是一次性的日志）。把数字放进括号里的计数字段，任何
     // count 都读得通，中英两语的占位符集合也保持一致。

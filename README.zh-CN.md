@@ -4,7 +4,7 @@
 
 <h1 align="center">dsh-session-rescue</h1>
 
-<p align="center"><em>回合非正常收尾时自动接续：瞬时失败续跑、截断续写、待办补跑，外加输入框下方的一排手动救援动作。</em></p>
+<p align="center"><em>回合非正常收尾时自动接续：瞬时失败续跑、截断续写、待办补跑，外加输入框上方与回合尾部的手动接续动作。</em></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-session-rescue"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-session-rescue?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
@@ -27,7 +27,7 @@
   <a href="./README.md"><img src="https://img.shields.io/badge/lang-English-658EFF?style=flat-square" alt="English" /></a>
 </p>
 
-**一个 [dsh](https://github.com/deepseek-ai/deepseek-harness) 的插件：回合非正常收尾时的三类自动注入（瞬时失败续跑 / 截断续写 / 待办补跑）、请求级 429 兜底，以及输入框下方的手动救援 dock 与设置卡。零模型工具、零自有 HTTP 路由。**
+**一个 [dsh](https://github.com/deepseek-ai/deepseek-harness) 的插件：回合非正常收尾时的三类自动注入（瞬时失败续跑 / 截断续写 / 待办补跑）、请求级最后一级限流重试，以及输入框上方的接续 dock、回合尾部的操作行与设置卡。零模型工具、零自有 HTTP 路由。**
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 目录
 
@@ -54,10 +54,12 @@
   - **continue 续写**——回合以 `reason.kind === "max-tokens"` 收尾；等 `continueDelayMs` 后注入「从截断处继续」。
   - **unfinished 补跑**——回合以 `completed` 收尾，但**该回合自己写的**待办清单仍有未闭合项（`lib/turn-review.ts`，纯结构化信号、零文本猜测）；等 `unfinishedDelayMs` 后注入。
   - 注入一律是经 `agent.followup()` 发出的 `role: "user"`、`source: { kind: "plugin:session-rescue" }` 消息——模型会接着跑，token 与配额继续消耗。
-- **请求级 429 兜底**，只在宿主没有为该 provider 解析出 `retryPolicy` 时接手：监听 `agent/request-error`（waterfall），命中限流即返回 `{ kind: "retry" }`，让宿主在同一回合重发该请求。
-  - 固定退避阶梯（默认 2s / 5s / 10s / 20s / 30s，同一会话最多 5 次——部署值）；provider 的 `Retry-After` 优先于阶梯，超过封顶的就不等、委托回 `next()`。回合统一处理即重置计数。
-  - 有策略时官方 `llm-retry` 拥有重试（码表过滤、provider 重试时刻、抖动、持久事件）。deepseek 适配器即使不配策略也会解析出一份，所以这条阶梯实际只对「不解析策略的适配器」生效。
-- **输入框下方的 dock**：编辑重发（本会话）/ Fork 重发（新分支）/ 停止并重问 / 手动重试与继续输出 / 续跑倒计时横幅 / 每会话开关。停止重问先把你的重问入队再 cancel，消息不会因取消丢失；内置重试仍在进行时，手动重试按钮保持禁用。
+- **请求级最后一级限流重试**：监听 `agent/request-error`（waterfall），**先问下游、无人接再自己来**（与官方 `llm-retry` 的 `always` 模式同款）。下游交回重试决策（官方策略愿意接的失败）就原样采纳；下游放行（失败码不在策略码表——默认码表不含 `QUOTA`、次数耗尽、`Retry-After` 超过策略上限等）才由本包返回 `{ kind: "retry" }`，让宿主在同一回合重发该请求。profile 未装 `dsh-llm-retry` 时，本包阶梯就是限流失败的唯一请求级恢复路径。
+  - 固定退避阶梯（默认 2s / 5s / 10s / 20s / 30s，同一回合内最多 `requestRetryMax` 次——部署值）；provider 的 `Retry-After` 优先于阶梯，超过本包封顶（默认 30s）的就不等、请求按终态收束。回合统一处理即重置计数。
+  - 「宿主有没有解析出 `retryPolicy`」不能当分工线：llm 注册表对未配置的 provider 会补一份默认策略，那个判据恒真。真正的分工信号是下游 waterfall 的决策本身。
+- **两处手动接续入口**：回合尾部的操作行（`conversation.chat.turnTail`，与一方 deliverables / plan / schedule 同栈）放编辑重发（本会话）/ Fork 重发（新分支）/ 手动重试 / 发送续写，外加崩溃恢复的「继续中断的回合」——宿主崩溃修复给孤儿回合补写 `interrupted` 闭合标记后，那一格出一个**纯手动**的恢复按钮；输入框上方的 dock 只留会话级三件：续跑倒计时横幅 / 停止并重问 / 每会话开关。停止重问先把你的重问入队再 cancel，消息不会因取消丢失，且停止前可先改文本（预填最后一条消息）；宿主内置重试进行中时，重试按钮整个隐藏——composer 主按钮此刻已是「继续生成」，两个可用入口并存没有增量信息。
+- **接续耗尽升级提示**：配额耗尽不再只写日志——frame 级悬浮层弹一次「本会话自动接续已用尽（类别）」，正常完成一回合（补跑则是清单闭合）后自动恢复，下次耗尽再报。
+- **可选的插话续跑（默认关）**：设置卡打开后，回合将收尾而该回合自己写的清单仍未闭合时，先经 `agent.steer` 在**同一回合内**续做，而不是收尾后再补跑；与待办补跑共用 `maxUnfinished` 配额，防失控语义同轨。
 - **连接感知**：发送失败的注入（传输类故障）不丢弃而是挂起，横幅显示「重连后自动续跑」，连接恢复后按剩余延迟重新武装。
 - **`/state` 轮询是自排循环 + 两档**：有 pending 时 1s（横幅按秒走倒计时），无 pending 时 5s；上一跳落地后才排下一跳，在飞期间不叠并发也不停摆。连着三跳读不到有效快照就把缓存判为过期——横幅与每会话开关回到中性态，不拿没人确认过的数字继续倒计时——轮询按翻倍退避到 30s 封顶。
 - **一张设置卡**：自动续跑参数，加上写进官方 `llm-pi-ai` 命名空间的按 provider 429 重试档位。
@@ -68,7 +70,7 @@
 - 分类（`classifyFailure`）是一条固定阶梯：永久码一票否决（`CONTEXT_WINDOW_EXCEEDED` / `AUTH` / `INVALID_CREDENTIAL` / `MISSING_CREDENTIAL` / `INVALID_REQUEST` / `INVALID_ARGS` / `NO_ADAPTER` / `INVALID_MODEL_CONTEXT` / `INVALID_PREPARED_CALL`）。随后 `QUOTA` 按证据分：HTTP 429、`Retry-After` 或限流措辞 ⇒ 瞬时；余额耗尽措辞 ⇒ 永久。HTTP 401/403 与账单状态 402 判永久；显式瞬时码（`RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT` / `EMPTY_RESPONSE`）、HTTP 408/425/429/5xx 与限流措辞判瞬时；带无法归类的 `finish_reason` 或空响应措辞的 `PI_AI_ERROR` 判瞬时。一切未知形状判永久——刻意保守。
   - `error` 没有 `.failure` 面的与永久同论；分类前会先剥开宿主包的 `AggregateError`，剥不到才作罢。
   - 分类是内置安全逻辑，设置卡刻意不提供改它的入口。
-- **让路**：非根会话（子代理）；`providerExcludes` 只挡 `resume`；最后一条 `turn/end` 是 `aborted` 或 `interrupted`（你自己停的——不注入、不耗配额）；回合内调用过 `ask_user_question`（不补跑）；回合由官方 Schedule 提醒开启（三类一律让路）。
+- **让路**：非根会话（子代理）；`providerExcludes` 只挡 `resume`；最后一条 `turn/end` 是 `aborted`（用户/父级/hook 中止——你停的，不注入、不耗配额）或 `interrupted`（宿主崩溃修复给孤儿回合补写的闭合标记，由 agent-loop 的 resume 追加、loop 运行中从不发射——崩溃后状态不明，同样不自动注入）；回合内调用过 `ask_user_question`（不补跑）；回合由官方 Schedule 提醒开启（三类一律让路）。
   - `"goal"` 回合**在触发时刻**读官方 goal 服务判定，不一律让路：`active` + `armed`（driver 还在 driving）⇒ 让路；`active` + `disarmed`（driver 已放弃——它自己的设计就绝不自动重试）⇒ 本包接管这一条；`paused` / `blocked` / `complete` 是人或生命周期的决定，从不覆盖；goal 状态读不到同样让路。
 - **到点前二次校验**（`preFireCheck`）：agent 已消失、状态非 `idle`、inbox 有排队消息、失败轮之后已有新轮 ⇒ 待办静默作废，不计数、不进冷却。
 - **配额是「连续」语义**：一次 `completed` 回合把 `resume` / `continue` 清零；`unfinished` 只在清单闭合时恢复（否则注入 → 仍不闭合 → 再注入会无限自激）。
@@ -96,7 +98,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 1. **层已挂载**：`dsh --profile web --dump-config` 里有本包的层行。
    - 这条命令是唯一被认可的「它在层栈里」判据，而它**不是只读命令**——会把该 profile 的根装配文件重写一遍。层行从 stdout 读，stderr 另行单独检查：未匹配的 patch 目标只出现在 stderr，光看退出码证明不了任何事。
    - 层行可能是 `# == <层>`，也可能是 `# == <层>, patched by <路径>`；两种形态都要认。
-2. **dock 渲染出来了**：打开一个会话，输入框下方有救援 dock——每会话开关那一行，回合运行中的「停止并重问」，以及完成或失败回合之后的编辑重发 / 重试 / 续写动作。
+2. **两个入口都渲染出来了**：打开一个会话，输入框上方有接续 dock——每会话开关那一行与回合运行中的「停止并重问」；对话里最新完成回合（失败/截断/崩溃中断）的尾部有操作行——编辑重发 / Fork 重发 / 重试 / 发送续写。
 3. **设置卡渲染实时数据**：插件页列出 session-rescue 卡片，429 档位一节加载出你的 `llm-pi-ai` providers（名称、重试模式、配额覆盖）。一直「不可用」的读数说明层已挂载、但 Remote 命名空间没到浏览器。
 4. **一次真实续跑**：让回合中的一次模型调用瞬时失败（例如断网）；横幅出现并按秒倒计时，日志里有 `[session-rescue]` 行点名类别与闸门。反向核对：你自己停掉的回合（`aborted`）按设计不注入——那里的「没注入」不是装坏了。
 
@@ -107,7 +109,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 - **不加 CLI 子命令。**
 - **不自渲染排队区**：官方 conversation 包已把队列 dock 挂上（逐行编辑 / 删除 / 插话），本包不重复列一份。
 - **host 半不写文件、不发外部请求**（见数据与隐私）。
-- 可选消费的类型：`lessonLoop` 总线（事实与 pass）、`sessionProjections`（快速回合事实）、goal 服务（触发时刻的接管判定）。缺席它们救援照常——只是回退全量日志扫描，goal 回合无人接管。
+- 可选消费的类型：`lessonLoop` 总线（事实与 pass）、`sessionProjections`（快速回合事实）、goal 服务（触发时刻的接管判定）。缺席它们接续照常——只是回退全量日志扫描，goal 回合无人接管。
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
@@ -147,6 +149,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 | `unfinishedDelayMs` | 1000–300000 | `5000` | 有 | 待办未闭合后等待多久 |
 | `unfinishedCooldownMs` | 5000–3600000 | `120000` | 有 | 同一会话两次补跑的最短间隔 |
 | `maxUnfinished` | 0–20 | `2` | 有 | 补跑配额；清单闭合才恢复 |
+| `unfinishedSteerMode` | boolean | `false` | 有 | 插话续跑开关（实验）：回合收尾前经 `agent.steer` 同回合续做，与补跑共用 `maxUnfinished` |
 | `requestRetryMax` | 0–20 | `5` | 无 | 请求级 429 重试的次数上限 |
 | `requestRetryBackoffMs` | number[]（≥ 1 项） | `[2000, 5000, 10000, 20000, 30000]` | 无 | 请求级重试的退避阶梯 |
 | `requestRetryBackoffCapMs` | ≥ 1000 | `30000` | 无 | 本包愿意代等的最长时间；更长的 `Retry-After` 委托回下游 |
@@ -175,7 +178,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 | 规则 | 内容 |
 |---|---|
 | 不写盘、不外联 | host 半无 `node:fs`、无网络调用；除下面「唯一出口」一条外，输出去向只有 `console.*` 日志与那条注入消息 |
-| 内存态且有界 | 调度器最多 200 条会话记录、挂起待办 64 条、待兑 pass 64 条；这三类超限裁最旧。每会话开关台账同为 200 条，但满额时只淘汰已无活跃 agent 的会话，淘汰不到就让 `toggle` 返回 409——不裁活会话，否则等于悄悄重新启用它的救援。`agent/disposed` 与插件卸载时释放定时器 |
+| 内存态且有界 | 调度器最多 200 条会话记录、挂起待办 64 条、待兑 pass 64 条；这三类超限裁最旧。每会话开关台账同为 200 条，但满额时只淘汰已无活跃 agent 的会话，淘汰不到就让 `toggle` 返回 409——不裁活会话，否则等于悄悄重新启用它的接续。`agent/disposed` 与插件卸载时释放定时器 |
 | 持久化只有两处、都经官方 settings | 本包命名空间 `session-rescue` 与 `llm-pi-ai` 的重试档位，落在 dsh 数据目录里，重启不丢 |
 | 每会话开关 | 只存活在进程内存；重启即回到全局 `enabled` |
 | 语言 | 注入正文跟随官方 locale 偏好；条目未被投影时即中文 |
@@ -185,10 +188,10 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 - **未知失败形状判永久，刻意如此。** 分类器认不出的一律不动；设置卡不提供改它的入口。把「永久」错猜成「瞬时」会反复重开永远不可能成功的回合。
 - **`providerExcludes` 只挡 `resume`**——`continue`、`unfinished` 与请求级 429 重试都不看它。
-- **子代理会话一概不碰**——只救援根会话。
+- **子代理会话一概不碰**——只接续根会话。
 - **补跑有结构性前提**：该回合必须写过 `todo/write` 清单且仍有 `pending` 或 `in_progress` 项。从不用待办工具的会话触发不了它。
-- **429 阶梯只对「解析不出 `retryPolicy` 的 provider」生效**，而 deepseek 适配器不配也解析出一份。profile 没装 `dsh-llm-retry` 时，一次 429 零次重发直接终态。
-- **官方 `llm-retry` 不总在下游**：它的 abort 信号已触发或条目已 disposed 时直接返回、不调 `next()`，`always` 模式还会采纳下游交回的决策——那些窗口里本包根本不被咨询。
+- **请求级阶梯是「最后一级」，不是「无策略 provider 专属」**：llm 注册表对未配置的 provider 会补一份默认策略，按「有没有策略」划线在真宿主上恒让位。现行分工是先问下游——官方 `llm-retry` 愿意接的（码表内、次数未耗尽）归它，本包只接它放行的（码表外如 `QUOTA`、次数耗尽、`Retry-After` 超限）。
+- **官方 `llm-retry` 不总在下游**：它的 abort 信号已触发或条目已 disposed 时直接返回、不调 `next()`，本包的采纳位在那样的窗口里拿到的是它不参与的结论；`always` 模式会先问下游再自己重试，两边的决策不打架。
 - **读取接口持续不可达时 dock 降级而不是假装**：横幅与每会话开关回到中性态、轮询退避。回合相关的动作照旧可用——它们读的是会话实时状态，不依赖读取接口。
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题

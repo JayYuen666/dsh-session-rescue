@@ -245,3 +245,73 @@ export function reviewLastTurn(events: readonly unknown[] | undefined | null): T
     scheduleDrivenTurn,
   };
 }
+
+/** 开放回合（已 start、尚未 end）的复盘：steer 续跑模式的判据源。
+ *  reviewLastTurn 只认「最后一条 turn/end」，而 steer 判定发生在回合收尾之前——
+ *  那一刻本回合还没有 turn/end 可扫，两类判据天然是两个读法。 */
+export interface OpenTurnReview {
+  /** 开放回合的轮次号（turn/start 的 turn 位；读不出为 null，调用方放弃判）。 */
+  turn: number | null;
+  /** 开放回合窗口内最后一份 todo/write 快照的未闭合数；窗口内没写过清单为 null。 */
+  openTodos: number | null;
+  /** 该清单是否写于本开放回合内（窗口内写 ⇒ 恒真；字段与 TurnReview 同形便于调用方共用闸门）。 */
+  todoUpdatedInTurn: boolean;
+  /** 窗口内调用过 ask_user_question → 模型在等用户，禁止 steer。 */
+  awaitsUser: boolean;
+  /** 窗口首条 user/message 来自官方 Schedule → 交定时任务驱动。 */
+  scheduleDrivenTurn: boolean;
+}
+
+/** 复盘当前开放的回合；没有开放回合（最后一条边界是 turn/end，或日志里没有 turn/start）
+ *  交回 null。判定窗口 = 开放回合的 turn/start（含）到日志末尾。 */
+export function reviewOpenTurn(
+  events: readonly unknown[] | undefined | null,
+): OpenTurnReview | null {
+  if (!Array.isArray(events) || events.length === 0) {
+    return null;
+  }
+  // 倒扫最后一条 turn/start：其后若还有 turn/end，说明这个回合已经收尾，没有开放回合。
+  let startIndex = -1;
+  let turn: number | null = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev: unknown = events[i];
+    if (typeOf(ev) === "turn/end") {
+      return null;
+    }
+    if (typeOf(ev) === "turn/start") {
+      startIndex = i;
+      turn = numIn(ev, "turn") ?? null;
+      break;
+    }
+  }
+  if (startIndex < 0) {
+    return null;
+  }
+  // 清单快照（last-wins）只在开放回合窗口内找：窗口外更早的清单是陈旧证据，
+  // 不能当「本回合没做完」的依据（与 todosSnapshot 的陈旧判据同向）。
+  let windowTodos: number | null = null;
+  for (let i = startIndex + 1; i < events.length; i += 1) {
+    const ev: unknown = events[i];
+    if (typeOf(ev) === "todo/write") {
+      const count = openCountOf(fieldOf(fieldOf(ev, "data"), "todos"));
+      if (count !== undefined) {
+        windowTodos = count;
+      }
+    }
+  }
+  const awaitsUser = scanAwaitsUser(events, turn, {
+    startIndex: startIndex + 1,
+    lastEndIndex: events.length,
+    inTurn: () => true,
+    hasWindow: true,
+  });
+  const scheduleDrivenTurn = scanScheduleDriven(events, startIndex, events.length);
+  return {
+    turn,
+    openTodos: windowTodos,
+    // 窗口内的快照天然就是「本回合写的」。
+    todoUpdatedInTurn: windowTodos !== null,
+    awaitsUser,
+    scheduleDrivenTurn,
+  };
+}

@@ -3,10 +3,10 @@
 // 背景（结构判据）：把 dock 整个区域的可见性全押在 `hasContent` 上，
 // 而 hasContent 依赖 1Hz 轮询快照（rescue）与实时状态（view/queue）的混合，
 // 且 `if (!hasContent) return null` 会让整个组件卸载——轮询 tick 导致的
-// 短暂空窗会销毁本地状态（编辑草稿/busy 标志），会话切换窗口还会显示
+// 短暂空窗会销毁本地状态（busy 标志），会话切换窗口还会显示
 // 错误状态。本模块把"该渲染什么"从"组件挂不挂"里拆出来：
 //   - 组件常驻挂载（dock 区域始终存在）；
-//   - 每个子区块（banner/停止重问/编辑重试续写/开关行）各自按本模块判定渲染；
+//   - 每个子区块（banner/停止重问/开关行）各自按本模块判定渲染；
 //   - 轮询快照未就绪（rescue === null）时，pending 视为"未知"而非"无"，
 //     开关行显示中性态而非错误地显示"开启"。
 //
@@ -33,11 +33,18 @@ export interface RescuePending {
   suspended?: boolean;
 }
 
+/** 配额耗尽位（host 的 blocked 台账投影）：客户端据此弹一次升级提示。 */
+export interface RescueBlocked {
+  kind: string;
+  turn: number;
+}
+
 export interface RescueSessionState {
   count: number;
   lastFireAt: number;
   pending: RescuePending | null;
   disabled?: boolean;
+  blocked?: RescueBlocked;
 }
 
 /** 会话开关三态：on=开启 / off=已关闭 / unknown=快照未就绪（中性显示）。 */
@@ -61,6 +68,12 @@ const PENDING_SCHEMA = z.object({
   remainingMs: FINITE_NUMBER,
   chained: TRUE_ONLY,
   suspended: TRUE_ONLY,
+});
+
+/** blocked 的线上形状：kind 非字符串或 turn 非有限数 → 整位丢弃（不提示优于误提示）。 */
+const BLOCKED_SCHEMA = z.object({
+  kind: z.string(),
+  turn: FINITE_NUMBER,
 });
 
 /** 一条会话的逐字段守卫投影：非数字落回 0，pending 只认显式 `null` 与可投影对象。 */
@@ -100,11 +113,16 @@ function parsePending(raw: unknown): RescuePending | null {
 /** 一条会话计数的逐字段守卫投影（坏形状降级而非丢给断言）。 */
 function parseSessionEntry(entry: Record<string, unknown>): RescueSessionState {
   const { count, lastFireAt, pending, disabled } = SESSION_ENTRY_SCHEMA.parse(entry);
+  const rawBlocked = entry["blocked"];
+  const parsedBlocked = isRecord(rawBlocked) ? BLOCKED_SCHEMA.safeParse(rawBlocked) : undefined;
   return {
     count,
     lastFireAt,
     pending: parsePending(pending),
     ...(disabled === true ? { disabled: true } : {}),
+    ...(parsedBlocked?.success === true
+      ? { blocked: { kind: parsedBlocked.data.kind, turn: parsedBlocked.data.turn } }
+      : {}),
   };
 }
 
@@ -150,20 +168,19 @@ export function parseStateBody(parsed: Record<string, unknown>): RescueStateBody
   return { ok: true, sessions: Object.fromEntries(entries) };
 }
 
-/** dock 的渲染信号：动作位由实时 view 推出，另外两位是本组件的本地状态。
- *  全部与轮询快照是否在场无关——它们一旦为真，容器就必须显形。 */
+/** dock 的渲染信号：停止重问位由实时 view 推出，错误行是本组件的本地状态，
+ *  会话已开始位同样来自实时 view（转录非空或回合在跑）。
+ *  回合级动作（编辑/重试/续写）已迁往 turnTail 条目，不再进 dock 的显隐判据。
+ *  三位都与轮询快照是否在场无关——它们一旦为真，容器就必须显形。 */
 export interface DockActionSignals {
   /** 「停止并重新提问」：会话在跑且有一条可复发的用户文本。 */
   readonly canStopReask: boolean;
-  readonly canEdit: boolean;
-  readonly canRetry: boolean;
-  readonly canContinue: boolean;
-  /** 编辑态编辑器正在渲染（`dockEditing && target !== null`）。
-   *  单列而不是复用 `canEdit`：进入编辑后会话可能转成运行中，`canEdit` 随之变假，
-   *  而编辑器仍挂在树上——只按 `canEdit` 算会让容器藏起一个正在显示的编辑器。 */
-  readonly editing: boolean;
   /** host 写通道（取消/开关）刚失败，错误行正在渲染。 */
   readonly hostActionFailed: boolean;
+  /** 会话已有内容（转录非空或回合在跑）。hero 空态（一条消息都没发过）为
+   *  false，开关行随之隐藏：对一个还没有任何交互的会话展示「本会话开关」
+   *  是噪音；用户发出第一条消息后开关行立即可及。 */
+  readonly sessionStarted: boolean;
 }
 
 export interface DockDecision {
@@ -173,7 +190,7 @@ export interface DockDecision {
   pending: RescuePending | null;
   /** 会话开关三态。 */
   toggle: ToggleState;
-  /** 是否显示开关行（host 路由已响应过才显示）。 */
+  /** 是否显示开关行（快照已就绪且会话已开始才显示）。 */
   showToggleRow: boolean;
   /** 整个 dock 区域是否有任何可见内容（组件仍常驻，只控制容器显隐）。 */
   hasContent: boolean;
@@ -183,14 +200,15 @@ export interface DockDecision {
  * 由实时动作位 + 轮询快照，决策 dock 各区块渲染。
  * 这是旧 hasContent 判定的纯函数化——竞态修复的关键语义：
  *  1. rescue === null（首帧/快照丢失）→ rescueKnown=false，开关行不显示、
- *     toggle=unknown（中性），但停止/编辑/重试/续写这些实时区块照常渲染；
+ *     toggle=unknown（中性），但停止重问这类实时区块照常渲染；
  *  2. 快照就绪但 sessionState 缺该会话 → toggle=on：host 快照只收调度过与被
  *     toggle 关闭的会话，没记录就是没关过；只有快照整个未就绪才是 unknown；
  *  3. hasContent 只决定容器显隐，不卸载组件（本地状态安全）；
- *  4. hasContent 必须把动作行自己算进去：动作位的可用性只取决于实时 view，
- *     与快照在不在场无关。漏算的那一帧（快照空窗 + 无 pending +
- *     有可重试的失败轮）会把容器藏起来，而容器里那三个按钮本该显示——
- *     用户看到的就是「失败了却没有任何入口」。
+ *  4. hasContent 必须把停止重问位自己算进去：它的可用性只取决于实时 view，
+ *     与快照在不在场无关。漏算的那一帧（快照空窗 + 无 pending + 回合运行中）
+ *     会把容器藏起来，而容器里那个按钮本该显示。
+ *  5. 开关行还要会话已开始（转录非空或回合在跑）：hero 空态一条消息都没发过，
+ *     「本会话开关」是噪音——隐藏它，第一条消息发出后立即回显。
  *  排队行不在判据里：那一区归官方 QueueDock（同一道 conversation.input.dock），
  *  本包重复列一遍就是同一批消息显示两次。
  */
@@ -220,17 +238,11 @@ export function decideDockState(
     toggle = "unknown";
   }
 
-  const showToggleRow = rescueKnown;
-  const hasActions = actions.canEdit || actions.canRetry || actions.canContinue;
-  // 本地状态那两块必须算进来：它们渲染在同一个容器里，容器一藏，编辑器与失败提示
-  // 就一起消失。`hostActionFailed` 尤其要紧——那正是「用户按了取消但宿主拒绝了」的
-  // 那一刻，此时 pending 可能已经不在、动作位也可能全假，唯一要说的就是那行错误。
+  const showToggleRow = rescueKnown && actions.sessionStarted;
+  // 本地状态那块必须算进来：它渲染在同一个容器里，容器一藏，失败提示就一起消失。
+  // `hostActionFailed` 尤其要紧——那正是「用户按了取消但宿主拒绝了」的那一刻，
+  // 此时 pending 可能已经不在，唯一要说的就是那行错误。
   const hasContent =
-    pending !== null ||
-    actions.canStopReask ||
-    hasActions ||
-    actions.editing ||
-    actions.hostActionFailed ||
-    showToggleRow;
+    pending !== null || actions.canStopReask || actions.hostActionFailed || showToggleRow;
   return { rescueKnown, pending, toggle, showToggleRow, hasContent };
 }

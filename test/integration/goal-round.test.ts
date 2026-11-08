@@ -95,6 +95,9 @@ async function bootInto(ctx: Context, server: MockLlmServer): Promise<void> {
   await ctx.plugin(GoalRoundDriver);
   await ctx.plugin(plugin, {
     // 全部取 schema 允许的最小档：集成层等的是真定时器。
+    // 请求级阶梯在本层关掉（理由见 abort-semantics.test.ts 的同款注释）：goal 轮被
+    // 限流「打掉」这个前提，在阶梯开着时会被回合内重试先救活。
+    requestRetryMax: 0,
     resumeDelayMs: 1000,
     resumeCooldownMs: 5000,
     continueDelayMs: 500,

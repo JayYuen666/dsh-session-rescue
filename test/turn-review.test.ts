@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { reviewLastTurn } from "../lib/turn-review.ts";
+import { reviewLastTurn, reviewOpenTurn } from "../lib/turn-review.ts";
 
 /** 任务清单写入的日志事件名（fixture 造事件与混合事件流两处同判据）。 */
 const TODO_WRITE_EVENT = "todo/write";
@@ -429,5 +429,79 @@ describe("坏形状事件与无终态（防御降级，审计补漏）", () => {
     ]);
     assert.equal(result.openTodos, 1, "清单快照仍读出");
     assert.equal(result.todoUpdatedInTurn, false, "无左边界 → 判为陈旧");
+  });
+});
+
+describe("reviewOpenTurn — 开放回合（steer 判据源）", () => {
+  it("没有开放回合（最后边界是 turn/end）→ null", () => {
+    assert.equal(reviewOpenTurn([turnStart(1), turnEnd(1, "completed")]), null);
+    assert.equal(reviewOpenTurn([]), null);
+  });
+
+  it("开放回合：轮次号、窗口内清单、等用户、schedule 驱动逐项可读", () => {
+    const events = [
+      turnEnd(1, "completed"),
+      turnStart(2),
+      userMsg({ kind: "user" }),
+      todoWrite([DONE, OPEN]),
+    ];
+    const result = reviewOpenTurn(events);
+    assert.ok(result !== null, "有开放回合");
+    assert.equal(result.turn, 2);
+    assert.equal(result.openTodos, 1, "窗口内最后一份快照的未闭合数");
+    assert.equal(result.todoUpdatedInTurn, true);
+    assert.equal(result.awaitsUser, false);
+    assert.equal(result.scheduleDrivenTurn, false);
+  });
+
+  it("窗口外的陈旧清单不算本回合写的（openTodos=null ⇒ todoUpdatedInTurn=false）", () => {
+    const events = [
+      turnStart(1),
+      todoWrite([OPEN]),
+      turnEnd(1, "completed"),
+      turnStart(2),
+      userMsg({ kind: "user" }),
+    ];
+    const result = reviewOpenTurn(events);
+    assert.ok(result !== null, "有开放回合");
+    assert.equal(result.turn, 2);
+    assert.equal(result.openTodos, null, "开放回合窗口内没写过清单");
+    assert.equal(result.todoUpdatedInTurn, false);
+  });
+
+  it("窗口内 ask_user_question → awaitsUser=true（turn 缺位时按窗口归属）", () => {
+    const events = [turnStart(2), todoWrite([OPEN]), toolCall(2, "c1", "ask_user_question")];
+    const result = reviewOpenTurn(events);
+    assert.ok(result !== null, "有开放回合");
+    assert.equal(result.awaitsUser, true);
+  });
+
+  it("窗口首条 user/message 来自 Schedule → scheduleDrivenTurn=true", () => {
+    const events = [turnStart(3), userMsg({ kind: "schedule" }), todoWrite([OPEN])];
+    const result = reviewOpenTurn(events);
+    assert.ok(result !== null, "有开放回合");
+    assert.equal(result.scheduleDrivenTurn, true);
+  });
+
+  it("窗口内的 todo/write 载荷不可用 → openTodos=null（不炸、不猜）", () => {
+    const result = reviewOpenTurn([
+      turnStart(2),
+      todoWrite("not-a-list"),
+      userMsg({ kind: "user" }),
+    ]);
+    assert.ok(result !== null, "有开放回合");
+    assert.equal(result.openTodos, null, "坏快照整份不可用");
+    assert.equal(result.todoUpdatedInTurn, false);
+  });
+
+  it("事件流里没有 turn/start（只有零散事件）→ null", () => {
+    assert.equal(reviewOpenTurn([userMsg({ kind: "user" }), todoWrite([OPEN])]), null);
+  });
+
+  it("turn/start 缺 turn 号 → turn=null（调用方据此放弃判定）", () => {
+    const result = reviewOpenTurn([turnStart(undefined as never), todoWrite([OPEN])]);
+    assert.ok(result !== null, "有开放回合");
+    assert.equal(result.turn, null);
+    assert.equal(result.openTodos, 1, "清单照读，轮次判据由调用方收口");
   });
 });

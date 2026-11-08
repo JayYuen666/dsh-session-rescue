@@ -29,6 +29,13 @@ export interface UiMessages {
   readonly bannerSuspendedContinue: string;
   /** 待办补跑横幅（挂起态）。 */
   readonly bannerSuspendedUnfinished: string;
+  // ── 接续耗尽升级提示（shell.overlay toast）──
+  /** 续跑配额耗尽。 */
+  readonly blockedResume: string;
+  /** 续写配额耗尽。 */
+  readonly blockedContinue: string;
+  /** 补跑配额耗尽。 */
+  readonly blockedUnfinished: string;
   // ── 业务动作失败（host/dock 共用） ──
   /** 会话绑定缺失。 */
   readonly sessionUnavailable: string;
@@ -44,8 +51,9 @@ export interface UiMessages {
   readonly reaskQueuedCancelFailed: string;
   /** 开关动作名（拼进 hostActionFailed 的 label）。 */
   readonly switchAction: string;
+  /** 耗尽 toast 的关闭按钮（知会性关闭，与真「取消」分键）。 */
+  readonly toastDismiss: string;
   /** 本轮终态失败的原因行（`{detail}` 是宿主给的 code/message 拼接结果）。 */
-  readonly failureReason: string;
   /** 重试按钮的副作用提示：该轮已跑过工具或命令。 */
   readonly retrySideEffectTitle: string;
   // ── 编辑器（编辑重发 / Fork 重发） ──
@@ -59,23 +67,24 @@ export interface UiMessages {
   // ── 停止重问 / 重试 / 续写操作行 ──
   readonly stopping: string;
   readonly stopAndReask: string;
-  readonly hostRetryPendingTitle: string;
   readonly retryTitle: string;
-  readonly retryWaiting: string;
   readonly retry: string;
   readonly continueTitle: string;
   readonly continueOutput: string;
+  // ── 崩溃恢复（interrupted 终态）的手动接续 ──
+  /** 按钮文字。 */
+  readonly resumeInterrupted: string;
+  /** 按钮 title：解释 interrupted 的来路（崩溃孤儿回合）。 */
+  readonly resumeInterruptedTitle: string;
+  /** 点击后作为用户消息发出的正文。 */
+  readonly resumeInterruptedText: string;
   // ── 每会话开关行 ──
   /** 状态展示：已开启。 */
   readonly toggleStateOn: string;
-  /** 按钮动作名：当前关着 → 动作是开启。与 toggleTurnOff 成对。 */
-  readonly toggleTurnOn: string;
   /** 状态展示：已关闭。 */
   readonly toggleStateOff: string;
   /** 快照未就绪的中性占位。 */
   readonly toggleNeutral: string;
-  /** 按钮动作名：当前开着 → 动作是关闭。 */
-  readonly toggleTurnOff: string;
   /** 开关行标题模板（`{state}` 插值状态展示）。 */
   readonly sessionToggleLabel: string;
   /** 快照未就绪时按钮的等待提示。 */
@@ -122,6 +131,8 @@ export interface UiMessages {
   readonly unfinishedSection: string;
   readonly openTodosLabel: string;
   readonly openTodosHint: string;
+  readonly steerModeLabel: string;
+  readonly steerModeHint: string;
   readonly unfinishedDelayLabel: string;
   readonly unfinishedDelayHint: string;
   readonly unfinishedCooldownLabel: string;
@@ -155,6 +166,10 @@ export interface UiMessages {
   readonly hostRejected: string;
   /** 取不到重试提供方清单时显示在面板上的那句话。 */
   readonly retryProvidersUnavailable: string;
+  /** 写前确认：现行策略不是任何档位的标准形状（疑似手写配置）时的覆盖警告，`{providers}` 是名单。 */
+  readonly presetOverwriteWarn: string;
+  /** 覆盖警告上的强制保存按钮。 */
+  readonly confirmSave: string;
 }
 
 /**
@@ -208,6 +223,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     bannerSuspendedResume: "连接中断，重连后将自动续跑",
     bannerSuspendedContinue: "连接中断，重连后将自动继续",
     bannerSuspendedUnfinished: "连接中断，重连后将自动补跑",
+    blockedResume: "自动续跑配额已用尽，本会话暂停自动续跑（正常完成一回合后恢复）",
+    blockedContinue: "自动续写配额已用尽，本会话暂停自动续写（正常完成一回合后恢复）",
+    blockedUnfinished: "自动补跑配额已用尽，本会话暂停待办补跑（清单闭合后恢复）",
     sessionUnavailable: "会话不可用",
     forkFirstTurn: "第一轮消息不支持 fork",
     branchUnavailable: "分支会话不可用",
@@ -215,7 +233,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     hostActionFailed: "{label}未生效（host 拒绝了这次请求），请重试",
     reaskQueuedCancelFailed: "重问已入队，当前回合结束后会发出；停止本轮未生效",
     switchAction: "开关切换",
-    failureReason: "本轮失败原因：{detail}",
+    toastDismiss: "知道了",
     retrySideEffectTitle: "本轮已执行过工具或命令，重试会重做这些副作用",
     sending: "发送中…",
     resendInSession: "重发（本会话）",
@@ -227,18 +245,18 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     edit: "编辑",
     stopping: "停止中…",
     stopAndReask: "停止并重问",
-    hostRetryPendingTitle: "内置重试仍在进行，请稍候",
     retryTitle: "在本会话重发重试指令",
-    retryWaiting: "重试等待中",
     retry: "重试",
     continueTitle: "发送续写指令，从截断处继续",
-    continueOutput: "继续输出",
+    continueOutput: "发送续写",
+    resumeInterrupted: "继续中断的回合",
+    resumeInterruptedTitle: "上一个回合因宿主中断（如崩溃后重启）而未完成——手动继续，不自动执行",
+    resumeInterruptedText:
+      "请从中断处继续执行原任务：不要重做已完成的工作、不要重复确认、也不要输出本条提示。",
     toggleStateOn: "已开启",
-    toggleTurnOn: "开启",
     toggleStateOff: "已关闭",
     toggleNeutral: "—",
-    toggleTurnOff: "关闭",
-    sessionToggleLabel: "自动续跑（本会话）：{state}",
+    sessionToggleLabel: "自动接续（本会话）：{state}",
     toggleWaiting: "状态同步中，稍后重试",
     saveRejected: "宿主拒绝了本次保存（设置可能已在别处被改动），请核对后重试",
     saveFailed: "保存失败：{detail}",
@@ -275,6 +293,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     openTodosLabel: "启用待办补跑",
     openTodosHint:
       "回合正常结束但本回合自己写的待办仍有未完成项时自动补跑；模型在等你回答（ask_user_question）或该回合由 goal 轮次驱动时不会注入",
+    steerModeLabel: "待办插话续跑（实验）",
+    steerModeHint:
+      "回合将收尾而清单未闭合时，先在同一回合内插话续做，而不是收尾后再补跑；与待办补跑共用次数上限。默认关闭。",
     unfinishedDelayLabel: "补跑延迟",
     unfinishedDelayHint: "检测到待办未闭合后等待多久发送补跑指令（{min}–{max} 秒）",
     unfinishedCooldownLabel: "补跑冷却",
@@ -300,6 +321,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     remoteUnavailable: "{target}：远端面不可用（读不到 sessionRescue 命名空间）",
     hostRejected: "{target}：宿主拒绝了这次落盘，但没有给出原因",
     retryProvidersUnavailable: "取不到重试提供方清单：远端面不可用",
+    presetOverwriteWarn:
+      "以下 provider 的现行重试配置不是任何档位的标准形状（可能是手写配置），保存会将其覆盖且无法自动恢复：{providers}",
+    confirmSave: "仍要保存",
   },
   en: {
     retryText:
@@ -312,6 +336,12 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     bannerSuspendedResume: "Connection lost — will auto-resume after reconnect",
     bannerSuspendedContinue: "Connection lost — will auto-continue after reconnect",
     bannerSuspendedUnfinished: "Connection lost — will auto re-run after reconnect",
+    blockedResume:
+      "Auto-resume quota exhausted — automatic resumes are paused for this session (restored after a turn completes normally)",
+    blockedContinue:
+      "Auto-continue quota exhausted — automatic continuations are paused for this session (restored after a turn completes normally)",
+    blockedUnfinished:
+      "Todo catch-up quota exhausted — automatic catch-ups are paused for this session (restored when the list closes)",
     sessionUnavailable: "session unavailable",
     forkFirstTurn: "the first message cannot be forked",
     branchUnavailable: "branch session unavailable",
@@ -320,7 +350,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     reaskQueuedCancelFailed:
       "The reask is queued and will be sent when this turn ends — stopping the turn failed",
     switchAction: "Toggle",
-    failureReason: "This turn failed: {detail}",
+    toastDismiss: "Got it",
     retrySideEffectTitle:
       "this turn already ran tools or commands — retrying repeats those side effects",
     sending: "Sending…",
@@ -333,18 +363,19 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     edit: "Edit",
     stopping: "Stopping…",
     stopAndReask: "Stop & re-ask",
-    hostRetryPendingTitle: "Built-in retries are still running — hold on",
     retryTitle: "Re-send the retry instruction in this session",
-    retryWaiting: "Retry pending",
     retry: "Retry",
     continueTitle: "Send the continue instruction to finish the truncated output",
-    continueOutput: "Continue output",
+    continueOutput: "Send continue",
+    resumeInterrupted: "Resume interrupted turn",
+    resumeInterruptedTitle:
+      "The previous turn never finished because the host was interrupted (e.g. a crash and restart) — resume manually, nothing runs automatically",
+    resumeInterruptedText:
+      "Continue the original task right where it stopped: do not redo finished work, do not re-confirm, and do not echo this message.",
     toggleStateOn: "On",
-    toggleTurnOn: "Turn on",
     toggleStateOff: "Off",
     toggleNeutral: "—",
-    toggleTurnOff: "Turn off",
-    sessionToggleLabel: "Auto-resume (this session): {state}",
+    sessionToggleLabel: "Auto-rescue (this session): {state}",
     toggleWaiting: "State still syncing — try again shortly",
     saveRejected:
       "The host rejected this save (the settings may have changed elsewhere); review and retry",
@@ -385,6 +416,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     openTodosLabel: "Enable todo re-run",
     openTodosHint:
       "Re-run automatically when a turn ends normally but the todos it wrote itself still have open items; nothing is injected while the model waits for your answer (ask_user_question) or the turn is driven by goal rounds",
+    steerModeLabel: "Steer continuation for open todos (experimental)",
+    steerModeHint:
+      "When a turn is about to close with open todos, continue in-turn via steering instead of re-running after it closes; shares the todo re-run quota. Off by default.",
     unfinishedDelayLabel: "Re-run delay",
     unfinishedDelayHint:
       "How long to wait before sending the re-run instruction after an open todo list is detected ({min}–{max} s)",
@@ -419,5 +453,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     hostRejected: "{target}: the host rejected this write without giving a reason",
     retryProvidersUnavailable:
       "Could not load the retry provider list: the remote face is unavailable",
+    presetOverwriteWarn:
+      "The current retry policy of {providers} does not match any preset shape (it may be a hand-written config); saving overwrites it and it cannot be restored automatically",
+    confirmSave: "Save anyway",
   },
 };

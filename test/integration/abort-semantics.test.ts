@@ -79,6 +79,9 @@ async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
     // （resumeCooldownXXX 一类）加不加 cast 都不会被 tsc 拦住；但数值写成字符串会红，
     // 那份判据只有不加 cast 才拿得到。
     await ctx.plugin(plugin, {
+      // 请求级阶梯在本层关掉（requestRetryMax: 0）：这几条钉的是回合级救援路径，
+      // 而限流失败现在会被阶梯在回合内先救活（那是 agent-loop.test.ts 的用例）。
+      requestRetryMax: 0,
       resumeDelayMs: 1000,
       resumeCooldownMs: 5000,
       continueDelayMs: 500,

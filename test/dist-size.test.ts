@@ -21,7 +21,9 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
 
 /** host 半产物体积预算：宿主按包名载入它，这些字节是真实装载成本。 */
 // 官方 Typert Remote 服务（六条端点的方法版）让 host.js 增加约 2 KB。
-const HOST_BUDGET_BYTES = 112_000;
+// 0.2.x 一轮：请求级重试改「先问下游」、steer 续跑（turn-stopping + 开放回合复盘）、
+// blocked 台账与 /state 位，实测涨到约 114.7 KB，预算按实量 +25% 重定。
+const HOST_BUDGET_BYTES = 144_000;
 /** client 半产物体积预算：浏览器侧加载，按平台计账。 */
 // 设置卡迁到 @jayyuen66/dsh-plugin-shared/lib/card-ui 后，卡片样式与组件逻辑随包进
 // client.js（实测增加约 18 KB），预算按迁移后的实量重定。

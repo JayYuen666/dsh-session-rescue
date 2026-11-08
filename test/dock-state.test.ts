@@ -6,20 +6,20 @@ import assert from "node:assert/strict";
 import { decideDockState, parseStateBody } from "../lib/dock-state.ts";
 import type { DockActionSignals, RescueStateBody, RescueSessionState } from "../lib/dock-state.ts";
 
-/** 全部信号位关。 */
+/** 全部信号位关（hero 空态：会话未开始）。 */
 const NO_ACTIONS: DockActionSignals = {
   canStopReask: false,
-  canEdit: false,
-  canRetry: false,
-  canContinue: false,
-  editing: false,
   hostActionFailed: false,
+  sessionStarted: false,
 };
 
 /** 只亮一位（其余全关）：hasContent 归属判定用。 */
 function oneAction(key: keyof DockActionSignals): DockActionSignals {
   return { ...NO_ACTIONS, [key]: true };
 }
+
+/** 会话已开始（转录非空或回合在跑）的动作位。 */
+const STARTED: DockActionSignals = { ...NO_ACTIONS, sessionStarted: true };
 
 const sessionId = "s1";
 
@@ -52,10 +52,30 @@ describe("decideDockState：快照未就绪（首帧 rescue=null）", () => {
 
 describe("decideDockState：会话未在快照中（从未调度续跑/未 toggle 过）", () => {
   it('快照就绪但该会话无记录 → toggle=on（未关闭 = 默认开启，不显示"—"误导）', () => {
-    const decision = decideDockState(NO_ACTIONS, mkRescue({}), sessionId);
+    const decision = decideDockState(STARTED, mkRescue({}), sessionId);
     assert.equal(decision.rescueKnown, true);
     assert.equal(decision.toggle, "on", "host 快照只含调度/关闭过的会话；未记录即未关闭，默认开启");
     assert.equal(decision.showToggleRow, true, "快照已就绪，开关行可显示");
+  });
+
+  it("hero 空态（会话未开始）→ 开关行隐藏，即使快照已就绪", () => {
+    // 一条消息都没发过的新会话不展示「本会话开关」：对零交互会话是噪音。
+    const decision = decideDockState(NO_ACTIONS, mkRescue({}), sessionId);
+    assert.equal(decision.rescueKnown, true);
+    assert.equal(decision.toggle, "on", "三态判定不受影响，只是行不渲染");
+    assert.equal(decision.showToggleRow, false, "未开始 ⇒ 开关行隐藏");
+    assert.equal(decision.hasContent, false, "无 pending/动作位 ⇒ 容器整体隐藏");
+  });
+
+  it("开关行可见性只看会话已开始位，不看快照里有该会话的记录", () => {
+    // 有记录（调度过/被关过）但转录为空（重启后恢复的会话视图）同样隐藏。
+    const decision = decideDockState(
+      NO_ACTIONS,
+      mkRescue({ [sessionId]: session({ disabled: true }) }),
+      sessionId,
+    );
+    assert.equal(decision.toggle, "off");
+    assert.equal(decision.showToggleRow, false, "sessionStarted=false 压过一切显示条件");
   });
 });
 
@@ -116,6 +136,39 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
     assert.equal(projected.pending, null, "remainingMs 为 NaN 的 pending 必须整条丢掉");
   });
 
+  it("blocked 位：好形状投影，坏形状整位丢弃，缺位不写", () => {
+    // blocked 是客户端升级提示的来源：坏形状宁可不提示，也不把坏值弹给用户。
+    const good = parseStateBody({
+      ok: true,
+      sessions: {
+        [sessionId]: {
+          count: 0,
+          lastFireAt: 0,
+          pending: null,
+          blocked: { kind: "resume", turn: 3 },
+        },
+      },
+    });
+    assert.deepEqual(good?.sessions?.[sessionId]?.blocked, { kind: "resume", turn: 3 });
+    const bad = parseStateBody({
+      ok: true,
+      sessions: {
+        [sessionId]: {
+          count: 0,
+          lastFireAt: 0,
+          pending: null,
+          blocked: { kind: 42, turn: "x" },
+        },
+      },
+    });
+    assert.equal(bad?.sessions?.[sessionId]?.blocked, undefined, "坏形状整位丢弃");
+    const absent = parseStateBody({
+      ok: true,
+      sessions: { [sessionId]: { count: 0, lastFireAt: 0, pending: null } },
+    });
+    assert.equal(absent?.sessions?.[sessionId]?.blocked, undefined, "缺位不写");
+  });
+
   it("sessions 形状损坏 → null（这一跳没读到有效快照），不是一份确信的空快照", () => {
     // 「读坏了」与「读到了，只是没有会话」必须分开：后者是确信的空快照（开关行照常
     // 显示、每个会话按没关过判 on），前者该让调用方退避。折成同一个值等于把读坏
@@ -149,9 +202,9 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
     }
     assert.equal(body.ok, true);
     assert.equal(body.sessions, undefined, "缺位不补一张空表：补了就无法与「真的没有会话」区分");
-    // 旧载荷的下游语义一并钉住：就绪快照 + 无该会话记录 ⇒ 开关行在场、按没关过判 on、
+    // 旧载荷的下游语义一并钉住：就绪快照 + 会话已开始 ⇒ 开关行在场、按没关过判 on、
     // 区域有内容（showToggleRow 进 hasContent）。这一组默认值是本模块最容易漂移的地方。
-    const decision = decideDockState(NO_ACTIONS, body, sessionId);
+    const decision = decideDockState(STARTED, body, sessionId);
     assert.equal(decision.rescueKnown, true);
     assert.equal(decision.showToggleRow, true);
     assert.equal(decision.toggle, "on");
@@ -159,17 +212,11 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
   });
 
   it("快照空窗 + 无 pending，但任一实时位亮 → 容器必须显形", () => {
-    // 动作位与本地状态位的可用性只取决于实时 view，与快照在不在场无关。旧判据没把
-    // canRetry 一类算进 hasContent：容器 hidden，而容器里那几个按钮本该在——用户看到
-    // 的就是「回合失败了却没有任何入口」，尤其是 /state 一直读不通的那种部署。
-    // 六位逐一过：canStopReask 在「快照未就绪」一节单独亮过，这里补齐其余五位。
-    for (const key of [
-      "canEdit",
-      "canRetry",
-      "canContinue",
-      "editing",
-      "hostActionFailed",
-    ] as const) {
+    // 实时位的可用性只取决于实时 view，与快照在不在场无关。旧判据漏算实时位：
+    // 容器 hidden，而容器里那行内容本该在——用户看到的就是「有话要说却整块消失」，
+    // 尤其是 /state 一直读不通的那种部署。canStopReask 在「快照未就绪」一节单独亮过，
+    // 这里补齐 hostActionFailed。
+    for (const key of ["hostActionFailed"] as const) {
       const decision = decideDockState(oneAction(key), null, sessionId);
       assert.equal(decision.hasContent, true, `${key} 一位亮 ⇒ 区域有内容`);
       assert.equal(decision.showToggleRow, false, "开关行仍按快照在场与否判，不因动作位而变");

@@ -495,8 +495,10 @@ async function fireRateLimits(ctx: MockCtx, agent: MockAgent, times: number): Pr
     }
     const pending = listener(
       { agent, turn: 1, failure: { code: "RATE_LIMIT", message: "slow down" }, signal: undefined },
-      async (): Promise<string> => "NEXT",
+      nextNoop,
     );
+    // 监听器先走采纳位（await next()）再武装退避：tick 前冲刷一轮微任务。
+    await Promise.resolve();
     ctx.tick();
     outcomes.push(await pending);
     return step(remaining - 1);
@@ -534,6 +536,7 @@ async function probeDirtyRetryAfter(value: number): Promise<number | undefined> 
     },
     nextNoop,
   );
+  await Promise.resolve();
   probeCtx.tick();
   assert.deepEqual(await pending, { kind: "retry" });
   const armed = probeCtx.timers.at(-1);
@@ -916,7 +919,7 @@ describe("payload.turn 的坏数字形状", () => {
 });
 
 describe("请求级 429 重试边界", () => {
-  it("等待中 signal 中止（onAbort 监听路径）→ 委托 next 不重发", async () => {
+  it("等待中 signal 中止（onAbort 监听路径）→ 终结不重发，不占名额", async () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     const listener = ctx.handlers["agent/request-error"] as unknown as (
@@ -937,6 +940,8 @@ describe("请求级 429 重试边界", () => {
       },
       next,
     );
+    // 监听器先走采纳位（await next()）再武装退避 timer：断言前冲刷一轮微任务。
+    await Promise.resolve();
     assert.equal(ctx.timers.length, 1, "注册了退避定时器");
     // 定时器到点前中止 → onAbort 触发
     controller.abort();
@@ -961,6 +966,7 @@ describe("请求级 429 重试边界", () => {
         },
         nextNoop,
       );
+      await Promise.resolve();
       ctx.tick();
       return result;
     };
@@ -970,7 +976,7 @@ describe("请求级 429 重试边界", () => {
     assert.deepEqual(await fire(), { kind: "retry" }, "第 3 次重试");
     assert.deepEqual(await fire(), { kind: "retry" }, "第 4 次重试");
     assert.deepEqual(await fire(), { kind: "retry" }, "第 5 次重试");
-    assert.equal(await fire(), undefined, "第 6 次超上限委托 next（计数清空）");
+    assert.equal(await fire(), undefined, "第 6 次超上限，本阶梯按终态收束（计数清空）");
     assert.deepEqual(await fire(), { kind: "retry" }, "清空后重新计数可再重试");
   });
 });
@@ -1227,12 +1233,14 @@ describe("请求级退避正确性", () => {
       },
       nextNoop,
     );
+    // 监听器先走采纳位（await next()）再武装退避：断言前冲刷一轮微任务。
+    await Promise.resolve();
     assert.equal(ctx.timers.at(-1)?.ms, 4000, "服从 Retry-After，而不是阶梯的 2000");
     ctx.tick();
     assert.deepEqual(await result, { kind: "retry" });
   });
 
-  it("限流响应的 Retry-After 超过本插件封顶 → 等不起就不重试：委托 next 且不占重试名额", async () => {
+  it("限流响应的 Retry-After 超过本插件封顶 → 等不起就不重试：终态收束且不占重试名额", async () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     let nextCalled = 0;
@@ -1243,18 +1251,19 @@ describe("请求级退避正确性", () => {
     assert.equal(
       await listener(evt({ providerRetryAfterMs: 120_000 }), next),
       undefined,
-      "120s 超出 30s 封顶 → 交回官方 llm-retry",
+      "120s 超出 30s 封顶 → 本阶梯不接，请求按终态收束",
     );
-    assert.equal(nextCalled, 1);
+    assert.equal(nextCalled, 1, "next 只在采纳位被问询一次");
     assert.equal(ctx.timers.length, 0, "没有等待就不该注册退避定时器");
     // 名额未被占用：同一会话下一次普通 429 仍从阶梯第一档开始重试
     const ordinary = listener(evt({}), next);
+    await Promise.resolve();
     assert.equal(ctx.timers.at(-1)?.ms, 2000, "阶梯从头开始（retry 名额未消耗）");
     ctx.tick();
     assert.deepEqual(await ordinary, { kind: "retry" });
   });
 
-  it("插件卸载时仍在退避 → sleep 结算为中止、委托 next（定时器不再唤醒）", async () => {
+  it("插件卸载时仍在退避 → sleep 结算为中止、请求终态（定时器不再唤醒）", async () => {
     const ctx = createCtx();
     applyPlugin(ctx);
     let nextCalled = 0;
@@ -1267,6 +1276,7 @@ describe("请求级退避正确性", () => {
       { agent, turn: 1, failure: { code: "RATE_LIMIT", message: "slow down" }, signal: undefined },
       next,
     );
+    await Promise.resolve();
     assert.equal(ctx.timers.length, 1, "退避 sleep 已挂宿主定时器");
     ctx.disposeEffects();
     assert.equal(await pending, undefined, "卸载即中止，不再重发");
@@ -1817,9 +1827,9 @@ describe("退避等待的竞态结算（三来源只结算一次）", () => {
       next,
     );
     assert.deepEqual(result, { kind: "retry" }, "到点即重发（没被误判为中止）");
-    assert.equal(nextCalled, 0);
+    assert.equal(nextCalled, 1, "next 在采纳位被问询一次");
     ctx.disposeEffects();
-    assert.equal(nextCalled, 0, "释放器二次结算：幂等，不再委托 next");
+    assert.equal(nextCalled, 1, "释放器二次结算：幂等，不再问询 next");
     assert.equal(lateWakeups, 0);
   });
 
@@ -2177,14 +2187,14 @@ describe("瞬时失败→成功兑 pass：lesson-loop 的「已遵守」观测",
 // ── 请求级重试的三个部署值进 entry config（默认＝现值、非 volatile 不占设置卡）────
 
 describe("请求级重试部署值", () => {
-  it("行 config 覆盖 requestRetryMax=2 → 第 3 次 429 就交回 llm-retry", async () => {
+  it("行 config 覆盖 requestRetryMax=2 → 第 3 次 429 就按终态收束", async () => {
     const ctx = createCtx();
     ctx.scope.set({ requestRetryMax: 2 });
     applyPlugin(ctx);
     const agent = register(ctx, makeAgent("w4-max", "sensenova"));
     const outcomes = await fireRateLimits(ctx, agent, 3);
     assert.deepEqual(outcomes.slice(0, 2), [{ kind: "retry" }, { kind: "retry" }]);
-    assert.equal(outcomes[2], "NEXT", "配置的 2 次名额用尽 → 委托官方 llm-retry");
+    assert.equal(outcomes[2], undefined, "配置的 2 次名额用尽 → 本阶梯按终态收束");
   });
 
   it("行 config 覆盖退避阶梯 → 定时器按配置档位走，超出档位取末档", async () => {
@@ -2232,14 +2242,15 @@ describe("请求级重试部署值", () => {
       },
       nextNoop,
     );
+    await Promise.resolve();
     roomy.tick();
     assert.deepEqual(await roomyPending, { kind: "retry" });
     assert.equal(roomy.timers.at(-1)?.ms, 1500);
   });
 
-  it("三项部署值不标 volatile ⇒ 设置表单仍是十三项", () => {
+  it("三项部署值不标 volatile ⇒ 设置表单仍是十四项", () => {
     const form = volatileFormOf(plugin.Config as unknown as SchemaNode);
-    assert.equal(form?.length, 13, "部署值不进表单，表单字段集不变");
+    assert.equal(form?.length, 14, "部署值不进表单，表单字段集不变");
     for (const key of ["requestRetryMax", "requestRetryBackoffMs", "requestRetryBackoffCapMs"]) {
       assert.equal(configDict()[key]?.meta?.["volatile"], undefined, `${key} 不该是 volatile`);
     }

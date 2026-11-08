@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "会话续跑救援",
+    "title": "会话自动接续",
     "description": "提供方瞬时失败后自动续跑、输出被截断时自动继续、待办未闭合时自动补跑。",
     "detail": "docs/DETAIL.zh.md"
   }
