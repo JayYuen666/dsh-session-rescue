@@ -143,6 +143,10 @@ function createCtx(
     piAiRevision?: number;
     /** 让 mutate 抛 SettingsConflictError，模拟读到 revision 之后别处又改了同一段。 */
     mutateConflict?: boolean;
+    /** `llm-pi-ai` 里 sensenova 现行的 retryableCodes（默认只放 RATE_LIMIT）。 */
+    retryableCodes?: string[];
+    /** 直接替换 sensenova 现行的 retryPolicy（覆盖 mode/backoff 等形状）。 */
+    retryPolicy?: Record<string, unknown>;
   } = {},
 ): MockCtx {
   const handlers: Record<string, (payload: unknown, next?: unknown) => unknown> = {};
@@ -185,7 +189,11 @@ function createCtx(
           value: {
             providers: {
               sensenova: {
-                retryPolicy: { mode: "normal", maxRetries: 5, retryableCodes: ["RATE_LIMIT"] },
+                retryPolicy: opts.retryPolicy ?? {
+                  mode: "normal",
+                  maxRetries: 5,
+                  retryableCodes: opts.retryableCodes ?? ["RATE_LIMIT"],
+                },
               },
             },
           },
@@ -440,13 +448,28 @@ interface RescueRemote {
   toggle: (request: { sessionId: string }) => Record<string, unknown>;
   resume: () => { ok: true; restored: number };
   retryProviders: () => Record<string, unknown>;
-  retryPolicy: (request: { provider: string; preset: string }) => Promise<Record<string, unknown>>;
+  retryPolicy: (request: {
+    provider: string;
+    preset: string;
+    retryableCodes?: unknown;
+  }) => Promise<Record<string, unknown>>;
 }
 
 function remoteOf(ctx: MockCtx): RescueRemote {
   const service: unknown = ctx.get(RESCUE_REMOTE_NAMESPACE);
   assert.ok(service !== undefined, "Remote 读面没注册到上下文");
   return service as RescueRemote;
+}
+
+/** 取这一次 settings.mutate 写进 providers.<p>.retryPolicy 的值。 */
+function mutatedRetryPolicy(ctx: MockCtx): Record<string, unknown> {
+  const op = ctx.mutations[0]?.ops[0] as { value?: unknown } | undefined;
+  const value = op?.value;
+  assert.ok(
+    typeof value === "object" && value !== null && !Array.isArray(value),
+    "应有一次 retryPolicy 写入",
+  );
+  return value as Record<string, unknown>;
 }
 
 /** 装一枚只读五位状态的 goals 替身（本包只用 `get(agent)` 那一位）。
@@ -1106,6 +1129,142 @@ describe("remote 写入的业务结果", () => {
       );
     }
     assert.equal(ctx.mutations.length, 0, "原型键不得落盘");
+  });
+
+  it("enhanced 预设保留现行自定义码（并集，不是整表替换）", async () => {
+    const mergeCtx = createCtx({
+      retryableCodes: ["RATE_LIMIT", "PI_AI_ERROR", "MALFORMED_RESPONSE"],
+    });
+    applyPlugin(mergeCtx);
+    const body = await remoteOf(mergeCtx).retryPolicy({
+      provider: KNOWN_PROVIDER,
+      preset: "enhanced",
+    });
+    assert.equal(body["ok"], true);
+    const value = mutatedRetryPolicy(mergeCtx);
+    assert.equal(value["maxRetries"], 12);
+    assert.deepEqual(
+      value["retryableCodes"],
+      [
+        "EMPTY_RESPONSE",
+        "RATE_LIMIT",
+        "SERVER",
+        "TIMEOUT",
+        "TRANSPORT",
+        "QUOTA",
+        "PI_AI_ERROR",
+        "MALFORMED_RESPONSE",
+      ],
+      "预设码在前、现行自定义码追加在后，RATE_LIMIT 不重复",
+    );
+  });
+
+  it("enhanced：现行码表里的非字符串/空项被静默丢弃", async () => {
+    const dirtyCtx = createCtx({
+      retryPolicy: {
+        mode: "normal",
+        maxRetries: 5,
+        retryableCodes: ["RATE_LIMIT", 42, "", "  ", "PI_AI_ERROR"],
+      },
+    });
+    applyPlugin(dirtyCtx);
+    await remoteOf(dirtyCtx).retryPolicy({ provider: KNOWN_PROVIDER, preset: "enhanced" });
+    assert.deepEqual(mutatedRetryPolicy(dirtyCtx)["retryableCodes"], [
+      "EMPTY_RESPONSE",
+      "RATE_LIMIT",
+      "SERVER",
+      "TIMEOUT",
+      "TRANSPORT",
+      "QUOTA",
+      "PI_AI_ERROR",
+    ]);
+  });
+
+  it("custom：只替换码表，保留现行 mode/maxRetries/backoff", async () => {
+    const customCtx = createCtx({ retryableCodes: ["RATE_LIMIT", "PI_AI_ERROR"] });
+    applyPlugin(customCtx);
+    const body = await remoteOf(customCtx).retryPolicy({
+      provider: KNOWN_PROVIDER,
+      preset: "custom",
+      retryableCodes: [" PI_AI_ERROR ", "upstream_stream_interrupted", "PI_AI_ERROR"],
+    });
+    assert.equal(body["ok"], true);
+    const value = mutatedRetryPolicy(customCtx);
+    assert.equal(value["mode"], "normal");
+    assert.equal(value["maxRetries"], 5);
+    assert.deepEqual(value["retryableCodes"], ["PI_AI_ERROR", "upstream_stream_interrupted"]);
+    assert.deepEqual(value["backoff"], {
+      initialDelayMs: 500,
+      maxDelayMs: 10_000,
+      jitterRatio: 0.1,
+    });
+  });
+
+  it("custom：always 模式保留 always 与现行 backoff", async () => {
+    const alwaysCtx = createCtx({
+      retryPolicy: {
+        mode: "always",
+        backoff: { initialDelayMs: 1000, maxDelayMs: 2000, jitterRatio: 0 },
+      },
+    });
+    applyPlugin(alwaysCtx);
+    const body = await remoteOf(alwaysCtx).retryPolicy({
+      provider: KNOWN_PROVIDER,
+      preset: "custom",
+      retryableCodes: ["PI_AI_ERROR"],
+    });
+    assert.equal(body["ok"], true);
+    assert.deepEqual(mutatedRetryPolicy(alwaysCtx), {
+      mode: "always",
+      retryableCodes: ["PI_AI_ERROR"],
+      backoff: { initialDelayMs: 1000, maxDelayMs: 2000, jitterRatio: 0 },
+    });
+  });
+
+  it("custom：现行 maxRetries 非法时回落官方默认 5", async () => {
+    const fallbackCtx = createCtx({
+      retryPolicy: { mode: "normal", maxRetries: -1, retryableCodes: ["RATE_LIMIT"] },
+    });
+    applyPlugin(fallbackCtx);
+    await remoteOf(fallbackCtx).retryPolicy({
+      provider: KNOWN_PROVIDER,
+      preset: "custom",
+      retryableCodes: ["PI_AI_ERROR"],
+    });
+    assert.equal(mutatedRetryPolicy(fallbackCtx)["maxRetries"], 5);
+  });
+
+  it("custom：空表/坏码/prototype 键 → 400 且不落盘", async () => {
+    const rejectCtx = createCtx();
+    applyPlugin(rejectCtx);
+    const badCodes: unknown[] = [[], ["  "], [""], "PI_AI_ERROR", [1], [null], { code: "X" }];
+    const rejected = await Promise.all(
+      badCodes.map((retryableCodes) =>
+        remoteOf(rejectCtx).retryPolicy({
+          provider: KNOWN_PROVIDER,
+          preset: "custom",
+          retryableCodes,
+        }),
+      ),
+    );
+    for (const [index, body] of rejected.entries()) {
+      assert.equal(body["status"], 400, `${JSON.stringify(badCodes[index])} 必须被拒`);
+    }
+    const unknown = await remoteOf(rejectCtx).retryPolicy({
+      provider: "constructor",
+      preset: "custom",
+      retryableCodes: ["PI_AI_ERROR"],
+    });
+    assert.equal(unknown["status"], 400);
+    assert.equal(rejectCtx.mutations.length, 0, "被拒的写不得落盘");
+  });
+
+  it("retryProviders 回传现行码表，供设置卡编辑", () => {
+    const codesCtx = createCtx({ retryableCodes: ["RATE_LIMIT", "PI_AI_ERROR", "QUOTA"] });
+    applyPlugin(codesCtx);
+    const body = remoteOf(codesCtx).retryProviders();
+    const providers = body["providers"] as { provider: string; retryableCodes: string[] }[];
+    assert.deepEqual(providers[0]?.retryableCodes, ["RATE_LIMIT", "PI_AI_ERROR", "QUOTA"]);
   });
 
   it("retryProviders：settings.describe 抛错 → 降级 ok:false", () => {

@@ -170,6 +170,18 @@ export interface UiMessages {
   readonly presetOverwriteWarn: string;
   /** 覆盖警告上的强制保存按钮。 */
   readonly confirmSave: string;
+  /** 自定义码表编辑器的字段标签。 */
+  readonly presetCodesLabel: string;
+  /** 自定义码表编辑器的说明（逗号分隔、只替换码表）。 */
+  readonly presetCodesHint: string;
+  /** 自定义码表单行保存按钮。 */
+  readonly presetCodesSave: string;
+  /** 自定义码表保存成功提示。 */
+  readonly presetCodesSaved: string;
+  /** 自定义码表为空时的提示。 */
+  readonly presetCodesEmpty: string;
+  /** always 档下码表不生效的提示。 */
+  readonly presetCodesAlways: string;
 }
 
 /**
@@ -324,6 +336,12 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     presetOverwriteWarn:
       "以下 provider 的现行重试配置不是任何档位的标准形状（可能是手写配置），保存会将其覆盖且无法自动恢复：{providers}",
     confirmSave: "仍要保存",
+    presetCodesLabel: "自定义重试码",
+    presetCodesHint: "逗号分隔；只替换码表，模式/次数/退避沿用当前策略",
+    presetCodesSave: "保存码表",
+    presetCodesSaved: "码表已保存",
+    presetCodesEmpty: "码表不能为空；用逗号分隔多个码",
+    presetCodesAlways: "always 模式下码表不生效",
   },
   en: {
     retryText:
@@ -456,5 +474,12 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     presetOverwriteWarn:
       "The current retry policy of {providers} does not match any preset shape (it may be a hand-written config); saving overwrites it and it cannot be restored automatically",
     confirmSave: "Save anyway",
+    presetCodesLabel: "Custom retry codes",
+    presetCodesHint:
+      "Comma separated; replaces only the code list, keeping the current mode/retries/backoff",
+    presetCodesSave: "Save codes",
+    presetCodesSaved: "Codes saved",
+    presetCodesEmpty: "The code list cannot be empty; separate codes with commas",
+    presetCodesAlways: "Codes are inert in always mode",
   },
 };

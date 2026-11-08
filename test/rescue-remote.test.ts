@@ -161,6 +161,20 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
       provider: "p",
       preset: "normal",
     });
+    // custom 档携带码表：声明字段保留、未声明字段仍然丢掉。
+    assert.deepEqual(
+      policy.create().parse({
+        provider: "p",
+        preset: "custom",
+        retryableCodes: ["PI_AI_ERROR", "MALFORMED_RESPONSE"],
+        extra: true,
+      }),
+      {
+        provider: "p",
+        preset: "custom",
+        retryableCodes: ["PI_AI_ERROR", "MALFORMED_RESPONSE"],
+      },
+    );
     for (const bad of [
       null,
       {},
@@ -169,8 +183,13 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
       { provider: "p", preset: 2 },
       { provider: "", preset: "normal" },
       { provider: "p", preset: "  " },
+      { provider: "p", preset: "custom", retryableCodes: "PI_AI_ERROR" },
+      { provider: "p", preset: "custom", retryableCodes: [1] },
     ]) {
-      assert.throws(() => policy.create().parse(bad), /non-empty string provider and preset/u);
+      assert.throws(
+        () => policy.create().parse(bad),
+        /non-empty string provider and preset|policy/u,
+      );
     }
   });
 
@@ -210,6 +229,22 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
       { method: "retryProviders", args: [] },
       { method: "retryPolicy", args: [{ provider: "p", preset: "normal" }] },
     ]);
+  });
+
+  it("retryPolicy 携带自定义码表时，码表随请求原样传给宿主", async () => {
+    const { namespace, calls } = namespaceOf();
+    const { reader } = readerOf(namespace);
+    await reader.retryPolicy("p", "custom", ["PI_AI_ERROR", "MALFORMED_RESPONSE"]);
+    assert.deepEqual(calls.at(-1), {
+      method: "retryPolicy",
+      args: [
+        {
+          provider: "p",
+          preset: "custom",
+          retryableCodes: ["PI_AI_ERROR", "MALFORMED_RESPONSE"],
+        },
+      ],
+    });
   });
 
   it("命名空间缺席或任一方法不像函数 → 点名读不到的键", async () => {

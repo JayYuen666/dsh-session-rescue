@@ -48,9 +48,18 @@ const POLICY_SCHEMA = z.object(
   {
     provider: z.string({ error: POLICY_MESSAGE }).trim().min(1, { error: POLICY_MESSAGE }),
     preset: z.string({ error: POLICY_MESSAGE }).trim().min(1, { error: POLICY_MESSAGE }),
+    retryableCodes: z
+      .array(z.string({ error: POLICY_MESSAGE }), { error: POLICY_MESSAGE })
+      .optional(),
   },
   { error: POLICY_MESSAGE },
 );
+
+interface PolicyRequest {
+  provider: string;
+  preset: string;
+  retryableCodes?: string[] | undefined;
+}
 
 const SESSION_CODEC: TypertCodec<{ sessionId: string }> = {
   mode: "strict",
@@ -62,11 +71,11 @@ const SESSION_CODEC: TypertCodec<{ sessionId: string }> = {
   }),
 };
 
-const POLICY_CODEC: TypertCodec<{ provider: string; preset: string }> = {
+const POLICY_CODEC: TypertCodec<PolicyRequest> = {
   mode: "strict",
   typeSymbol: `${PACKAGE_NAME}#policy-request`,
   create: () => ({
-    parse(value: unknown): { provider: string; preset: string } {
+    parse(value: unknown): PolicyRequest {
       return parseOrThrow(POLICY_SCHEMA, value);
     },
   }),
@@ -135,7 +144,11 @@ export interface RescueReader {
   toggle: (sessionId: string) => Promise<unknown>;
   resume: () => Promise<unknown>;
   retryProviders: () => Promise<unknown>;
-  retryPolicy: (provider: string, preset: string) => Promise<unknown>;
+  retryPolicy: (
+    provider: string,
+    preset: string,
+    retryableCodes?: readonly string[],
+  ) => Promise<unknown>;
 }
 
 interface RemoteHost {
@@ -155,7 +168,7 @@ interface RescueNamespace {
   toggle: (request: { sessionId: string }) => Promise<RemoteResult<unknown>>;
   resume: () => Promise<RemoteResult<unknown>>;
   retryProviders: () => Promise<RemoteResult<unknown>>;
-  retryPolicy: (request: { provider: string; preset: string }) => Promise<RemoteResult<unknown>>;
+  retryPolicy: (request: PolicyRequest) => Promise<RemoteResult<unknown>>;
 }
 
 const isMounter = (value: unknown): value is RemoteMounter =>
@@ -222,8 +235,14 @@ function buildRescueReader(ctx: RemoteHost, remote: RemoteMounter): RescueReader
     toggle: async (sessionId) => invoke((namespace) => namespace.toggle({ sessionId })),
     resume: async () => invoke((namespace) => namespace.resume()),
     retryProviders: async () => invoke((namespace) => namespace.retryProviders()),
-    retryPolicy: async (provider, preset) =>
-      invoke((namespace) => namespace.retryPolicy({ provider, preset })),
+    retryPolicy: async (provider, preset, retryableCodes) =>
+      invoke((namespace) =>
+        namespace.retryPolicy({
+          provider,
+          preset,
+          ...(retryableCodes === undefined ? {} : { retryableCodes: [...retryableCodes] }),
+        }),
+      ),
   };
 }
 

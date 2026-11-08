@@ -82,6 +82,7 @@ import { z } from "zod";
 import {
   CARD_UI_CSS,
   CardForm,
+  ListField,
   NumberField,
   SaveBar,
   Section,
@@ -167,6 +168,10 @@ const CSS = [
   ".sr-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6fed);outline-offset:-1px}",
   ".sr-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
   ".sr-error{font-size:12px;color:var(--dsw-alias-text-danger,#d33)}",
+  ".sr-retry-row{display:flex;flex-direction:column;gap:6px;padding:6px 0}",
+  ".sr-retry-row + .sr-retry-row{border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06))}",
+  ".sr-retry-codes{display:flex;flex-direction:column;gap:6px}",
+  ".sr-retry-codes-action{display:flex;justify-content:flex-end}",
   // dock 面板：官方 QueueDock 同款——玻璃底 + 0.5px 顶边框 + 只有上圆角，负 margin
   // 贴住输入卡（下边由输入卡自己的顶边框收口），宽度按 composer 的 inset 体系算。
   ".sr-dock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance,16px)*2 - var(--dsh-composer-dock-inset,8px)*2);max-width:calc(var(--dsh-composer-card-max-width,var(--dsh-chat-content-width,748px)) - var(--dsh-composer-dock-inset,8px)*2);margin:0 auto calc(0px - var(--dsh-composer-stack-gap,6px) - 3px);display:flex;flex-direction:column;gap:6px;padding:6px var(--dsh-composer-dock-inset,8px) 8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit);background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));backdrop-filter:var(--dsw-menu-backdrop-filter,none);border:0.5px solid var(--dsw-alias-border-l1,#d8dbe2);border-bottom:none;border-radius:var(--dsw-radius-lg,10px) var(--dsw-radius-lg,10px) 0 0}",
@@ -1662,11 +1667,22 @@ interface SettingsCardProps {
 // 档位：default（官方默认 5 次码表）/ enhanced（12 次 + QUOTA + 8s→60s，
 // settings.yaml 四家现行同款）/ always（官方无限重试 + backoff）/ off（0 次）。
 
+/** host 载荷 → 码表数组：非数组回落空表，只保留字符串项（逐字段守卫）。 */
+function retryCodesFromValue(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+const RETRY_CODES_SCHEMA = z.array(z.string());
+
 const RETRY_PROVIDER_SCHEMA = z.object({
   provider: z.preprocess((value) => (typeof value === "string" ? value : ""), z.string()),
   mode: z.preprocess((value) => (typeof value === "string" ? value : ""), z.string()),
   maxRetries: z.preprocess((value) => (typeof value === "number" ? value : 0), z.number()),
   hasQuota: z.preprocess((value) => value === true, z.boolean()),
+  retryableCodes: z.preprocess(retryCodesFromValue, RETRY_CODES_SCHEMA),
 });
 
 type RetryProviderRow = z.infer<typeof RETRY_PROVIDER_SCHEMA>;
@@ -1721,7 +1737,107 @@ function isCanonicalPreset(row: RetryProviderRow): boolean {
   return !row.hasQuota && row.maxRetries === 5;
 }
 
-/** 单行 provider 的档位下拉（选择先暂存，点「保存」批量写到磁盘）。 */
+/** 自定义码表写盘：返回 null=成功，字符串=给用户看的失败原因（与 applyPreset 同形）。 */
+async function applyRetryCodes(
+  t: Translate,
+  provider: string,
+  codes: readonly string[],
+): Promise<string | null> {
+  const target = `${provider}→custom`;
+  const { reader } = rescueState;
+  if (reader === undefined) {
+    return t("remoteUnavailable", { target });
+  }
+  try {
+    const body = await reader.retryPolicy(provider, "custom", codes);
+    if (isRecord(body) && body["ok"] === true) {
+      return null;
+    }
+    const error = fieldOf(body, "error");
+    return typeof error === "string" ? `${target}: ${error}` : t("hostRejected", { target });
+  } catch (error) {
+    return `${target}: ${String(error)}`;
+  }
+}
+
+/** 单行 provider 的自定义码表编辑：草稿 + 独立保存，不参与档位批量保存。 */
+/** 码表编辑器的提示文案：always 档不可用 > 空表 > 普通说明。 */
+function retryCodesHint(row: RetryProviderRow, empty: boolean, t: Translate): string {
+  if (row.mode === "always") {
+    return t("presetCodesAlways");
+  }
+  return empty ? t("presetCodesEmpty") : t("presetCodesHint");
+}
+
+function RetryCodesRow(props: {
+  row: RetryProviderRow;
+  disabled: boolean;
+  t: Translate;
+}): ReactNode {
+  const { row, disabled, t } = props;
+  const [draft, setDraft] = useState<string[]>(row.retryableCodes);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
+  useEffect(() => {
+    setDraft(row.retryableCodes);
+  }, [row.retryableCodes]);
+  const codesDisabled = disabled || saving || row.mode === "always";
+  const empty = draft.length === 0;
+  const hint = retryCodesHint(row, empty, t);
+  const saveLabel = t("presetCodesSave");
+  const save = async (): Promise<void> => {
+    if (codesDisabled || empty) {
+      return;
+    }
+    setSaving(true);
+    setNotice(null);
+    const failure = await applyRetryCodes(t, row.provider, draft);
+    setSaving(false);
+    setNotice(
+      failure === null
+        ? { text: t("presetCodesSaved"), error: false }
+        : { text: failure, error: true },
+    );
+  };
+  return createElement(
+    "div",
+    { className: "sr-retry-codes" },
+    createElement(ListField, {
+      label: t("presetCodesLabel"),
+      hint,
+      field: `retry-codes-${row.provider}`,
+      value: draft,
+      placeholder: "PI_AI_ERROR, MALFORMED_RESPONSE",
+      disabled: codesDisabled,
+      onChange: (next: string[]): void => {
+        setNotice(null);
+        setDraft(next);
+      },
+    }),
+    createElement(
+      "div",
+      { className: "sr-retry-codes-action" },
+      createElement(
+        "button",
+        {
+          type: "button",
+          className: "sr-button",
+          "data-field": `retry-codes-save-${row.provider}`,
+          disabled: codesDisabled || empty,
+          onClick: (): void => {
+            void save();
+          },
+        },
+        saveLabel,
+      ),
+    ),
+    notice === null
+      ? null
+      : createElement("div", { className: notice.error ? "sr-error" : "sr-hint" }, notice.text),
+  );
+}
+
+/** 单行 provider 的档位下拉 + 自定义码表编辑器（档位选择先暂存，点「保存」批量写到磁盘）。 */
 function retryRowElement(
   row: RetryProviderRow,
   pending: Record<string, string>,
@@ -1737,8 +1853,7 @@ function retryRowElement(
   // "toString" 这类自有属性名时 `pending[...]` 会返回原型上的函数，`??` 也就
   // 不再回落到当前档位——下拉框把函数当 value 渲染成空串。只认自有键。
   const staged = Object.hasOwn(pending, row.provider) ? pending[row.provider] : undefined;
-  return createElement(SelectField, {
-    key: row.provider,
+  const select = createElement(SelectField, {
     label: row.provider,
     // always 档没有次数上限（官方语义 until success），写到磁盘值里也没有 maxRetries 可读
     // ——宿主兜底的 5 只是 normal 档的官方默认，显示出来会把「无限」读成「5 次上限」。
@@ -1753,6 +1868,12 @@ function retryRowElement(
       onChange(row, next);
     },
   });
+  return createElement(
+    "div",
+    { key: row.provider, className: "sr-retry-row" },
+    select,
+    createElement(RetryCodesRow, { row, disabled, t }),
+  );
 }
 
 /** 单个 provider 的写到磁盘（经官方 Remote 的 `sessionRescue.retryPolicy`）。返回 null=已写到磁盘，

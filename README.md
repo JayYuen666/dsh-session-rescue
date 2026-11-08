@@ -62,7 +62,7 @@
 - **Optional steer continuation (off by default)**: when enabled on the settings card, a turn about to close while the todo list it wrote itself still has open items is continued **in the same turn** via `agent.steer` instead of being closed and re-run; it shares the `maxUnfinished` quota with catch-up, so the anti-runaway semantics are one track.
 - **Connection-aware**: an injection whose send failed (transport trouble) is suspended instead of dropped, shown as a reconnecting banner, and re-armed with its remaining delay once the connection returns.
 - **`/state` polling is a self-scheduling two-tier loop**: 1 s while a pending exists (the banner counts down by the second), 5 s otherwise; the next hop is armed only after the current one lands, so an in-flight request neither overlaps nor strands the loop. After three consecutive unreadable polls the cached snapshot is discarded — the banner and the per-session switch fall back to their neutral state instead of counting down from a value nobody confirmed — and polling backs off by doubling up to 30 s.
-- **A settings card** with the recovery knobs and per-provider 429 retry presets written into the official `llm-pi-ai` namespace.
+- **A settings card** with the recovery knobs and per-provider 429 retry presets plus a custom code editor, all written into the official `llm-pi-ai` namespace; preset selection saves in a batch, while "Save codes" replaces only that provider's `retryableCodes` (mode/count/backoff stay as they are).
 - Host read surface: `agent/error`, `agent/status`, `agent/request-error`, `agent/disposed` (cleanup). Turn facts (`turn/start`, `turn/end`, `user/message`, `tool/call`, `todo/write`) fold incrementally through `ctx.sessionProjections`; on profiles without that registry, or on shapes the fold cannot vouch for, it falls back to a full `session.snapshotEvents()` scan with identical verdicts.
 
 ### How a decision is made
@@ -99,7 +99,7 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
    - That command is the only accepted "it is in the layer stack" signal, and it is **not read-only** — it rewrites the profile's root assembly file. Read layer lines from stdout **and** check stderr separately: an unmatched patch target appears only on stderr, so the exit code alone proves nothing.
    - A layer line may read `# == <layer>` or `# == <layer>, patched by <path>`; accept both forms.
 2. **Both surfaces render**: with a session open, the recovery dock sits above the input box — the per-session switch row and stop-and-reask while a turn is running; the latest completed turn (failed / truncated / crash-interrupted) carries the action row at its tail — edit-resend / fork-resend / retry / send-continue.
-3. **The settings card renders live data**: the plugin page lists the session-rescue card, and its 429 preset section loads your `llm-pi-ai` providers (name, retry mode, quota coverage). A permanently "unavailable" readout means the layer is mounted but the Remote namespace did not reach the browser.
+3. **The settings card renders live data**: the plugin page lists the session-rescue card, and its 429 preset section loads your `llm-pi-ai` providers (name, retry mode, quota coverage, current code list); the code list can be edited and saved separately. A permanently "unavailable" readout means the layer is mounted but the Remote namespace did not reach the browser.
 4. **A live rescue**: make the model call fail transiently mid-turn (for example by cutting the network); the banner appears and counts down by the second, and the log carries `[session-rescue]` lines naming the kind and the gate. Counter-check: a turn you stop yourself (`aborted`) injects nothing, by design — "no injection" there is not a broken install.
 
 ## <img src="https://api.iconify.design/lucide/circle-slash.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does not provide
@@ -166,8 +166,8 @@ Six methods on the official Typert Remote namespace `sessionRescue`. Parameters 
 | `cancel` | `{ sessionId }` | Cancels that session's pending injection, suspended ones included |
 | `toggle` | `{ sessionId }` | Flips the per-session switch; switching off also cancels pendings. 409 when the toggle ledger is full with no dead session to evict |
 | `resume` | — | Restores suspended injections after a reconnect; `ok` plus the restored count |
-| `retryProviders` | — | The official `llm-pi-ai` providers with retry mode / count / quota coverage; 503 when that namespace is unavailable |
-| `retryPolicy` | `{ provider, preset }` | Writes `providers.<name>.retryPolicy` (presets `default` / `enhanced` / `always` / `off`) via `settings.mutate`; a revision conflict answers 409 |
+| `retryProviders` | — | The official `llm-pi-ai` providers with retry mode / count / quota coverage / current code list; 503 when that namespace is unavailable |
+| `retryPolicy` | `{ provider, preset, retryableCodes? }` | Writes `providers.<name>.retryPolicy` (presets `default` / `enhanced` / `always` / `off` / `custom`) via `settings.mutate`; `enhanced` keeps the current code list, `custom` replaces only `retryableCodes`; a revision conflict answers 409 |
 
 - A refusal's `status` is a retained semantic code, not an HTTP status of a route of this package — there are no routes.
 - The only model-visible artifact: one `role: "user"` message through `agent.followup()`, with an id like `session-rescue-<timestamp>-<seq>` and text from the fixed templates. This package keeps no second retry configuration of its own.

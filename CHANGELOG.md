@@ -4,6 +4,20 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.11
+
+一轮围绕「重试码表不被预设误删」的修正：`enhanced` 从整表替换改为并集，设置卡新增按 provider 编辑自定义重试码；请求级/回合级判定逻辑不变。
+
+### Changed
+
+- **`enhanced` 预设改为增量并集**（`host.ts`）：写入前读取该 provider 现行的 `retryableCodes`，把预设码表与现行自定义码合并去重后再落盘，不再整表替换。应用 `enhanced` 不会再删掉 `PI_AI_ERROR` / `MALFORMED_RESPONSE` 这类手写码；`default` 仍保持「重置为官方默认」的语义，`always` / `off` 不变。
+- **设置卡支持自定义重试码**（`src/client-entry.ts` + `src/remote.ts` + `host.ts`）：每个 provider 行新增码表输入框与「保存码表」；写入走 `retryPolicy` 的 `custom` 档，只替换 `retryableCodes`，`mode` / `maxRetries` / `backoff` 沿用现行策略（缺省回官方默认）。`retryProviders` 回传现行码表，输入框初始值与磁盘一致。
+- **`custom` 校验**：客户端按逗号拆分为数组；宿主端 trim、去重并拒绝空表、空项、非字符串与未知 provider（400），CAS revision 冲突仍走 409。
+
+### Added
+
+- **码表编辑的回归测试**：host 覆盖 `enhanced` 并集、`custom` 保留非码字段、空表/坏码 400、`retryProviders` 回传码表；client 覆盖编辑后保存的 `preset=custom` 请求体与成功提示。
+
 ## 0.1.10
 
 一轮围绕「手动接续入口与请求级分工」的调整：回合级动作迁到回合尾部，dock 只留会话级三件；请求级限流重试改为先问下游、下游放行才接手；新增默认关闭的插话续跑与配额耗尽提示。三类自动注入的判定语义不变。

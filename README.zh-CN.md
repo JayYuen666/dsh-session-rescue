@@ -62,7 +62,7 @@
 - **可选的插话续跑（默认关）**：设置卡打开后，回合将收尾而该回合自己写的清单仍未闭合时，先经 `agent.steer` 在**同一回合内**续做，而不是收尾后再补跑；与待办补跑共用 `maxUnfinished` 配额，防失控语义同轨。
 - **连接感知**：发送失败的注入（传输类故障）不丢弃而是挂起，横幅显示「重连后自动续跑」，连接恢复后按剩余延迟重新武装。
 - **`/state` 轮询是自排循环 + 两档**：有 pending 时 1s（横幅按秒走倒计时），无 pending 时 5s；上一跳落地后才排下一跳，在飞期间不叠并发也不停摆。连着三跳读不到有效快照就把缓存判为过期——横幅与每会话开关回到中性态，不拿没人确认过的数字继续倒计时——轮询按翻倍退避到 30s 封顶。
-- **一张设置卡**：自动续跑参数，加上写进官方 `llm-pi-ai` 命名空间的按 provider 429 重试档位。
+- **一张设置卡**：自动续跑参数，加上写进官方 `llm-pi-ai` 命名空间的按 provider 429 重试档位与自定义码表；档位选择批量保存，「保存码表」单独替换该 provider 的 `retryableCodes`（不改变模式/次数/退避）。
 - 读取的宿主类型：`agent/error`、`agent/status`、`agent/request-error`、`agent/disposed`（清理）。回合事实（`turn/start`、`turn/end`、`user/message`、`tool/call`、`todo/write`）经 `ctx.sessionProjections` 增量折叠（`rescueFactsProjection.apply`）；注册表缺席的 profile、或折叠不可采信的形状，回退 `session.snapshotEvents()` 全量扫描，判定逐项相同。
 
 ### 判定是怎么做出来的
@@ -99,7 +99,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
    - 这条命令是唯一被认可的「它在层栈里」判据，而它**不是只读命令**——会把该 profile 的根装配文件重写一遍。层行从 stdout 读，stderr 另行单独检查：未匹配的 patch 目标只出现在 stderr，光看退出码证明不了任何事。
    - 层行可能是 `# == <层>`，也可能是 `# == <层>, patched by <路径>`；两种形态都要认。
 2. **两个入口都渲染出来了**：打开一个会话，输入框上方有接续 dock——每会话开关那一行与回合运行中的「停止并重问」；对话里最新完成回合（失败/截断/崩溃中断）的尾部有操作行——编辑重发 / Fork 重发 / 重试 / 发送续写。
-3. **设置卡渲染实时数据**：插件页列出 session-rescue 卡片，429 档位一节加载出你的 `llm-pi-ai` providers（名称、重试模式、配额覆盖）。一直「不可用」的读数说明层已挂载、但 Remote 命名空间没到浏览器。
+3. **设置卡渲染实时数据**：插件页列出 session-rescue 卡片，429 档位一节加载出你的 `llm-pi-ai` providers（名称、重试模式、配额覆盖、现行码表）；可直接编辑码表并单独保存。一直「不可用」的读数说明层已挂载、但 Remote 命名空间没到浏览器。
 4. **一次真实续跑**：让回合中的一次模型调用瞬时失败（例如断网）；横幅出现并按秒倒计时，日志里有 `[session-rescue]` 行点名类别与闸门。反向核对：你自己停掉的回合（`aborted`）按设计不注入——那里的「没注入」不是装坏了。
 
 ## <img src="https://api.iconify.design/lucide/circle-slash.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它不提供什么
@@ -166,8 +166,8 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 | `cancel` | `{ sessionId }` | 取消该会话的待办注入，挂起中的也算 |
 | `toggle` | `{ sessionId }` | 翻转每会话开关；关掉的同时取消待办。台账满且无死会话可淘汰时答 409 |
 | `resume` | — | 重连后恢复挂起的注入；`ok` 加恢复条数 |
-| `retryProviders` | — | 官方 `llm-pi-ai` 的 providers 及重试模式 / 次数 / 配额覆盖；该命名空间不可用时答 503 |
-| `retryPolicy` | `{ provider, preset }` | 经 `settings.mutate` 写 `providers.<name>.retryPolicy`（档位 `default` / `enhanced` / `always` / `off`）；版本冲突答 409 |
+| `retryProviders` | — | 官方 `llm-pi-ai` 的 providers 及重试模式 / 次数 / 配额覆盖 / 现行码表；该命名空间不可用时答 503 |
+| `retryPolicy` | `{ provider, preset, retryableCodes? }` | 经 `settings.mutate` 写 `providers.<name>.retryPolicy`（档位 `default` / `enhanced` / `always` / `off` / `custom`）；`enhanced` 保留现行码表，`custom` 只替换 `retryableCodes`；版本冲突答 409 |
 
 - 拒绝应答里的 `status` 是保留的语义码，不是本包任何路由的 HTTP 状态——路由根本不存在。
 - 模型可见的唯一产物：一条经 `agent.followup()` 发出的 `role: "user"` 消息，id 形如 `session-rescue-<时间戳>-<序号>`，正文取自固定模板。本包不自建第二套重试配置。

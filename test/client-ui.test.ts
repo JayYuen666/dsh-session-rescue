@@ -218,6 +218,7 @@ const BUNDLE_CONFIG_SLOT = "plugins.bundle.config";
 // ── DOM 稳定锚点：卡片/ dock 的 data-field 选择器（组件改结构时这里一处跟）。 ──
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
 const RETRY_SAVE_BUTTON_SELECTOR = '[data-field="retry-save"]';
+const CODES_SAVE_SELECTOR = '[data-field="retry-codes-save-opendesign"]';
 const RESUME_DELAY_INPUT_SELECTOR = 'input[data-field="resumeDelayMs"]';
 /** 排除名单输入框（共享 TextField 把字段名写在 data-field 上）。 */
 const EXCLUDES_INPUT_SELECTOR = 'input[data-field="providerExcludes"]';
@@ -273,7 +274,12 @@ function readerFromFetch(): RescueReader {
       const res = await fetch(PROVIDERS_URL);
       return (await res.json()) as unknown;
     },
-    retryPolicy: async (provider, preset) => postFetch(POLICY_URL, { provider, preset }),
+    retryPolicy: async (provider, preset, retryableCodes) =>
+      postFetch(POLICY_URL, {
+        provider,
+        preset,
+        ...(retryableCodes === undefined ? {} : { retryableCodes: [...retryableCodes] }),
+      }),
   };
 }
 
@@ -2568,6 +2574,36 @@ describe("RescueSettingsCard 设置卡", () => {
 
 // ── RetryPolicySection（429 重试策略区块）────────────────────────────────
 
+/** 只挂一个带码表的 provider；POLICY_URL 的响应用例给。 */
+async function mountCodesCard(policyRoute: FetchRoute): Promise<{ container: HTMLElement }> {
+  return mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+    if (url === PROVIDERS_URL) {
+      return {
+        ok: true,
+        body: {
+          ok: true,
+          providers: [
+            {
+              provider: "opendesign",
+              mode: "normal",
+              maxRetries: 12,
+              hasQuota: true,
+              retryableCodes: ["PI_AI_ERROR"],
+            },
+          ],
+        },
+      };
+    }
+    if (url === STATE_URL) {
+      return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+    }
+    if (url === POLICY_URL) {
+      return policyRoute;
+    }
+    return { ok: false, body: null };
+  });
+}
+
 describe("RetryPolicySection 重试策略区块", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
@@ -2613,6 +2649,156 @@ describe("RetryPolicySection 重试策略区块", () => {
     const post = fetchCalls.find((entry) => entry.url === POLICY_URL);
     assert.ok(post, "落盘走 retry-policy POST");
     assert.equal((post.init.body as string).includes('"preset":"off"'), true, "body 携带档位");
+  });
+
+  it("自定义码表：编辑后保存 → POST 携带 preset=custom 与完整码表", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              {
+                provider: "opendesign",
+                mode: "normal",
+                maxRetries: 12,
+                hasQuota: true,
+                retryableCodes: ["SERVER", "TRANSPORT"],
+              },
+            ],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true, provider: "opendesign", preset: "custom" } };
+      }
+      return { ok: false, body: null };
+    });
+    const codesInput = container.querySelector<HTMLInputElement>(
+      '[data-field="retry-codes-opendesign"]',
+    );
+    assert.ok(codesInput, "码表输入框存在");
+    assert.equal(codesInput.value, "SERVER, TRANSPORT", "初始值镜像现行码表");
+    await act(async () => {
+      reactProps<{ onChange: (event: { target: { value: string } }) => void }>(codesInput).onChange(
+        { target: { value: "SERVER, TRANSPORT, PI_AI_ERROR" } },
+      );
+    });
+    const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
+    assert.ok(saveCodes, "码表保存按钮存在");
+    await act(async () => {
+      saveCodes.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    const post = fetchCalls.findLast((entry) => entry.url === POLICY_URL);
+    assert.ok(post, "码表保存走 retry-policy POST");
+    assert.deepEqual(JSON.parse(String(post.init.body)), {
+      provider: "opendesign",
+      preset: "custom",
+      retryableCodes: ["SERVER", "TRANSPORT", "PI_AI_ERROR"],
+    });
+    assert.ok(container.textContent.includes("码表已保存"), "成功提示");
+  });
+
+  it("自定义码表：宿主拒绝并给出原因 → 错误提示", async () => {
+    const { container } = await mountCodesCard({
+      ok: true,
+      body: { ok: false, error: SETTINGS_REJECT_REASON },
+    });
+    const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
+    assert.ok(saveCodes);
+    await act(async () => {
+      saveCodes.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes(SETTINGS_REJECT_REASON), "显示宿主给的原因");
+    assert.equal(container.textContent.includes("码表已保存"), false, "失败不得误报成功");
+  });
+
+  it("自定义码表：宿主拒绝但没给原因 → hostRejected 文案", async () => {
+    const { container } = await mountCodesCard({ ok: true, body: { ok: false } });
+    const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
+    assert.ok(saveCodes);
+    await act(async () => {
+      saveCodes.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("宿主拒绝了这次落盘"), "回落文案");
+  });
+
+  it("自定义码表：传输层失败 → 错误提示", async () => {
+    const { container } = await mountCodesCard({
+      ok: false,
+      body: null,
+      rejectWith: new Error(CARRIER_DOWN_MESSAGE),
+    });
+    const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
+    assert.ok(saveCodes);
+    await act(async () => {
+      saveCodes.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes(CARRIER_DOWN_MESSAGE), "传输错误原文");
+  });
+
+  it("自定义码表：远端读面缺失 → remoteUnavailable 文案", async () => {
+    const { container } = await mountCodesCard({ ok: true, body: { ok: true } });
+    rescueState.reader = undefined;
+    const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
+    assert.ok(saveCodes);
+    await act(async () => {
+      saveCodes.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("远端面不可用"), "读面缺失文案");
+  });
+
+  it("自定义码表：空表时保存按钮禁用且不发请求", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [{ provider: "empty", mode: "normal", maxRetries: 5, hasQuota: false }],
+          },
+        };
+      }
+      if (url === STATE_URL) {
+        return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
+      }
+      return { ok: false, body: null };
+    });
+    const saveCodes = container.querySelector<HTMLButtonElement>(
+      '[data-field="retry-codes-save-empty"]',
+    );
+    assert.ok(saveCodes);
+    assert.equal(saveCodes.disabled, true, "空表禁用");
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(saveCodes).onClick();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(
+      fetchCalls.some((entry) => entry.url === POLICY_URL),
+      false,
+      "空表不发请求",
+    );
   });
 
   it("非规范现行配置（手写形状）→ 首次保存只出覆盖警告不落盘，仍要保存才写", async () => {

@@ -2101,13 +2101,21 @@ function handleTurnStopping(runtime: ApplyRuntime, payload: TurnStoppingPayload)
 interface RetryPreset {
   readonly op: "set";
   readonly value: Record<string, unknown>;
+  /** 写入前把现行 retryableCodes 并进来，而不是整表替换（enhanced 用）。 */
+  readonly mergeCodes?: boolean;
 }
+
+const OFFICIAL_DEFAULT_BACKOFF = {
+  initialDelayMs: 500,
+  maxDelayMs: 10_000,
+  jitterRatio: 0.1,
+} as const;
 
 const OFFICIAL_DEFAULT_RETRY_POLICY: Record<string, unknown> = {
   mode: "normal",
   maxRetries: 5,
   retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
-  backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0.1 },
+  backoff: { ...OFFICIAL_DEFAULT_BACKOFF },
 };
 
 const RETRY_PRESETS = new Map<string, RetryPreset>([
@@ -2116,6 +2124,7 @@ const RETRY_PRESETS = new Map<string, RetryPreset>([
     "enhanced",
     {
       op: "set",
+      mergeCodes: true,
       value: {
         mode: "normal",
         maxRetries: 12,
@@ -2166,6 +2175,112 @@ function piAiProviders(runtime: ApplyRuntime): Record<string, { retryPolicy?: un
   } catch {
     return null;
   }
+}
+
+/** 读取现行码表：只收非空字符串，去空白、去重；坏项静默丢弃（只用于读侧并集）。 */
+function retryCodesOf(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const codes: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      const code = item.trim();
+      if (code !== "" && !codes.includes(code)) {
+        codes.push(code);
+      }
+    }
+  }
+  return codes;
+}
+
+/** custom 请求的码表入参：非数组/含非字符串/含空项 → null（写侧回 400）；重复项去重。 */
+function parseRequestedRetryCodes(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  const codes: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      return null;
+    }
+    const code = item.trim();
+    if (code === "") {
+      return null;
+    }
+    if (!codes.includes(code)) {
+      codes.push(code);
+    }
+  }
+  return codes;
+}
+
+/** enhanced：预设码在前，现行自定义码追加在后，不删任何一边。 */
+function mergedPresetValue(
+  preset: RetryPreset,
+  currentPolicy: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const merged = retryCodesOf(preset.value["retryableCodes"]);
+  for (const code of retryCodesOf(currentPolicy?.["retryableCodes"])) {
+    if (!merged.includes(code)) {
+      merged.push(code);
+    }
+  }
+  return { ...preset.value, retryableCodes: merged };
+}
+
+/** custom：只替换码表；mode/maxRetries/backoff 沿用现行策略（缺省回官方默认）。 */
+function customPolicyValue(
+  codes: readonly string[],
+  currentPolicy: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const mode = currentPolicy?.["mode"] === "always" ? "always" : "normal";
+  const backoff = isRecord(currentPolicy?.["backoff"])
+    ? { ...currentPolicy["backoff"] }
+    : { ...OFFICIAL_DEFAULT_BACKOFF };
+  if (mode === "always") {
+    return { mode, retryableCodes: [...codes], backoff };
+  }
+  const rawMaxRetries = currentPolicy?.["maxRetries"];
+  const maxRetries =
+    typeof rawMaxRetries === "number" && Number.isSafeInteger(rawMaxRetries) && rawMaxRetries >= 0
+      ? rawMaxRetries
+      : 5;
+  return { mode, maxRetries, retryableCodes: [...codes], backoff };
+}
+
+interface RetryPolicyApplied {
+  readonly value: Record<string, unknown>;
+}
+
+interface RetryPolicyRejected {
+  readonly error: string;
+}
+
+type RetryPolicyResolution = RetryPolicyApplied | RetryPolicyRejected;
+
+/** preset/custom → 待写入的 retryPolicy 值；错误只回文案，HTTP 状态码由调用方统一给 400。 */
+function resolveRequestedPolicy(
+  preset: string,
+  rawCodes: unknown,
+  currentPolicy: Record<string, unknown> | undefined,
+): RetryPolicyResolution {
+  if (preset === "custom") {
+    const codes = parseRequestedRetryCodes(rawCodes);
+    if (codes === null) {
+      return {
+        error: "retryableCodes must be a non-empty array of non-empty strings",
+      };
+    }
+    return { value: customPolicyValue(codes, currentPolicy) };
+  }
+  const mapped = RETRY_PRESETS.get(preset);
+  if (mapped === undefined) {
+    return { error: `unknown preset: ${preset}` };
+  }
+  return {
+    value: mapped.mergeCodes === true ? mergedPresetValue(mapped, currentPolicy) : mapped.value,
+  };
 }
 
 /** `/state` 的会话表：调度器快照、禁用位与挂起待办三者的合并投影。 */
@@ -2312,14 +2427,26 @@ export class SessionRescueRemoteService extends TypertRemoteService {
     if (providers === null) {
       return { ok: false, error: "llm-pi-ai settings unavailable", status: 503 };
     }
-    const list: { provider: string; mode: string; maxRetries: number; hasQuota: boolean }[] = [];
+    const list: {
+      provider: string;
+      mode: string;
+      maxRetries: number;
+      hasQuota: boolean;
+      retryableCodes: string[];
+    }[] = [];
     for (const [name, profile] of Object.entries(providers)) {
       const rp = fieldOf(profile, "retryPolicy");
       const rpRec = isRecord(rp) ? rp : undefined;
       const mode = typeof rpRec?.["mode"] === "string" ? rpRec["mode"] : "normal";
       const maxRetries = typeof rpRec?.["maxRetries"] === "number" ? rpRec["maxRetries"] : 5;
-      const codes = Array.isArray(rpRec?.["retryableCodes"]) ? rpRec["retryableCodes"] : [];
-      list.push({ provider: name, mode, maxRetries, hasQuota: codes.includes("QUOTA") });
+      const codes = retryCodesOf(rpRec?.["retryableCodes"]);
+      list.push({
+        provider: name,
+        mode,
+        maxRetries,
+        hasQuota: codes.includes("QUOTA"),
+        retryableCodes: codes,
+      });
     }
     list.sort((left, right) => left.provider.localeCompare(right.provider));
     return { ok: true, providers: list };
@@ -2328,6 +2455,7 @@ export class SessionRescueRemoteService extends TypertRemoteService {
   public async retryPolicy(request: {
     provider: string;
     preset: string;
+    retryableCodes?: unknown;
   }): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = isRecord(request) ? request : {};
     const provider = typeof body["provider"] === "string" ? body["provider"] : "";
@@ -2335,18 +2463,20 @@ export class SessionRescueRemoteService extends TypertRemoteService {
     if (provider === "" || preset === "") {
       return { ok: false, error: "provider and preset required", status: 400 };
     }
-    const mapped = RETRY_PRESETS.get(preset);
-    if (mapped === undefined) {
-      return { ok: false, error: `unknown preset: ${preset}`, status: 400 };
-    }
     const known = piAiProviders(this.runtime);
     if (known === null || !Object.hasOwn(known, provider)) {
       return { ok: false, error: "unknown provider", status: 400 };
     }
+    const currentRaw = known[provider]?.retryPolicy;
+    const currentPolicy = isRecord(currentRaw) ? currentRaw : undefined;
+    const resolved = resolveRequestedPolicy(preset, body["retryableCodes"], currentPolicy);
+    if ("error" in resolved) {
+      return { ok: false, error: resolved.error, status: 400 };
+    }
     const op: SettingsPathOp = {
       op: "set",
       path: ["providers", provider, "retryPolicy"],
-      value: mapped.value,
+      value: resolved.value,
     };
     const piAiRevision = this.runtime.svc.settings
       .describe()
