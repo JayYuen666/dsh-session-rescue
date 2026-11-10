@@ -48,8 +48,6 @@ import type {
   SessionBinding,
   SessionReferenceSource,
 } from "@deepseek-ai/dsh-api-session-controller/client";
-// Remote 调用的统一返回包（`prompt`/`cancel` 的返回都挂在它上面）。
-import type { RemoteFailure, RemoteResult } from "@deepseek-ai/dsh-typert-protocol";
 // `openSession` 属主是 workspace 导航服务（`ctx.uiWorkspace`）——官方 `ISessions` 上
 // **没有** `open`：`sessions.list` 的注释明写「navigation belongs to view owners」。
 import type { UiWorkspace } from "@deepseek-ai/dsh-client-ui-workspace/client";
@@ -76,6 +74,13 @@ import type { CompletedUserTarget } from "../lib/transcript.ts";
 import type { TranscriptView } from "../lib/turn-scope.ts";
 import { decideDockState, parseStateBody } from "../lib/dock-state.ts";
 import type { RescuePending, RescueStateBody, ToggleState } from "../lib/dock-state.ts";
+import {
+  createHostReaskLedger,
+  createReaskLedger,
+  failureOf,
+  reaskViaHost,
+  stopAndReaskSession,
+} from "../lib/reask-action.ts";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
 import { z } from "zod";
@@ -497,6 +502,8 @@ export async function postToggle(sessionId: string): Promise<JsonResult> {
 interface ActionResult {
   ok: boolean;
   error?: { code?: string; message?: string };
+  /** 半成功：动作已生效（如重问已入队），但附带一条需要让用户知道的结果说明。 */
+  warning?: string;
 }
 
 /**
@@ -523,9 +530,6 @@ type WorkspaceNavigation = Pick<UiWorkspace, "openSession">;
 /** 会话绑定取不到时的失败码：三条动作（重发/停止重问/fork 重发）的开手守卫同源。 */
 const SESSION_UNAVAILABLE_CODE = "session-unavailable";
 
-/** 重问已入队、但停止当前回合被拒时的失败码（已生效的那一半必须与未生效的一半分得开）。 */
-const REASK_QUEUED_CODE = "reask-queued";
-
 interface ActionFailure {
   ok: false;
   code?: string;
@@ -546,33 +550,6 @@ interface Actions {
   ) => Promise<ActionResult | ActionFailure>;
 }
 
-/** 官方 `RemoteResult` 的失败支（`error` 在必选位上，故不再写 `?.`）。 */
-type Rejected = Extract<RemoteResult<never>, { ok: false }>;
-
-/**
- * `RemoteFailure` 的 code/message 两位按可选读。官方声明（installed
- * `dsh-typert-protocol/lib/types/remote-error.d.ts:10-21`）把它们钉在必选位上
- *（`readonly code: Code` + 继承自 Error 的 `message: string`），但交回本包的失败体在
- * 运行时真的可能缺这两位：`remoteErrorOf` 只按结构标记 `isDSHRemoteError` 认出失败对象、
- * 不核对字段（其文档同文件 :23-30），网关跨 realm 转发的是裸 JSON 体，本包桩件更直接交
- * `{ ok: false, error: {} }`（见 test/client-ui.test.ts 的 prompt/cancel 桩）。
- * ⇒ 类型在说谎：从属主类型派生、把这两位的声明改宽（属主一旦承认它们可缺，这里
- *  当场红），两个守卫原样保留 —— 缺字段仍走「不写这一位」的真分支。
- */
-type FailureFields = Partial<Pick<RemoteFailure, "code" | "message">>;
-
-function failResult(result: Rejected): ActionFailure {
-  // `error` 在类型上是必选，但网关跨 realm 转发的裸 JSON 可能整位缺位——缺位时直接读
-  // `.code` 会在失败路径上抛 TypeError，把原本可读的宿主拒绝换成一条与原因无关的错误。
-  const raw: unknown = result.error;
-  const error: FailureFields = isRecord(raw) ? raw : {};
-  return {
-    ok: false,
-    ...(error.code === undefined ? {} : { code: error.code }),
-    ...(error.message === undefined ? {} : { message: error.message }),
-  };
-}
-
 /**
  * 一条纯文本块：官方 `TextBlock`（dsh-llm）。`prompt` 的 `PromptContentPart` text 支收它
  * ——写成 `PromptContentPart` 反而过不了形参（那是含 image/file 的联合，`TextBlock` 才是
@@ -582,19 +559,25 @@ function textPart(text: string): TextBlock {
   return { type: "text", text };
 }
 
-function createActions(
+export function createActions(
   sessions: SessionsService,
   /** 现取而非 apply 时读一次：`uiWorkspace` 是可选服务且刻意不进 inject，
    *  它在 client 模块表里完全可以**晚于**本包激活（官方 ui-chat 同样在调用点解析，
    *  见 packages/client/ui-chat/src/client/apply.ts:292）。apply 时读一次的话，
    *  装配线里晚到的 workspace UI 永远读成 undefined ⇒ fork 重发再也不跳转。 */
   workspaceOf: () => WorkspaceNavigation | undefined,
+  /** 宿主 Remote 读取面；有 `reask` 时走 host 侧 prepend，缺省退回客户端 steer 路径。 */
+  reader: RescueReader | undefined,
   t: Translate,
 ): Actions {
   /** 官方 `binding()`：借出**已被视图 retain** 的 binding，不延长其生命周期。 */
   function bindingOf(sessionId: SessionId): SessionBinding | undefined {
     return sessions.binding(sessionId);
   }
+
+  /** 停止重问的身份台账：结果不明的失败重试复用 requestId（实现见 lib/reask-action.ts）。 */
+  const reaskLedger = createReaskLedger();
+  const hostReaskLedger = createHostReaskLedger();
 
   async function sendSameSession(
     sessionId: SessionId,
@@ -605,11 +588,11 @@ function createActions(
       return { ok: false, code: SESSION_UNAVAILABLE_CODE, message: t("sessionUnavailable") };
     }
     const result = await binding.session.prompt([textPart(text)], "queue");
-    return result.ok ? { ok: true } : failResult(result);
+    return result.ok ? { ok: true } : failureOf(result);
   }
 
-  // 停止重问：先入队再 cancel()。client cancel() 保留排队工作并在
-  // 取消收敛后 FIFO 恢复（session.d.ts 已验证），因此消息不会丢。
+  // 停止重问：宿主 Remote 提供 `reask` 时由 host 侧 cancel → prepend(next-turn) → 唤醒
+  // （严格队首，见 lib/reask-host.ts）；缺省退回客户端 cancel → 收敛等待 → steer/queue。
   async function stopAndReask(
     sessionId: SessionId,
     text: string,
@@ -618,24 +601,17 @@ function createActions(
     if (binding === undefined) {
       return { ok: false, code: SESSION_UNAVAILABLE_CODE, message: t("sessionUnavailable") };
     }
-    const queued = await binding.session.prompt([textPart(text)], "queue");
-    if (!queued.ok) {
-      return failResult(queued);
+    const hostReask = reader?.reask;
+    if (hostReask !== undefined) {
+      return reaskViaHost(hostReask, sessionId, text, {
+        ledger: hostReaskLedger,
+        queuedCancelFailed: t("reaskQueuedCancelFailed"),
+      });
     }
-    const stopped = await binding.session.cancel();
-    if (stopped.ok) {
-      return { ok: true };
-    }
-    // cancel 被拒时，已入队的那一条仍会在当前回合结束后发出。原样透传宿主的失败，
-    // 用户读到的是「这次操作没成」，再点一次就把同一段文本发两遍；所以把已经生效
-    // 的那半说在前面，宿主的理由附在后面。
-    const failure = failResult(stopped);
-    const prefix = t("reaskQueuedCancelFailed");
-    return {
-      ok: false,
-      code: REASK_QUEUED_CODE,
-      message: failure.message === undefined ? prefix : `${prefix}（${failure.message}）`,
-    };
+    return stopAndReaskSession(binding.session, sessionId, text, {
+      ledger: reaskLedger,
+      queuedCancelFailed: t("reaskQueuedCancelFailed"),
+    });
   }
 
   // fork 分支重发：从 forkAtSeq（上一轮 turn/end）切出子会话 → 导航过去 → 发送。
@@ -678,7 +654,7 @@ function createActions(
     try {
       return await sessions.using(childId, { source: SESSION_RESCUE_SOURCE }, async (reference) => {
         const result = await reference.binding.session.prompt([textPart(text)], "queue");
-        return result.ok ? { ok: true } : failResult(result);
+        return result.ok ? { ok: true } : failureOf(result);
       });
     } catch {
       // 子会话拿不到引用（retain 失败/生成期已 dispose）：用户看到的仍是「分支不可用」，
@@ -893,6 +869,7 @@ function bannerElement(
 export function stopReaskElement(
   busyStop: boolean,
   stopError: string | null,
+  stopNotice: string | null,
   onStop: () => void,
   t: Translate,
 ): ReactNode {
@@ -904,6 +881,7 @@ export function stopReaskElement(
       { type: "button", className: "sr-button", disabled: busyStop, onClick: onStop },
       busyStop ? t("stopping") : t("stopAndReask"),
     ),
+    stopNotice === null ? null : createElement("span", { className: "sr-hint" }, stopNotice),
     stopError === null ? null : createElement("span", { className: "sr-error" }, stopError),
   );
 }
@@ -1108,6 +1086,8 @@ function toggleRowElement(
 interface ActionSink {
   setBusy: (busy: boolean) => void;
   setError: (message: string | null) => void;
+  /** 半成功提示（可选）：停止重问「已入队但没停成」这类结果用中性文案呈现。 */
+  setNotice?: (message: string | null) => void;
 }
 
 /** 一次业务动作的通用 外壳（停止重问 / 编辑重发 / 重试 / 续写共用同一套
@@ -1125,6 +1105,7 @@ async function runAction(
   }
   sink.setBusy(true);
   sink.setError(null);
+  sink.setNotice?.(null);
   try {
     const result = await promiseFactory();
     sink.setBusy(false);
@@ -1132,6 +1113,7 @@ async function runAction(
       sink.setError(errText(result, t));
       return false;
     }
+    sink.setNotice?.(result.warning ?? null);
     return true;
   } catch (error) {
     sink.setBusy(false);
@@ -1315,6 +1297,8 @@ function RescueDockView(props: DockProps): ReactNode {
 
   const [busyStop, setBusyStop] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  // 半成功提示：cancel 被拒但重问已入队——既不是错误（动作生效了一半），也不能当成功静默。
+  const [stopNotice, setStopNotice] = useState<string | null>(null);
   // 停止重问的草稿态：先改文本再停，预填最后一条用户消息（不再原样重发上一条）。
   const [stopEditing, setStopEditing] = useState(false);
   const [stopDraft, setStopDraft] = useState("");
@@ -1329,7 +1313,8 @@ function RescueDockView(props: DockProps): ReactNode {
   // hasContent 只控容器显隐，同一会话内常驻挂载（本地状态不丢）。
   const decision = decideDockState(
     {
-      canStopReask,
+      // 草稿/错误在 cancel 生效后仍要占容器：running 已经翻假，但那一块还在渲染。
+      stopReaskVisible: canStopReask || stopEditing,
       hostActionFailed: host.error !== null,
       // hero 空态（转录空且未在跑）不算已开始：开关行随 ③ 决策隐藏。
       sessionStarted: view.nodes.length > 0 || view.running,
@@ -1365,24 +1350,27 @@ function RescueDockView(props: DockProps): ReactNode {
   }, [sessionBlocked, sessionId]);
 
   // 运行态结束（canStopReask 变假）即收起草稿：下一轮展开时按当时的最后消息重新
-  // 预填，不带着上一轮的旧文本。
+  // 预填，不带着上一轮的旧文本。两个「还没结算完」的窗口除外：cancel 已生效而重问
+  // 还在路上（busyStop）、重问发送失败（stopError）——这两种情况下收起会把草稿和
+  // 错误一起藏掉，用户看到的就是「回合停了、重问不知道去哪了」。
   useEffect(() => {
-    if (!canStopReask) {
+    if (!canStopReask && !busyStop && stopError === null) {
       setStopEditing(false);
     }
-  }, [canStopReask]);
+  }, [canStopReask, busyStop, stopError]);
 
   const doStopReask = async (reaskText: string): Promise<void> => {
-    const ok = await runAction(busyStop, { setBusy: setBusyStop, setError: setStopError }, t, () =>
-      actions.stopAndReask(sessionId, reaskText),
+    const ok = await runAction(
+      busyStop,
+      { setBusy: setBusyStop, setError: setStopError, setNotice: setStopNotice },
+      t,
+      () => actions.stopAndReask(sessionId, reaskText),
     );
     // 只在成功后收起：失败时草稿留在原地，错误行就地显示，用户改完再试。
     if (ok) {
       setStopEditing(false);
     }
   };
-
-  const children: ReactNode[] = [];
 
   const banner = bannerElement(
     pending,
@@ -1392,41 +1380,43 @@ function RescueDockView(props: DockProps): ReactNode {
     },
     t,
   );
-  if (banner !== null) {
-    children.push(banner);
-  }
+  const children: ReactNode[] = banner === null ? [] : [banner];
 
-  if (canStopReask) {
+  // 草稿可见性：运行中照常；cancel 生效后则等到在途/错误结算——否则失败提示会
+  // 随着 running 翻假一起消失。自然结束（无 busy、无错误）仍立即收起，不留一帧。
+  const showStopDraft = stopEditing && (canStopReask || busyStop || stopError !== null);
+  if (showStopDraft) {
+    children.push(
+      stopReaskDraftElement({
+        draft: stopDraft,
+        busyStop,
+        stopError,
+        onDraft: setStopDraft,
+        onConfirm: () => void doStopReask(stopDraft),
+        onCancel: () => {
+          setStopError(null);
+          setStopNotice(null);
+          setStopEditing(false);
+        },
+        t,
+      }),
+    );
+  } else if (canStopReask) {
     // canStopReask 是 `view.running && lastText !== null` 的 const 别名，
-    // TS 据此把 lastText 收窄为 string（两条分支内的使用因此都不必再判空）。
-    if (stopEditing) {
-      children.push(
-        stopReaskDraftElement({
-          draft: stopDraft,
-          busyStop,
-          stopError,
-          onDraft: setStopDraft,
-          onConfirm: () => void doStopReask(stopDraft),
-          onCancel: () => {
-            setStopError(null);
-            setStopEditing(false);
-          },
-          t,
-        }),
-      );
-    } else {
-      children.push(
-        stopReaskElement(
-          busyStop,
-          stopError,
-          () => {
-            setStopDraft(lastText);
-            setStopEditing(true);
-          },
-          t,
-        ),
-      );
-    }
+    // TS 据此把 lastText 收窄为 string（这里的使用因此不必再判空）。
+    children.push(
+      stopReaskElement(
+        busyStop,
+        stopError,
+        stopNotice,
+        () => {
+          setStopNotice(null);
+          setStopDraft(lastText);
+          setStopEditing(true);
+        },
+        t,
+      ),
+    );
   }
 
   // 开关行三态：on=开启 / off=已关闭 / unknown=快照未就绪（中性"—"，按钮禁用）
@@ -2652,7 +2642,10 @@ function apply(ctx: ClientCtx): void {
     return;
   }
 
-  rescueState.reader = createRescueReader(ctx);
+  // 只造一个读取器：每个读取器各自 `$mount` 同一批 descriptor，第二次挂载会被宿主
+  // 以 "direct method sessionRescue/state is already mounted" 拒绝，重问就走不到 RPC。
+  const reader = createRescueReader(ctx);
+  rescueState.reader = reader;
 
   // 连接感知：重连就绪时通知 host 恢复挂起的自动续跑定时器。
   notifyHostConnected(ctx);
@@ -2679,7 +2672,7 @@ function apply(ctx: ClientCtx): void {
 
   // 官方 `Context['get']` 对已声明的服务名直接交出 `UiWorkspace | undefined`
   //（installed cordis/lib/types/reflect.d.ts:14），无需断言也无需本地投影。
-  const actions = createActions(ctx.sessions, () => ctx.get("uiWorkspace"), t);
+  const actions = createActions(ctx.sessions, () => ctx.get("uiWorkspace"), reader, t);
 
   // 注册不加静默 try/catch：失败必须可见（chat-recovery 静默吞错是反模式）
   // 会话级三件在 dock（conversation.input.dock，list 槽）：order 30 排在官方 queue(20)

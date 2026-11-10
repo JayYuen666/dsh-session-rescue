@@ -57,7 +57,7 @@
 - **请求级最后一级限流重试**：监听 `agent/request-error`（waterfall），**先问下游、无人接再自己来**（与官方 `llm-retry` 的 `always` 模式同款）。下游交回重试决策（官方策略愿意接的失败）就原样采纳；下游放行（失败码不在策略码表——默认码表不含 `QUOTA`、次数耗尽、`Retry-After` 超过策略上限等）才由本包返回 `{ kind: "retry" }`，让宿主在同一回合重发该请求。profile 未装 `dsh-llm-retry` 时，本包阶梯就是限流失败的唯一请求级恢复路径。
   - 固定退避阶梯（默认 2s / 5s / 10s / 20s / 30s，同一回合内最多 `requestRetryMax` 次——部署值）；provider 的 `Retry-After` 优先于阶梯，超过本包封顶（默认 30s）的就不等、请求按终态收束。回合统一处理即重置计数。
   - 「宿主有没有解析出 `retryPolicy`」不能当分工线：llm 注册表对未配置的 provider 会补一份默认策略，那个判据恒真。真正的分工信号是下游 waterfall 的决策本身。
-- **两处手动接续入口**：回合尾部的操作行（`conversation.chat.turnTail`，与一方 deliverables / plan / schedule 同栈）放编辑重发（本会话）/ Fork 重发（新分支）/ 手动重试 / 发送续写，外加崩溃恢复的「继续中断的回合」——宿主崩溃修复给孤儿回合补写 `interrupted` 闭合标记后，那一格出一个**纯手动**的恢复按钮；输入框上方的 dock 只留会话级三件：续跑倒计时横幅 / 停止并重问 / 每会话开关。停止重问先把你的重问入队再 cancel，消息不会因取消丢失，且停止前可先改文本（预填最后一条消息）；宿主内置重试进行中时，重试按钮整个隐藏——composer 主按钮此刻已是「继续生成」，两个可用入口并存没有增量信息。
+- **两处手动接续入口**：回合尾部的操作行（`conversation.chat.turnTail`，与一方 deliverables / plan / schedule 同栈）放编辑重发（本会话）/ Fork 重发（新分支）/ 手动重试 / 发送续写，外加崩溃恢复的「继续中断的回合」——宿主崩溃修复给孤儿回合补写 `interrupted` 闭合标记后，那一格出一个**纯手动**的恢复按钮；输入框上方的 dock 只留会话级三件：续跑倒计时横幅 / 停止并重问 / 每会话开关。停止重问优先走宿主侧 `reask` Remote 方法：`cancel(keepInbox)` 后用 `agent.inbox.prepend` 把重问插到 `next-turn` 队首，再以一条只负责唤醒的空消息触发 driver 并立即移除——严格插队，不受客户端 prompt 只有 queue/steer 的限制。宿主读取面缺席时回退客户端路径：先 cancel 再入队（反序会停在排队区），cancel 成功后等会话确认 idle（上限 2 秒），idle 时用 `steer`、超时回退 `queue`。两条路径都在 cancel 被拒时仍入队，dock 用中性提示说明「停止本轮未生效」；`requestId` 在结果不明的失败重试里复用，客户端与宿主各自去重。停止前可先改文本（预填最后一条消息）；宿主内置重试进行中时，重试按钮整个隐藏——composer 主按钮此刻已是「继续生成」，两个可用入口并存没有增量信息。
 - **接续耗尽升级提示**：配额耗尽不再只写日志——frame 级悬浮层弹一次「本会话自动接续已用尽（类别）」，正常完成一回合（补跑则是清单闭合）后自动恢复，下次耗尽再报。
 - **可选的插话续跑（默认关）**：设置卡打开后，回合将收尾而该回合自己写的清单仍未闭合时，先经 `agent.steer` 在**同一回合内**续做，而不是收尾后再补跑；与待办补跑共用 `maxUnfinished` 配额，防失控语义同轨。
 - **连接感知**：发送失败的注入（传输类故障）不丢弃而是挂起，横幅显示「重连后自动续跑」，连接恢复后按剩余延迟重新武装。
@@ -158,7 +158,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 ## <img src="https://api.iconify.design/lucide/network.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 对外接口
 
-官方 Typert Remote 命名空间 `sessionRescue` 的六个方法。参数走 strict codec，结果走 `src-json`。
+官方 Typert Remote 命名空间 `sessionRescue` 的七个方法。参数走 strict codec，结果走 `src-json`。
 
 | 方法 | 入参 | 应答 |
 |---|---|---|
@@ -166,11 +166,12 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 | `cancel` | `{ sessionId }` | 取消该会话的待办注入，挂起中的也算 |
 | `toggle` | `{ sessionId }` | 翻转每会话开关；关掉的同时取消待办。台账满且无死会话可淘汰时答 409 |
 | `resume` | — | 重连后恢复挂起的注入；`ok` 加恢复条数 |
+| `reask` | `{ sessionId, text, requestId }` | 宿主侧停止重问：`cancel(keepInbox)` 后把重问插到 `next-turn` 队首并唤醒；同一 `requestId` 的重试答 `duplicate` 不重复入队 |
 | `retryProviders` | — | 官方 `llm-pi-ai` 的 providers 及重试模式 / 次数 / 配额覆盖 / 现行码表；该命名空间不可用时答 503 |
 | `retryPolicy` | `{ provider, preset, retryableCodes? }` | 经 `settings.mutate` 写 `providers.<name>.retryPolicy`（档位 `default` / `enhanced` / `always` / `off` / `custom`）；`enhanced` 保留现行码表，`custom` 只替换 `retryableCodes`；版本冲突答 409 |
 
 - 拒绝应答里的 `status` 是保留的语义码，不是本包任何路由的 HTTP 状态——路由根本不存在。
-- 模型可见的唯一产物：一条经 `agent.followup()` 发出的 `role: "user"` 消息，id 形如 `session-rescue-<时间戳>-<序号>`，正文取自固定模板。本包不自建第二套重试配置。
+- 模型可见的产物：自动接续的一条经 `agent.followup()` 发出的 `role: "user"` 消息（id 形如 `session-rescue-<时间戳>-<序号>`，正文取自固定模板），以及你在「停止并重问」里提交的那条用户消息。本包不自建第二套重试配置。
 - 可选 `lessonLoop` 总线：在场时收到 `transient-failure`、`unclassified-failure`、`max-tokens`、`unfinished-turn` 四类事实，并在同 provider 之后真跑完一个 `completed` 回合时补一条 `pass`。总线缺席或抛错只 warn，主流程从不依赖它。
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私

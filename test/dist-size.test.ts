@@ -29,7 +29,9 @@ const HOST_BUDGET_BYTES = 144_000;
 // client.js（实测增加约 18 KB），预算按迁移后的实量重定。
 // 0.1.11：设置卡新增按 provider 的自定义码表编辑（ListField + 保存按钮 + 提示），
 // 实测约 120.8 KB；预算按实量上沿重定为 124 KB。
-const CLIENT_BUDGET_BYTES = 124_000;
+// 0.1.12：停止重问编排迁入 lib/reask-action.ts（cancel 收敛等待 + requestId 幂等台账
+// + steer 插队 + 半成功提示 + host reask 路径），实测 128,012 B；预算按实量上沿重定为 130 KB。
+const CLIENT_BUDGET_BYTES = 130_000;
 /** `types/` 入口声明体积预算：整目录进 `files`，体积会计进 tarball。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 35_000;
 

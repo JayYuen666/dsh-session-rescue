@@ -4,6 +4,21 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.12
+
+修复「停止并重问」在宿主真实取消语义下的发送问题：重问不再停在排队区，取消后的失败也不再静默丢草稿。
+
+### Fixed
+
+- **停止重问改为先 cancel 再入队**（`src/client-entry.ts` + `lib/reask-action.ts`）：宿主驱动只重放 cancel 之后到达的唤醒（`wakeRequested`），旧顺序把重问留在 `inbox.next-turn`，模型停止后不会自己发出，只会等下一次唤醒。
+- **cancel 被拒时仍入队并给半成功提示**：cancel 返回失败或请求本身抛错时，重问照样入队（当前回合还在跑，只能 `queue`），dock 以中性提示说明「停止本轮未生效」并收起草稿；只有在重问也失败时才保留草稿与红色错误。
+- **宿主侧严格插队（新 Remote 方法 `reask`）**：宿主拿到 agent 后 `cancel(keepInbox)`，用 `agent.inbox.prepend('next-turn')` 把重问放到队首，再以一条只负责唤醒的空消息触发 driver 并立即移除。客户端优先走这条；宿主 Remote 缺席时回退客户端路径。
+- **客户端回退：收敛等待与 steer**：cancel 成功后等会话快照 `running=false`（上限 2 秒），确认 idle 时用 `steer` 让重问先于已有排队回合被 claim；超时未收敛回退 `queue`，由宿主的 abort 收尾唤醒它。
+- **停止重问的 requestId 幂等**：客户端在结果不明的失败重试里复用同一身份；宿主 `reask` 按 `(sessionId, requestId)` 去重（最近 200 会话 × 8 条），客户端回退路径经 `beginSubmission` 生成身份。文本改动或宿主明确拒绝才换新身份。
+- **回归测试**：客户端钉住 host 路径优先级、requestId 复用、取消失败的半成功与 fallback；宿主单测钉住 prepend → 唤醒 → 移除、去重台账；集成层用真 AgentLoop 钉住「先入队再 cancel 会停在 inbox、cancel 后再入队才会被唤醒、idle 后 steer 会排在已有排队回合之前」。
+- **沙箱实测修复：Remote 读取器只创建一次**（`src/client-entry.ts`）：`apply` 原先给 `rescueState.reader` 与 dock 动作各造一个读取器，两边各自 `$mount` 同一批 descriptor，第二次被宿主以 `direct method sessionRescue/state is already mounted` 拒绝，点击确认后发不出 `reask`。现在只造一个并共用。
+- **产物体积预算**：`client.js` 实测 128,019 B，预算由 124,000 B 重定为 130,000 B（新增停止重问编排与幂等台账）。
+
 ## 0.1.11
 
 一轮围绕「重试码表不被预设误删」的修正：`enhanced` 从整表替换改为并集，设置卡新增按 provider 编辑自定义重试码；请求级/回合级判定逻辑不变。

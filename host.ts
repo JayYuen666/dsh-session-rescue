@@ -79,6 +79,8 @@ import { MAX_RESUMES_REASON, rescueKindOf, ResumeScheduler } from "./lib/resume-
 import type { PendingRecord, RescueKind, TimerDisposer } from "./lib/resume-scheduler.ts";
 import { reviewLastTurn, reviewOpenTurn } from "./lib/turn-review.ts";
 import type { OpenTurnReview, TurnReview } from "./lib/turn-review.ts";
+// host 侧停止重问：cancel → inbox.prepend(next-turn) → 唤醒（见 lib/reask-host.ts）。
+import { performHostReask, ReaskSeen } from "./lib/reask-host.ts";
 // 回合事实投影：投影单元 + 读侧换算 + 回退扫描（见 lib/turn-facts.ts）。
 import {
   asFacts,
@@ -282,12 +284,11 @@ export type SessionEventsLike = Pick<Session, "id"> &
  * - `status` 就此是官方 `AgentStatus = 'idle' | 'running'`（runtime-types.d.ts:90，
  *   先例：quality-gate/host.ts:201 同款绑定），`agent.status !== "idle"` 那两道判定照旧
  *   成立（闭合集上的比较不会因为换成官方联合而变宽或变窄）。
- * - `options` / `status` / `inbox` 按可缺失收（宿主载荷），`inbox` 只取官方 `Inbox` 的两个
- *   只读队列（见 RescueInbox），不带 clear/append/prepend/replace/remove/splice 六条写口
- *   ——本插件只读待办，从不改待办。
+ * - `options` / `status` / `inbox` 按可缺失收（宿主载荷），`inbox` 取官方 `Inbox` 的两个
+ *   只读队列与停止重问用到的 prepend/remove 两位（见 RescueInbox）；自动接续从不改待办。
  * - `session` 用本包的 Partial 投影而不是官方 `Session` 整类（名义类，见上）。
  */
-export interface RescueAgent extends Pick<Agent, "id" | "followup" | "steer"> {
+export interface RescueAgent extends Pick<Agent, "id" | "followup" | "steer" | "cancel"> {
   options?: Agent["options"] | null;
   /** 模型选择的实际类型。旧宿主运行时没有这一位（读成 `undefined`），故按可选收。 */
   model?: Agent["model"] | null;
@@ -700,11 +701,14 @@ function openerKindOf(
  *  **必填**的 `readonly UserMessage[]`）。元素/数组形状仍钉回官方声明（`Inbox["nextTurn"]`），
  *  只在「这一位是否缺失」上按运行时放宽：这里跨的是宿主进程边界，Inbox 自 0.1.5-alpha.1
  *  才统一成类型接口，旧宿主与夹具交回的对象可以缺任一位——守卫 `?.length ?? 0` 的
- *  运行时意义不因官方必选而消失（见 inboxHasPending）。只读这两位：官方 `Inbox` 另有
- *  clear/append/prepend/replace/remove/splice 六条写口，本插件只读不改。 */
+ *  运行时意义不因官方必选而消失（见 inboxHasPending）。自动接续只读前两位；停止重问
+ *  额外用 prepend/remove 改队列（见 lib/reask-host.ts）。 */
 export interface RescueInbox {
   readonly nextTurn?: Inbox["nextTurn"] | undefined;
   readonly nextStep?: Inbox["nextStep"] | undefined;
+  /** 停止重问的 host 侧写口：把重问插到 next-turn 队首，并清理唤醒用的临时消息。 */
+  readonly prepend?: Inbox["prepend"] | undefined;
+  readonly remove?: Inbox["remove"] | undefined;
 }
 
 /**
@@ -899,6 +903,8 @@ interface ApplyRuntime {
   capacityWarned: { value: boolean };
   msgSeq: { value: number };
   suspendedSnapshots: { value: SuspendedItem[] };
+  /** 停止重问的 requestId 去重台账：同一次结果不明的重试复用身份，宿主据此拒绝重复入队。 */
+  reaskSeen: ReaskSeen;
   /** 待兑 lesson-loop pass 的瞬时失败台账（有界，见 rememberTransientFailure）。
    *  用 { value } 箱与 suspendedSnapshots 同型：整体替换后各处读到的仍是同一份。 */
   transientPasses: { value: TransientPassItem[] };
@@ -1177,6 +1183,7 @@ function handleAgentDisposed(
   runtime.requestRetryCounts.delete(sid);
   runtime.requestProviders.delete(sid);
   runtime.disabledSessions.delete(sid);
+  runtime.reaskSeen.forget(sid);
   runtime.factsRejections.delete(sid);
   runtime.blocked.delete(sid);
   // 未兑的 pass 记录一并撤销：会话都没了，"之后跑成功"永不可能发生，
@@ -2363,7 +2370,8 @@ const MISSING_SESSION_ID = "missing sessionId";
 export const RESCUE_REMOTE_NAMESPACE = "sessionRescue";
 
 /**
- * 设置卡读取接口（官方 Typert Remote）：六条方法，取代原先的 HTTP 端点（旧数据那一栏已删除）。
+ * 设置卡读取接口（官方 Typert Remote）：七条方法，取代原先的 HTTP 端点（旧数据那一栏已删除）。
+ * `reask` 是宿主侧停止重问：客户端 prompt 只有 queue/steer，无法把消息放到 next-turn 队首。
  */
 export class SessionRescueRemoteService extends TypertRemoteService {
   private readonly runtime: ApplyRuntime;
@@ -2420,6 +2428,43 @@ export class SessionRescueRemoteService extends TypertRemoteService {
     const restored = this.runtime.suspendedSnapshots.value.length;
     resumeAfterReconnect(this.runtime);
     return { ok: true, restored };
+  }
+
+  /**
+   * 停止并重问：cancel(keepInbox) → inbox.prepend(next-turn) → 唤醒。
+   * `requestId` 由客户端在同一次操作的重试里复用；宿主只记成功插入过的身份，
+   * 因此「宿主已插入但响应丢失」的重试不会变成两条。
+   */
+  public reask(request: {
+    sessionId: string;
+    text: string;
+    requestId: string;
+  }): Record<string, unknown> {
+    const body: Record<string, unknown> = isRecord(request) ? request : {};
+    const sessionId = typeof body["sessionId"] === "string" ? body["sessionId"].trim() : "";
+    const text = typeof body["text"] === "string" ? body["text"] : "";
+    const requestId = typeof body["requestId"] === "string" ? body["requestId"].trim() : "";
+    if (sessionId === "" || text.trim() === "" || requestId === "") {
+      return { ok: false, error: "sessionId, text and requestId required", status: 400 };
+    }
+    if (this.runtime.reaskSeen.has(sessionId, requestId)) {
+      return { ok: true, duplicate: true };
+    }
+    const agent = findAgent(this.runtime, sessionId);
+    if (agent === null) {
+      return { ok: false, error: "session-unavailable", status: 404 };
+    }
+    const result = performHostReask(agent, text, () => {
+      this.runtime.msgSeq.value += 1;
+      return brandString<MessageId>(
+        `${PLUGIN_NAME}-reask-${Date.now()}-${this.runtime.msgSeq.value}`,
+      );
+    });
+    if (!result.ok) {
+      return { ok: false, error: result.error, status: 500 };
+    }
+    this.runtime.reaskSeen.add(sessionId, requestId);
+    return result.warning === undefined ? { ok: true } : { ok: true, warning: result.warning };
   }
 
   public retryProviders(): Record<string, unknown> {
@@ -2515,6 +2560,7 @@ markRemote(SessionRescueRemoteService.prototype, "state");
 markRemote(SessionRescueRemoteService.prototype, "cancel");
 markRemote(SessionRescueRemoteService.prototype, "toggle");
 markRemote(SessionRescueRemoteService.prototype, "resume");
+markRemote(SessionRescueRemoteService.prototype, "reask");
 markRemote(SessionRescueRemoteService.prototype, "retryProviders");
 markRemote(SessionRescueRemoteService.prototype, "retryPolicy");
 
@@ -2668,6 +2714,7 @@ function apply(ctx: Context, config: PluginConfig): void {
     capacityWarned: { value: false },
     msgSeq: { value: 0 },
     suspendedSnapshots: { value: [] },
+    reaskSeen: new ReaskSeen(),
     transientPasses: { value: [] },
     facts: { value: undefined },
     // **缺席不缓存**：locale 条目可能晚于本条目才到位，缓存一次缺席就把语言跟随永久

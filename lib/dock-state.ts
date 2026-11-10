@@ -173,8 +173,8 @@ export function parseStateBody(parsed: Record<string, unknown>): RescueStateBody
  *  回合级动作（编辑/重试/续写）已迁往 turnTail 条目，不再进 dock 的显隐判据。
  *  三位都与轮询快照是否在场无关——它们一旦为真，容器就必须显形。 */
 export interface DockActionSignals {
-  /** 「停止并重新提问」：会话在跑且有一条可复发的用户文本。 */
-  readonly canStopReask: boolean;
+  /** 「停止并重新提问」区块可见：回合在跑，或 cancel 已生效后草稿/错误仍留在原地。 */
+  readonly stopReaskVisible: boolean;
   /** host 写通道（取消/开关）刚失败，错误行正在渲染。 */
   readonly hostActionFailed: boolean;
   /** 会话已有内容（转录非空或回合在跑）。hero 空态（一条消息都没发过）为
@@ -243,6 +243,6 @@ export function decideDockState(
   // `hostActionFailed` 尤其要紧——那正是「用户按了取消但宿主拒绝了」的那一刻，
   // 此时 pending 可能已经不在，唯一要说的就是那行错误。
   const hasContent =
-    pending !== null || actions.canStopReask || actions.hostActionFailed || showToggleRow;
+    pending !== null || actions.stopReaskVisible || actions.hostActionFailed || showToggleRow;
   return { rescueKnown, pending, toggle, showToggleRow, hasContent };
 }

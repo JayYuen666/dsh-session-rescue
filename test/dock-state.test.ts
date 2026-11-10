@@ -8,7 +8,7 @@ import type { DockActionSignals, RescueStateBody, RescueSessionState } from "../
 
 /** 全部信号位关（hero 空态：会话未开始）。 */
 const NO_ACTIONS: DockActionSignals = {
-  canStopReask: false,
+  stopReaskVisible: false,
   hostActionFailed: false,
   sessionStarted: false,
 };
@@ -45,7 +45,7 @@ describe("decideDockState：快照未就绪（首帧 rescue=null）", () => {
   });
 
   it("快照未就绪但实时动作位在 → 区域仍显示内容", () => {
-    const decisionStop = decideDockState(oneAction("canStopReask"), null, sessionId);
+    const decisionStop = decideDockState(oneAction("stopReaskVisible"), null, sessionId);
     assert.equal(decisionStop.hasContent, true, "停止重问按钮是实时状态，不该被轮询空窗吞掉");
   });
 });
@@ -214,7 +214,7 @@ describe("decideDockState：pending 与 hasContent 合并", () => {
   it("快照空窗 + 无 pending，但任一实时位亮 → 容器必须显形", () => {
     // 实时位的可用性只取决于实时 view，与快照在不在场无关。旧判据漏算实时位：
     // 容器 hidden，而容器里那行内容本该在——用户看到的就是「有话要说却整块消失」，
-    // 尤其是 /state 一直读不通的那种部署。canStopReask 在「快照未就绪」一节单独亮过，
+    // 尤其是 /state 一直读不通的那种部署。stopReaskVisible 在「快照未就绪」一节单独亮过，
     // 这里补齐 hostActionFailed。
     for (const key of ["hostActionFailed"] as const) {
       const decision = decideDockState(oneAction(key), null, sessionId);

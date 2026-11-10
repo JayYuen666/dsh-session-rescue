@@ -41,14 +41,14 @@ const wireSessionsArbitrary = fc.oneof(
 );
 
 const NO_ACTIONS: DockActionSignals = {
-  canStopReask: false,
+  stopReaskVisible: false,
   hostActionFailed: false,
   sessionStarted: true,
 };
 
 function actionsOf(flags: boolean[]): DockActionSignals {
   return {
-    canStopReask: flags[0] === true,
+    stopReaskVisible: flags[0] === true,
     hostActionFailed: flags[1] === true,
     sessionStarted: true,
   };
@@ -287,7 +287,7 @@ describe("dock 渲染决策（信号组合）", () => {
         const anyBlock =
           decision.pending !== null ||
           decision.showToggleRow ||
-          actions.canStopReask ||
+          actions.stopReaskVisible ||
           actions.hostActionFailed;
         assert.equal(decision.hasContent, anyBlock, "hasContent 必须恰等于「有区块要渲染」");
         // 快照未就绪时 toggle 只能是中性态、开关行只能是隐藏（把「还没同步到」显示成

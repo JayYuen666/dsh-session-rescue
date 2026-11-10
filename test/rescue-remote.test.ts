@@ -1,5 +1,5 @@
 // 客户端读取接口（官方 Typert Remote）的直测：descriptor 与宿主标记对质、边界码器、
-// 命名空间缺口的报错内容，以及六个读方法的位置传参。真实卡片链路在 test/client-ui.test.ts。
+// 命名空间缺口的报错内容，以及七个读方法的位置传参。真实卡片链路在 test/client-ui.test.ts。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { Context } from "@deepseek-ai/cordis";
@@ -75,6 +75,10 @@ function namespaceOf(overrides: Record<string, unknown> = {}): {
       return { ok: true, value: { disabled: true } };
     },
     resume: ok("resume", { restored: 1 }),
+    reask: async (request: unknown) => {
+      calls.push({ method: "reask", args: [request] });
+      return { ok: true, value: { ok: true } };
+    },
     retryProviders: ok("retryProviders", { providers: [] }),
     retryPolicy: async (request: unknown) => {
       calls.push({ method: "retryPolicy", args: [request] });
@@ -113,7 +117,7 @@ function readerOf(
 }
 
 describe("客户端读取接口（官方 Typert Remote）", () => {
-  it("六条 descriptor 与宿主标记逐项对质", () => {
+  it("七条 descriptor 与宿主标记逐项对质", () => {
     const service = new SessionRescueRemoteService(new Context(), runtimeOf() as never);
     const markers = remoteMethods(service)
       .map((marker) => marker.method)
@@ -191,6 +195,24 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
         /non-empty string provider and preset|policy/u,
       );
     }
+
+    const reask = strictOf("reask");
+    assert.deepEqual(
+      reask
+        .create()
+        .parse({ sessionId: " s1 ", text: "  换个问法  ", requestId: " r1 ", extra: 1 }),
+      { sessionId: "s1", text: "  换个问法  ", requestId: "r1" },
+    );
+    for (const bad of [
+      null,
+      {},
+      { sessionId: "s1", text: "   ", requestId: "r1" },
+      { sessionId: "", text: "hi", requestId: "r1" },
+      { sessionId: "s1", text: "hi", requestId: "  " },
+      { sessionId: 1, text: "hi", requestId: "r1" },
+    ]) {
+      assert.throws(() => reask.create().parse(bad), /reask request requires/u);
+    }
   });
 
   it("宿主上下文没有注册口 → 只少掉读取接口，不抛错", () => {
@@ -203,20 +225,22 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
     assert.equal(createRescueReader({ get: () => ({ $mount: 42 }) }), undefined);
   });
 
-  it("六个读方法只挂一次命名空间，并把参数按位置传下去", async () => {
+  it("七个读方法只挂一次命名空间，并把参数按位置传下去", async () => {
     const { namespace, calls } = namespaceOf();
     const { reader, mounts } = readerOf(namespace);
     assert.deepEqual(await reader.state(), { sessions: { s1: { status: "running" } } });
     assert.deepEqual(await reader.cancel("s1"), { cancelled: true });
     assert.deepEqual(await reader.toggle("s1"), { disabled: true });
     assert.deepEqual(await reader.resume(), { restored: 1 });
+    assert.ok(reader.reask !== undefined, "reask 读方法在位");
+    assert.deepEqual(await reader.reask("s1", "换个问法", "r1"), { ok: true });
     assert.deepEqual(await reader.retryProviders(), { providers: [] });
     assert.deepEqual(await reader.retryPolicy("p", "normal"), {
       provider: "p",
       preset: "normal",
     });
-    assert.equal(mounts.length, 1, "六次调用共用同一次 $mount");
-    // $mount 的载荷就是网关注册命名空间的契约：包名写错或描述符传空时，六个读方法
+    assert.equal(mounts.length, 1, "七次调用共用同一次 $mount");
+    // $mount 的载荷就是网关注册命名空间的契约：包名写错或描述符传空时，七个读方法
     // 会静默不可用——两枚字段在此点名。
     const contribution = mounts[0] as { package?: unknown; descriptors?: unknown };
     assert.equal(contribution.package, PACKAGE_NAME, "$mount 上报的包名");
@@ -226,9 +250,20 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
       { method: "cancel", args: [{ sessionId: "s1" }] },
       { method: "toggle", args: [{ sessionId: "s1" }] },
       { method: "resume", args: [] },
+      { method: "reask", args: [{ sessionId: "s1", text: "换个问法", requestId: "r1" }] },
       { method: "retryProviders", args: [] },
       { method: "retryPolicy", args: [{ provider: "p", preset: "normal" }] },
     ]);
+  });
+
+  it("旧宿主没有 reask 方法：只有该调用报错，其余读方法照常", async () => {
+    const { namespace } = namespaceOf();
+    const { reader } = readerOf({ ...namespace, reask: undefined });
+    await assert.rejects(
+      reader.reask?.("s1", "hi", "r1") ?? Promise.resolve(),
+      /sessionRescue\.reask is not available/u,
+    );
+    assert.deepEqual(await reader.state(), { sessions: { s1: { status: "running" } } });
   });
 
   it("retryPolicy 携带自定义码表时，码表随请求原样传给宿主", async () => {
@@ -251,7 +286,10 @@ describe("客户端读取接口（官方 Typert Remote）", () => {
     const broken: unknown[] = [undefined, null, "not-a-namespace", {}, { state: 42 }];
     const { namespace } = namespaceOf();
     for (const key of Object.keys(namespace)) {
-      broken.push({ ...namespace, [key]: 42 });
+      // reask 是可选方法：缺它不影响其余读方法的命名空间判定，单独由下一条用例覆盖。
+      if (key !== "reask") {
+        broken.push({ ...namespace, [key]: 42 });
+      }
     }
     const readers = broken.map((candidate) => readerOf(candidate).reader);
     await Promise.all(

@@ -2,6 +2,7 @@ import { describe, it, beforeEach } from "vitest";
 import { logged } from "./setup-logs.ts";
 import assert from "node:assert/strict";
 import plugin, { RESCUE_REMOTE_NAMESPACE, SessionRescueRemoteService } from "../host.ts";
+import { ReaskSeen } from "../lib/reask-host.ts";
 import { Context } from "@deepseek-ai/cordis";
 // 投影替身按读点现折会话事件流：真注册表逐事件增量折叠，同一串事件下与测试树的折叠入口
 // `foldEvents` 同值；它折的是生产那份 rescueFactsProjection 单元——替身与生产共用同一套 init/apply。
@@ -2858,6 +2859,18 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
   });
 });
 
+/** 只带 reask 所需 agent 的 Remote 服务（半成功与 inbox 不可写两条用例共用）。 */
+function remoteServiceWithAgent(agent: unknown): SessionRescueRemoteService {
+  return new SessionRescueRemoteService(new Context(), {
+    reaskSeen: new ReaskSeen(),
+    msgSeq: { value: 0 },
+    svc: {
+      get: (name: string): unknown =>
+        name === "agents" ? { get: () => agent, roots: () => [agent] } : undefined,
+    },
+  } as never);
+}
+
 describe("官方 Typert Remote 读取接口", () => {
   it("state/cancel/toggle/resume：与 HTTP 路由同一份运行时", () => {
     const ctx = createMockCtx();
@@ -2922,6 +2935,82 @@ describe("官方 Typert Remote 读取接口", () => {
       cancelled: true,
       turn: 7,
     });
+  });
+
+  it("reask：host 侧 cancel → prepend → 唤醒，按 requestId 去重", () => {
+    const calls: string[] = [];
+    const prepended: string[] = [];
+    const agent = {
+      cancel: (): void => {
+        calls.push("cancel");
+      },
+      followup: (): void => {
+        calls.push("followup");
+      },
+      inbox: {
+        prepend: (_target: string, message: { content?: readonly { text?: string }[] }): void => {
+          calls.push("prepend");
+          prepended.push(message.content?.[0]?.text ?? "");
+        },
+        remove: (): boolean => {
+          calls.push("remove");
+          return true;
+        },
+      },
+    };
+    const runtime = {
+      reaskSeen: new ReaskSeen(),
+      msgSeq: { value: 0 },
+      svc: {
+        get: (name: string): unknown =>
+          name === "agents" ? { get: () => agent, roots: () => [agent] } : undefined,
+      },
+    } as never;
+    const service = new SessionRescueRemoteService(new Context(), runtime);
+    assert.deepEqual(service.reask({ sessionId: "s1", text: "换个问法", requestId: "r1" }), {
+      ok: true,
+    });
+    assert.deepEqual(calls, ["cancel", "prepend", "followup", "remove"]);
+    assert.deepEqual(prepended, ["换个问法"]);
+    // 同一 requestId 的重试：宿主直接答 duplicate，不再插入。
+    calls.length = 0;
+    assert.deepEqual(service.reask({ sessionId: "s1", text: "换个问法", requestId: "r1" }), {
+      ok: true,
+      duplicate: true,
+    });
+    assert.deepEqual(calls, []);
+    // 入参缺失 → 400；非对象载荷 → 400（网关可交回裸 JSON）；找不到 agent → 404。
+    assert.equal(service.reask({ sessionId: "", text: "hi", requestId: "r2" })["status"], 400);
+    assert.equal(service.reask(null as never)["status"], 400);
+    const missing = new SessionRescueRemoteService(new Context(), {
+      reaskSeen: new ReaskSeen(),
+      msgSeq: { value: 0 },
+      svc: {
+        get: (name: string): unknown =>
+          name === "agents" ? { get: () => void 0, roots: () => [] } : undefined,
+      },
+    } as never);
+    assert.equal(missing.reask({ sessionId: "s1", text: "hi", requestId: "r3" })["status"], 404);
+  });
+
+  it("reask：cancel 抛错答半成功；inbox 不可写答 500", () => {
+    const warning = remoteServiceWithAgent({
+      cancel: (): void => {
+        throw new Error("cancel");
+      },
+      followup: (): void => void 0,
+      inbox: { prepend: (): void => void 0, remove: (): boolean => true },
+    });
+    assert.deepEqual(warning.reask({ sessionId: "s1", text: "hi", requestId: "r1" }), {
+      ok: true,
+      warning: "cancel-failed",
+    });
+    const broken = remoteServiceWithAgent({
+      cancel: (): void => void 0,
+      followup: (): void => void 0,
+      inbox: null,
+    });
+    assert.equal(broken.reask({ sessionId: "s1", text: "hi", requestId: "r2" })["status"], 500);
   });
 
   it("retryProviders 与 retryPolicy：成功、未知输入、冲突与写失败", async () => {

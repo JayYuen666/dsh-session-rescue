@@ -1,6 +1,6 @@
 // src/remote.ts —— 设置卡读写**宿主侧接续状态**的入口（官方 Typert Remote 的消费端）。
 //
-// 六条 HTTP 端点的方法版：state / cancel / toggle / resume / retryProviders / retryPolicy。
+// 七条 HTTP 端点的方法版：state / cancel / toggle / resume / reask / retryProviders / retryPolicy。
 // descriptor 手写、参数走 strict 形状校验，结果走 src-json；宿主侧由源模式按方法签名
 // 推参数名。`remote` 是可选读取接口：没有它时卡片照常渲染，只把数据那一栏显示为读不到。
 import type {
@@ -61,6 +61,24 @@ interface PolicyRequest {
   retryableCodes?: string[] | undefined;
 }
 
+const REASK_MESSAGE = "reask request requires non-empty string sessionId, text and requestId";
+const REASK_SCHEMA = z.object(
+  {
+    sessionId: z.string({ error: REASK_MESSAGE }).trim().min(1, { error: REASK_MESSAGE }),
+    text: z
+      .string({ error: REASK_MESSAGE })
+      .refine((value) => value.trim() !== "", { error: REASK_MESSAGE }),
+    requestId: z.string({ error: REASK_MESSAGE }).trim().min(1, { error: REASK_MESSAGE }),
+  },
+  { error: REASK_MESSAGE },
+);
+
+interface ReaskRequest {
+  sessionId: string;
+  text: string;
+  requestId: string;
+}
+
 const SESSION_CODEC: TypertCodec<{ sessionId: string }> = {
   mode: "strict",
   typeSymbol: `${PACKAGE_NAME}#session-request`,
@@ -77,6 +95,16 @@ const POLICY_CODEC: TypertCodec<PolicyRequest> = {
   create: () => ({
     parse(value: unknown): PolicyRequest {
       return parseOrThrow(POLICY_SCHEMA, value);
+    },
+  }),
+};
+
+const REASK_CODEC: TypertCodec<ReaskRequest> = {
+  mode: "strict",
+  typeSymbol: `${PACKAGE_NAME}#reask-request`,
+  create: () => ({
+    parse(value: unknown): ReaskRequest {
+      return parseOrThrow(REASK_SCHEMA, value);
     },
   }),
 };
@@ -119,6 +147,15 @@ export const RESCUE_DESCRIPTORS: readonly InvocationDescriptor[] = [
     result: { mode: "src-json" },
   },
   {
+    id: `${PACKAGE_NAME}#${RESCUE_NAMESPACE}/reask`,
+    service: RESCUE_NAMESPACE,
+    namespace: RESCUE_NAMESPACE,
+    method: "reask",
+    invocation: { kind: "direct" },
+    parameters: [{ name: "request", wire: "request", source: "json", codec: REASK_CODEC }],
+    result: { mode: "src-json" },
+  },
+  {
     id: `${PACKAGE_NAME}#${RESCUE_NAMESPACE}/retryProviders`,
     service: RESCUE_NAMESPACE,
     namespace: RESCUE_NAMESPACE,
@@ -143,6 +180,8 @@ export interface RescueReader {
   cancel: (sessionId: string) => Promise<unknown>;
   toggle: (sessionId: string) => Promise<unknown>;
   resume: () => Promise<unknown>;
+  /** 宿主侧停止重问（可选：旧宿主没有这条方法时退回客户端 steer 路径）。 */
+  reask?: (sessionId: string, text: string, requestId: string) => Promise<unknown>;
   retryProviders: () => Promise<unknown>;
   retryPolicy: (
     provider: string,
@@ -167,6 +206,8 @@ interface RescueNamespace {
   cancel: (request: { sessionId: string }) => Promise<RemoteResult<unknown>>;
   toggle: (request: { sessionId: string }) => Promise<RemoteResult<unknown>>;
   resume: () => Promise<RemoteResult<unknown>>;
+  /** 可选：旧宿主没有这条方法。 */
+  reask?: (request: ReaskRequest) => Promise<RemoteResult<unknown>>;
   retryProviders: () => Promise<RemoteResult<unknown>>;
   retryPolicy: (request: PolicyRequest) => Promise<RemoteResult<unknown>>;
 }
@@ -220,7 +261,7 @@ function buildRescueReader(ctx: RemoteHost, remote: RemoteMounter): RescueReader
     }
     return namespace;
   };
-  // 六个端点共用的那段「取命名空间 → 调用 → unwrap」：模板只剩一次，新增/删除端点时
+  // 七个端点共用的那段「取命名空间 → 调用 → unwrap」：模板只剩一次，新增/删除端点时
   // 不会漏掉其中一步（少 unwrap 会把 {ok:false} 当成功值交给调用方，少 namespaceOf 就
   // 直接调到一个还没挂上的对象）。每个端点的差异只剩「调哪个方法、传什么参数」。
   const invoke = async (
@@ -234,6 +275,13 @@ function buildRescueReader(ctx: RemoteHost, remote: RemoteMounter): RescueReader
     cancel: async (sessionId) => invoke((namespace) => namespace.cancel({ sessionId })),
     toggle: async (sessionId) => invoke((namespace) => namespace.toggle({ sessionId })),
     resume: async () => invoke((namespace) => namespace.resume()),
+    reask: async (sessionId, text, requestId) =>
+      invoke(async (namespace) => {
+        if (typeof namespace.reask !== "function") {
+          throw new TypeError("sessionRescue.reask is not available on this host");
+        }
+        return namespace.reask({ sessionId, text, requestId });
+      }),
     retryProviders: async () => invoke((namespace) => namespace.retryProviders()),
     retryPolicy: async (provider, preset, retryableCodes) =>
       invoke((namespace) =>

@@ -23,6 +23,7 @@ import {
   MAX_LAST_TOASTED,
   TOAST_HOLD_MS,
   stopReaskElement,
+  createActions,
   nextPollMs,
   backoffMs,
   ACTIVE_POLL_MS,
@@ -38,7 +39,16 @@ import { patchEntryId } from "./config-refs.ts";
 // 卡片槽位 key 的唯一来源测试替身：bundle 包名直接读 ~/.dsh/profiles/web/package.json。
 import { profileBundleName } from "./profile-bundle.ts";
 import type { RescueStateBody } from "../lib/dock-state.ts";
+import {
+  awaitSessionIdle,
+  createHostReaskLedger,
+  createReaskLedger,
+  reaskViaHost,
+} from "../lib/reask-action.ts";
+import type { ReaskRequest } from "../lib/reask-action.ts";
 import type { RescueReader } from "../src/remote.ts";
+import { brandString } from "@deepseek-ai/dsh-brand";
+import type { SessionId } from "@deepseek-ai/dsh-session/types";
 // 注册 ns 在本文件写字面量：src/ui-messages.ts 那枚本源经 `LocaleNs` 标注钉在
 // client-entry.ts 的 `NS` 上（分叉即编译期红），断言若再 import 本源就成了同义反复；
 // 写真串才是「运行时注册的到底是哪个命名空间」的判据（下面还与 cordis.patch.yml 比对）。
@@ -443,6 +453,7 @@ function allButtons(el: HTMLElement): HTMLButtonElement[] {
 
 /** 重试按钮的中文标签（用例里多处取用，收成一处）。 */
 const RETRY_LABEL = "重试";
+const REASK_QUEUED_WARNING = "重问已入队，当前回合结束后会发出；停止本轮未生效";
 /** 终态失败节点的种类键（三处夹具共用）。 */
 const TURN_ERROR_KIND = "turn-error";
 
@@ -1193,16 +1204,44 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
     assert.deepEqual(await actions.sendSameSession("s1", "t"), { ok: false });
   });
 
-  it("stopAndReask：prompt 失败短路；cancel 失败报「重问已入队」", async () => {
+  it("stopAndReask：先 cancel；确认 idle 时 steer 插队，取消失败仍 queue 并带半成功提示", async () => {
     const ctx = applyWithCtx();
-    let promptOk = false;
-    let cancelError: unknown = { message: "cancel no" };
+    const calls: string[] = [];
+    const prompts: { mode: string; requestId: string | undefined }[] = [];
+    let cancelBehavior: "ok" | "reject" | "reject-empty" | "throw" = "ok";
+    let promptResult: unknown = { ok: true };
+    let running = false;
+    let seq = 0;
     const session = {
-      // 官方 `RemoteResult` 的失败支必带 `error`（`{ok:false, error: RemoteFailure}`，
-      // dsh-typert-protocol/lib/types/types.d.ts:67-73）：测试替身要交就交完整形状，
-      // 空 `error` 正是生产侧「有失败、无 code/message」那一支的合法表达。
-      prompt: async () => (promptOk ? { ok: true } : { ok: false, error: {} }),
-      cancel: async () => ({ ok: false, error: cancelError }),
+      getSnapshot: () => ({ running }),
+      subscribe: () => () => void 0,
+      beginSubmission: () => {
+        seq += 1;
+        return { requestId: `req-${seq}`, abandon: () => void 0 };
+      },
+      prompt: async (
+        _content: unknown,
+        mode: string,
+        _signal: unknown,
+        requestId: string | undefined,
+      ): Promise<unknown> => {
+        calls.push("prompt");
+        prompts.push({ mode, requestId });
+        return promptResult;
+      },
+      cancel: async (): Promise<unknown> => {
+        calls.push("cancel");
+        if (cancelBehavior === "throw") {
+          throw new Error("cancel boom");
+        }
+        if (cancelBehavior === "reject") {
+          return { ok: false, error: { message: "cancel no" } };
+        }
+        if (cancelBehavior === "reject-empty") {
+          return { ok: false, error: {} };
+        }
+        return { ok: true };
+      },
       updateQueue: async () => ({ ok: true }),
     };
     ctx.bindings.set("s1", session);
@@ -1210,23 +1249,295 @@ describe("createActions 业务动作（经 apply 注入的 actions）", () => {
     const { actions } = ctx.registers[0]!.inject!() as {
       actions: { stopAndReask: (sessionId: string, text: string) => Promise<unknown> };
     };
-    promptOk = false;
-    assert.deepEqual(await actions.stopAndReask("s1", "t"), { ok: false });
-    promptOk = true;
-    // 入队的那一条仍会发出：整串透传宿主错误等于对用户说「什么都没发生」，
-    // 再点一次就同文本发两遍，所以先报「已入队」，宿主的理由附在后面。
+    // 1) cancel 成功且已 idle：steer 让重问排在已有排队回合之前。
+    assert.deepEqual(await actions.stopAndReask("s1", "t"), { ok: true });
+    assert.deepEqual(calls, ["cancel", "prompt"]);
+    assert.deepEqual(prompts[0], { mode: "steer", requestId: "req-1" });
+    // 2) cancel 被拒：当前回合还在跑，只能 queue；结果按半成功返回。
+    calls.length = 0;
+    cancelBehavior = "reject";
+    running = true;
+    assert.deepEqual(await actions.stopAndReask("s1", "t"), {
+      ok: true,
+      warning: "重问已入队，当前回合结束后会发出；停止本轮未生效（cancel no）",
+    });
+    assert.deepEqual(calls, ["cancel", "prompt"]);
+    assert.deepEqual(prompts[1], { mode: "queue", requestId: "req-2" });
+    // 3) 宿主没给理由：提示不带空括号；仍入队。
+    calls.length = 0;
+    cancelBehavior = "reject-empty";
+    assert.deepEqual(await actions.stopAndReask("s1", "t"), {
+      ok: true,
+      warning: REASK_QUEUED_WARNING,
+    });
+    assert.deepEqual(calls, ["cancel", "prompt"]);
+    assert.deepEqual(prompts[2], { mode: "queue", requestId: "req-3" });
+    // 4) cancel 请求本身抛错：按未生效处理，仍入队并带异常文本。
+    calls.length = 0;
+    cancelBehavior = "throw";
+    assert.deepEqual(await actions.stopAndReask("s1", "t"), {
+      ok: true,
+      warning: "重问已入队，当前回合结束后会发出；停止本轮未生效（Error: cancel boom）",
+    });
+    assert.deepEqual(calls, ["cancel", "prompt"]);
+    assert.deepEqual(prompts[3], { mode: "queue", requestId: "req-4" });
+    // 5) cancel 成功、入队失败：原样透传宿主理由，草稿由调用方保留。
+    calls.length = 0;
+    cancelBehavior = "ok";
+    running = false;
+    promptResult = { ok: false, error: { code: "prompt-no", message: "prompt no" } };
     assert.deepEqual(await actions.stopAndReask("s1", "t"), {
       ok: false,
-      code: "reask-queued",
-      message: "重问已入队，当前回合结束后会发出；停止本轮未生效（cancel no）",
+      code: "prompt-no",
+      message: "prompt no",
     });
-    // 宿主没给理由时只剩前半句，不带空括号。
-    cancelError = {};
-    assert.deepEqual(await actions.stopAndReask("s1", "t"), {
+    assert.deepEqual(calls, ["cancel", "prompt"]);
+    assert.deepEqual(prompts[4], { mode: "steer", requestId: "req-5" });
+  });
+
+  it("stopAndReask：结果不明的失败重试复用 requestId；文本改动或明确拒绝才换身份", async () => {
+    const ctx = applyWithCtx();
+    let promptBehavior: "throw" | "ok" | "reject" = "throw";
+    let running = false;
+    const submits: string[] = [];
+    const prompts: (string | undefined)[] = [];
+    let seq = 0;
+    const session = {
+      getSnapshot: () => ({ running }),
+      subscribe: () => () => void 0,
+      beginSubmission: (input: { text: string }) => {
+        submits.push(input.text);
+        seq += 1;
+        return { requestId: `req-${seq}`, abandon: () => void 0 };
+      },
+      prompt: async (
+        _content: unknown,
+        _mode: unknown,
+        _signal: unknown,
+        requestId: string | undefined,
+      ): Promise<unknown> => {
+        prompts.push(requestId);
+        if (promptBehavior === "throw") {
+          throw new Error("network");
+        }
+        return promptBehavior === "reject"
+          ? { ok: false, error: { code: "no", message: "rejected" } }
+          : { ok: true };
+      },
+      cancel: async () => {
+        running = false;
+        return { ok: true };
+      },
+    };
+    ctx.bindings.set("s1", session);
+    ctx.slots.get(DOCK_SLOT)?.();
+    const { actions } = ctx.registers[0]!.inject!() as {
+      actions: { stopAndReask: (sessionId: string, text: string) => Promise<unknown> };
+    };
+    // 传输层抛错：结果不明，台账保留身份。
+    await assert.rejects(actions.stopAndReask("s1", "same"), /network/u);
+    promptBehavior = "ok";
+    // 同文本重试：不重新 beginSubmission，复用 req-1。
+    assert.deepEqual(await actions.stopAndReask("s1", "same"), { ok: true });
+    assert.deepEqual(submits, ["same"]);
+    assert.deepEqual(prompts, ["req-1", "req-1"]);
+    // 文本改动：旧身份作废，mint 新身份。
+    promptBehavior = "throw";
+    await assert.rejects(actions.stopAndReask("s1", "other"), /network/u);
+    promptBehavior = "ok";
+    assert.deepEqual(await actions.stopAndReask("s1", "other"), { ok: true });
+    assert.deepEqual(submits, ["same", "other"]);
+    assert.deepEqual(prompts, ["req-1", "req-1", "req-2", "req-2"]);
+    // 宿主明确拒绝：身份已结算，下次同文本重试必须换新身份（不拿旧 id 赌去重）。
+    promptBehavior = "reject";
+    assert.deepEqual(await actions.stopAndReask("s1", "third"), {
       ok: false,
-      code: "reask-queued",
-      message: "重问已入队，当前回合结束后会发出；停止本轮未生效",
+      code: "no",
+      message: "rejected",
     });
+    promptBehavior = "ok";
+    assert.deepEqual(await actions.stopAndReask("s1", "third"), { ok: true });
+    assert.deepEqual(submits, ["same", "other", "third", "third"]);
+    assert.deepEqual(prompts, ["req-1", "req-1", "req-2", "req-2", "req-3", "req-4"]);
+  });
+
+  it("awaitSessionIdle：已 idle 直返；订阅回放/竞态/超时三条路径都收敛", async () => {
+    // 1) 已 idle：不订阅。
+    let subscribed = false;
+    assert.equal(
+      await awaitSessionIdle(
+        {
+          getSnapshot: () => ({ running: false }),
+          subscribe: () => {
+            subscribed = true;
+            return () => void 0;
+          },
+        },
+        100,
+      ),
+      true,
+    );
+    assert.equal(subscribed, false, "已 idle 不建立订阅");
+    // 2) 运行中 → 订阅后翻假：返回 true 并退订。
+    let running = true;
+    let notify: (() => void) | undefined;
+    let unsubscribed = false;
+    const pending = awaitSessionIdle(
+      {
+        getSnapshot: () => ({ running }),
+        subscribe: (fn) => {
+          notify = fn;
+          return () => {
+            unsubscribed = true;
+          };
+        },
+      },
+      1000,
+    );
+    running = false;
+    notify!();
+    assert.equal(await pending, true);
+    assert.equal(unsubscribed, true);
+    // 3) 超时：仍运行 → false；回调在运行中触发也不误判。
+    running = true;
+    unsubscribed = false;
+    const timedOut = awaitSessionIdle(
+      {
+        getSnapshot: () => ({ running }),
+        subscribe: (fn) => {
+          notify = fn;
+          return () => {
+            unsubscribed = true;
+          };
+        },
+      },
+      20,
+    );
+    notify!();
+    assert.equal(await timedOut, false, "超时按未收敛返回");
+    assert.equal(unsubscribed, true);
+    // 4) 同步回放：subscribe 内就翻假并回调 → 不能等到超时，且补一次退订。
+    running = true;
+    unsubscribed = false;
+    assert.equal(
+      await awaitSessionIdle(
+        {
+          getSnapshot: () => ({ running }),
+          subscribe: (fn) => {
+            running = false;
+            fn();
+            return () => {
+              unsubscribed = true;
+            };
+          },
+        },
+        1000,
+      ),
+      true,
+    );
+    assert.equal(unsubscribed, true);
+  });
+
+  it("createReaskLedger：超上限淘汰最旧并退休回显；limit=0 的空表分支可达", () => {
+    const abandoned: string[] = [];
+    const request = (text: string): ReaskRequest => ({
+      text,
+      requestId: `req-${text}` as never,
+      abandon: () => {
+        abandoned.push(text);
+      },
+    });
+    const ledger = createReaskLedger(1);
+    ledger.remember("a", request("a"));
+    ledger.remember("b", request("b"));
+    assert.equal(ledger.get("a"), undefined, "最旧一条被淘汰");
+    assert.equal(ledger.get("b")?.text, "b");
+    assert.deepEqual(abandoned, ["a"], "淘汰时退休旧回显");
+    const empty = createReaskLedger(0);
+    empty.remember("c", request("c"));
+    assert.equal(empty.get("c")?.text, "c", "空表时不误淘汰新条目");
+  });
+
+  it("createHostReaskLedger：超上限淘汰最旧；limit=0 的空表分支可达", () => {
+    const ledger = createHostReaskLedger(1);
+    ledger.remember("a", { text: "a", requestId: "1" });
+    ledger.remember("b", { text: "b", requestId: "2" });
+    assert.equal(ledger.get("a"), undefined, "最旧一条被淘汰");
+    assert.equal(ledger.get("b")?.requestId, "2");
+    const empty = createHostReaskLedger(0);
+    empty.remember("c", { text: "c", requestId: "3" });
+    assert.equal(empty.get("c")?.requestId, "3", "空表时不误淘汰新条目");
+  });
+
+  it("reaskViaHost：宿主返回 ok:false 或非对象时透传失败并清台账", async () => {
+    const ledger = createHostReaskLedger();
+    const options = { ledger, queuedCancelFailed: "queued" };
+    assert.deepEqual(
+      await reaskViaHost(
+        async () => ({ ok: false, code: "x", message: "nope" }),
+        "s1",
+        "t",
+        options,
+      ),
+      { ok: false, code: "x", message: "nope" },
+    );
+    assert.equal(ledger.get("s1"), undefined, "明确失败后身份结算");
+    assert.deepEqual(await reaskViaHost(async () => "bad", "s1", "t", options), { ok: false });
+  });
+
+  it("stopAndReask：宿主 Remote 有 reask 时走 host prepend，失败重试复用 requestId", async () => {
+    const calls: { sessionId: string; text: string; requestId: string }[] = [];
+    let behavior: "ok" | "warn" | "throw" = "ok";
+    const reader: RescueReader = {
+      state: async () => ({}),
+      cancel: async () => ({}),
+      toggle: async () => ({}),
+      resume: async () => ({}),
+      retryProviders: async () => ({}),
+      retryPolicy: async () => ({}),
+      reask: async (sessionId, text, requestId) => {
+        calls.push({ sessionId, text, requestId });
+        if (behavior === "throw") {
+          throw new Error("network");
+        }
+        return behavior === "warn" ? { ok: true, warning: "cancel-failed" } : { ok: true };
+      },
+    };
+    const sessions = {
+      binding: (id: string): unknown => (id === "s1" ? { session: {} } : undefined),
+      fork: async (): Promise<string> => "child",
+      using: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+    };
+    const actions = createActions(sessions as never, () => void 0, reader, tZh);
+    const sid = brandString<SessionId>("s1");
+    assert.deepEqual(await actions.stopAndReask(sid, "hello"), { ok: true });
+    const first = calls.at(0);
+    assert.ok(first !== undefined);
+    assert.equal(first.sessionId, "s1");
+    assert.equal(first.text, "hello");
+    const firstId = first.requestId;
+    assert.deepEqual(await actions.stopAndReask(sid, "hello"), { ok: true });
+    const second = calls.at(1);
+    assert.ok(second !== undefined);
+    assert.notEqual(second.requestId, firstId, "成功后的再次发起是新动作");
+    assert.deepEqual(await actions.stopAndReask(sid, "other"), { ok: true });
+    const third = calls.at(2);
+    assert.ok(third !== undefined);
+    assert.notEqual(third.requestId, firstId, "文本改动换新身份");
+    behavior = "warn";
+    assert.deepEqual(await actions.stopAndReask(sid, "warn"), {
+      ok: true,
+      warning: REASK_QUEUED_WARNING,
+    });
+    behavior = "throw";
+    await assert.rejects(actions.stopAndReask(sid, "boom"), /network/u);
+    const boomId = calls.at(-1)?.requestId;
+    assert.ok(boomId !== undefined);
+    behavior = "ok";
+    assert.deepEqual(await actions.stopAndReask(sid, "boom"), { ok: true });
+    assert.equal(calls.at(-1)?.requestId, boomId, "结果不明失败重试复用身份");
   });
 
   it("forkAndSend：fork 抛错 → fork-failed；分支 binding 缺失 → branch-unavailable", async () => {
@@ -1767,6 +2078,111 @@ describe("RescueDockView 渲染决策", () => {
     assert.ok(area4, "失败时草稿不收起");
   });
 
+  it("停止重问：cancel 已生效而重问发送失败 → 草稿与错误不随 running 收起，可直接重试", async () => {
+    const view = {
+      nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
+      turnEnds: new Map([[2, 5]]),
+      running: true,
+    };
+    const { container, stub, rerender } = await mountDock(view, null);
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
+    const area = container.querySelector("textarea");
+    assert.ok(area);
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(area).onChange({
+        target: { value: "换个问法" },
+      });
+    });
+    const stop = Promise.withResolvers<unknown>();
+    stub.actions.stopAndReask = (): Promise<unknown> => stop.promise;
+    const confirm = buttonContaining(container, "停止并重问");
+    assert.ok(confirm);
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(confirm).onClick();
+    });
+    // 宿主侧 cancel 已生效（running 翻假），重问 RPC 还在路上：草稿不能被收起。
+    await rerender({ ...view, running: false });
+    assert.ok(container.querySelector("textarea"), "在途窗口内草稿保留");
+    await act(async () => {
+      stop.resolve({ ok: false, code: "prompt-no", message: "prompt no" });
+      await flush();
+    });
+    const kept = container.querySelector("textarea");
+    assert.ok(kept, "重问失败后草稿仍可见");
+    assert.equal(kept.value, "换个问法", "编辑后的文本没丢");
+    assert.ok(container.textContent.includes("prompt-no: prompt no"), "失败原因就地显示");
+    // 再次确认即重试：cancel 已是空操作，prompt 用保留的草稿再发一次。
+    let retried: string | null = null;
+    stub.actions.stopAndReask = async (_id: string, text: string): Promise<unknown> => {
+      retried = text;
+      return { ok: true };
+    };
+    const retry = buttonContaining(container, "停止并重问");
+    assert.ok(retry);
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(retry).onClick();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(retried, "换个问法");
+    assert.equal(container.querySelector("textarea"), null, "成功后收起");
+  });
+
+  it("停止重问草稿：回合自然结束（无在途/失败）→ 立即收起，不留一帧", async () => {
+    const view = {
+      nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
+      turnEnds: new Map([[2, 5]]),
+      running: true,
+    };
+    const { container, rerender } = await mountDock(view, null);
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
+    assert.ok(container.querySelector("textarea"), "运行中展开草稿");
+    await rerender({ ...view, running: false });
+    assert.equal(container.querySelector("textarea"), null, "自然结束立即收起");
+  });
+
+  it("停止重问：取消失败但重问已入队 → 半成功提示并收起", async () => {
+    const view = {
+      nodes: [{ kind: "user", seq: 1, turn: 2, content: [{ type: "text", text: "go" }] }],
+      turnEnds: new Map([[2, 5]]),
+      running: true,
+    };
+    const { container, stub } = await mountDock(view, null);
+    await act(async () => {
+      buttonContaining(container, "停止并重问")!.click();
+    });
+    const area = container.querySelector("textarea");
+    assert.ok(area);
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(area).onChange({
+        target: { value: "换个问法" },
+      });
+    });
+    stub.actions.stopAndReask = async (id: string, text: string): Promise<unknown> => {
+      stub.calls.push({ name: "stopAndReask", args: [id, text] });
+      return {
+        ok: true,
+        warning: REASK_QUEUED_WARNING,
+      };
+    };
+    const confirm = buttonContaining(container, "停止并重问");
+    assert.ok(confirm);
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(confirm).onClick();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(stub.calls.at(-1)?.args[1], "换个问法");
+    assert.equal(container.querySelector("textarea"), null, "半成功也收起草稿");
+    assert.ok(container.textContent.includes("重问已入队"), "半成功提示可见");
+  });
+
   it("开关行：off 显示已关闭与开启按钮；unknown 时不显示行", async () => {
     const body: RescueStateBody = {
       ok: true,
@@ -2188,10 +2604,11 @@ describe("shell.overlay 上的耗尽提示宿主", () => {
     assert.match(mountHost.textContent, /自动续跑配额已用尽/u, "未知 kind 回落");
     // 收起态停止重问行：busy 文案支 + stopError 非空支（dock 装配下不可达，直渲钉住）
     await unmountRoot();
-    const row = stopReaskElement(true, "boom", (): void => undefined, tZh);
+    const row = stopReaskElement(true, "boom", "重问已入队", (): void => void 0, tZh);
     await mount(React.createElement("div", null, row));
     assert.match(mountHost.textContent, /停止中…/u, "busy 支");
     assert.match(mountHost.textContent, /boom/u, "错误支");
+    assert.match(mountHost.textContent, /重问已入队/u, "半成功提示支");
   });
 
   it("渲染台账文案；手动关闭即清空；超限丢最旧", async () => {
@@ -3228,15 +3645,32 @@ function actionsFromCtx(ctx: MockClientCtx): DockActionsStub {
   return (injectFactory() as { actions: DockActionsStub }).actions;
 }
 
-/** 会话桩：三个动作各自固定结果并记调用。 */
-function sessionStub(results: { prompt?: unknown; cancel?: unknown; updateQueue?: unknown } = {}): {
+/** 会话桩：动作各自固定结果并记调用；getSnapshot/subscribe 供 cancel 收敛等待使用。 */
+function sessionStub(
+  results: { prompt?: unknown; cancel?: unknown; updateQueue?: unknown; running?: boolean } = {},
+): {
   calls: string[];
+  prompts: { mode: string; requestId: string | undefined }[];
   session: Record<string, unknown>;
 } {
   const calls: string[] = [];
+  const prompts: { mode: string; requestId: string | undefined }[] = [];
+  let seq = 0;
   const session: Record<string, unknown> = {
-    prompt: async (): Promise<unknown> => {
+    getSnapshot: () => ({ running: results.running ?? false }),
+    subscribe: () => () => void 0,
+    beginSubmission: () => {
+      seq += 1;
+      return { requestId: `req-${seq}`, abandon: (): void => void 0 };
+    },
+    prompt: async (
+      _content: unknown,
+      mode: string,
+      _signal: unknown,
+      requestId: string | undefined,
+    ): Promise<unknown> => {
       calls.push("prompt");
+      prompts.push({ mode, requestId });
       return results.prompt ?? { ok: true };
     },
     cancel: async (): Promise<unknown> => {
@@ -3248,7 +3682,7 @@ function sessionStub(results: { prompt?: unknown; cancel?: unknown; updateQueue?
       return results.updateQueue ?? { ok: true };
     },
   };
-  return { calls, session };
+  return { calls, prompts, session };
 }
 
 describe("createActions 成功支与残余失败支", () => {
@@ -3262,7 +3696,7 @@ describe("createActions 成功支与残余失败支", () => {
     const actions = actionsFromCtx(ctx);
     assert.deepEqual(await actions.sendSameSession("s1", "t"), { ok: true });
     assert.deepEqual(await actions.stopAndReask("s1", "t"), { ok: true });
-    assert.deepEqual(binding.calls, ["prompt", "prompt", "cancel"]);
+    assert.deepEqual(binding.calls, ["prompt", "cancel", "prompt"]);
   });
 
   it("forkAndSend：第一轮（atSeq null）拒绝切分；子会话 prompt 失败透传", async () => {

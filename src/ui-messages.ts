@@ -47,7 +47,7 @@ export interface UiMessages {
   readonly actionFailed: string;
   /** host 写通道（取消/开关）被拒模板（`{label}` 插值动作名）。 */
   readonly hostActionFailed: string;
-  /** 停止重问只成了一半：重问已入队、停止当前回合被拒。 */
+  /** 停止重问只成了一半：重问已入队、停止当前回合被拒（或取消请求本身抛错）。 */
   readonly reaskQueuedCancelFailed: string;
   /** 开关动作名（拼进 hostActionFailed 的 label）。 */
   readonly switchAction: string;
