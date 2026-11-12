@@ -3390,7 +3390,7 @@ describe("RetryPolicySection 重试策略区块", () => {
     assert.equal(fetchCalls.filter((entry) => entry.url === POLICY_URL).length, 4, "四行逐项落盘");
   });
 
-  it("非规范 enhanced/off 形状同样警告（15 次+QUOTA、0 次+QUOTA）", async () => {
+  it("非规范 default/off 形状同样警告（15 次无 QUOTA、0 次+QUOTA）", async () => {
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return {
@@ -3398,7 +3398,7 @@ describe("RetryPolicySection 重试策略区块", () => {
           body: {
             ok: true,
             providers: [
-              { provider: "p-enh15", mode: "normal", maxRetries: 15, hasQuota: true },
+              { provider: "p-def15", mode: "normal", maxRetries: 15, hasQuota: false },
               { provider: "p-offq", mode: "normal", maxRetries: 0, hasQuota: true },
             ],
           },
@@ -3421,7 +3421,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       await flush();
     });
     assert.ok(
-      container.textContent.includes("p-enh15") && container.textContent.includes("p-offq"),
+      container.textContent.includes("p-def15") && container.textContent.includes("p-offq"),
       "两个非规范形状的 provider 都进警告名单",
     );
     assert.equal(

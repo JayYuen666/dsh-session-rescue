@@ -57,6 +57,14 @@ const FIXTURE_HOST_JS = path.join(FIXTURE_PKG, "host.js");
 // 动态导入 .mjs 对 TS 为 any，先收窄到用到的最小类型再取成员（避免 no-unsafe-*）。
 // 载入失败要点名是哪一个入口：本文件载两份（cordis 与 loader），ERR_MODULE_NOT_FOUND 原文
 // 只说「找不到模块」，读的人还得先猜是哪一份；exports 条件变化时同理。
+/** 冲刷微任务：异步处理器在 emit 后的微任务里完成调度，断言/ tick 前先给它们跑完。 */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 12; i += 1) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- 逐轮冲刷微任务
+    await Promise.resolve();
+  }
+}
+
 async function importChecked(entry: string): Promise<Record<string, unknown>> {
   try {
     return (await import(entry)) as Record<string, unknown>;
@@ -79,7 +87,7 @@ if (LoaderMod["default"] === undefined) {
 }
 
 interface TimerEntry {
-  fn: () => void;
+  fn: () => void | Promise<void>;
   ms: number;
   cancelled: boolean;
   fired: boolean;
@@ -131,7 +139,7 @@ interface Mount {
    *  所以它必须被断言，而不是只被提供。owner 只留 uid（fiber 是代理，标识不可比）。 */
   configureCalls: { presentation: { auto?: boolean }; ownerUid: unknown }[];
   /** 触发所有未到点定时器（模拟时钟到点）。 */
-  tick: () => void;
+  tick: () => Promise<void>;
 }
 
 /** lesson-loop 总线替身（report/pass 的调用记录）。 */
@@ -174,7 +182,9 @@ async function mount(
     calls,
   };
   const agentsStore = {
-    roots: () => [agent],
+    // rc.2 的注册表没有 roots()（该版只剩 list()，顶层/子代理由 session.header.origin
+    // 区分）；替身跟着宿主走，否则这一层会一直在测一条已不存在的 API。
+    list: () => [agent],
     get: (id: string) => (id === "s1" ? agent : undefined),
   };
 
@@ -209,7 +219,7 @@ async function mount(
         },
       });
       ctx.provide("timer", {
-        timeout(fn: () => void, ms: number) {
+        timeout(fn: () => void | Promise<void>, ms: number) {
           const entry: TimerEntry = { fn, ms, cancelled: false, fired: false };
           timers.push(entry);
           return () => {
@@ -218,6 +228,18 @@ async function mount(
         },
       });
       ctx.provide("agents", agentsStore);
+      // sessionQuery 替身：回退路径经 observeSession 异步读事件流（读 agent.evs）。
+      ctx.provide("sessionQuery", {
+        observeSession: async (sessionId: string) => {
+          const target = agentsStore.get(sessionId);
+          return {
+            events: target?.session.evs ?? [],
+            [Symbol.dispose]: (): void => {
+              /* 替身无资源可释放 */
+            },
+          };
+        },
+      });
       // lesson-loop 总线：仅在用例显式要「已遵守」观测时装上（默认缺席，
       // 与没装 lesson-loop 的宿主一致）。
       if (bus !== undefined) {
@@ -249,14 +271,20 @@ async function mount(
     agent,
     timers,
     configureCalls,
-    tick() {
+    async tick() {
+      // 异步处理器在 emit 后的微任务里才完成调度；先冲刷微任务，再触发定时器。
+      for (let i = 0; i < 10; i += 1) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- 逐轮冲刷微任务
+        await Promise.resolve();
+      }
       // 先快照再触发：回调链里会再次武装（scheduleInjection/resumeAfterReconnect），
       // 活迭代会把新定时器的延迟窗口压成 0，退避时序的回归会被掩盖。
       const snapshot = [...timers];
       for (const timerEntry of snapshot) {
         if (!timerEntry.fired && !timerEntry.cancelled) {
           timerEntry.fired = true;
-          timerEntry.fn();
+          // oxlint-disable-next-line eslint/no-await-in-loop -- 定时器须按序逐个触发
+          await timerEntry.fn();
         }
       }
     },
@@ -274,13 +302,14 @@ function resetEvsTo(inst: Mount, turn: number, kind: string): void {
 }
 
 /** 发一条瞬时失败（RATE_LIMIT）的 agent/error，载荷形状各用例一致。 */
-function emitRateLimitError(inst: Mount, turn: number): void {
+async function emitRateLimitError(inst: Mount, turn: number): Promise<void> {
   inst.ctx.emit(AGENT_ERROR_EVENT, {
     agent: inst.agent,
     turn,
     step: 1,
     error: { failure: { code: "RATE_LIMIT", message: "x" } },
   });
+  await flush();
 }
 
 /** 取本插件在 loader 里的条目（各用例共用，别再手写 entries().find）。 */
@@ -353,7 +382,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       ).toBe(rescueFiberUid);
 
       // 事件驱动：瞬时失败 → 定时器武装 → 触发 → followup 发出
-      emitRateLimitError(inst, 1);
+      await emitRateLimitError(inst, 1);
       expect(inst.timers).toHaveLength(1);
       // 10_000 既不是本用例写的、也不是替身写的：0.1.7 交进 apply 的是 cordis 按条目
       // `Config` 解析出的 volatile 引用，本用例 config 传空 → 这一读到的就是 schema 的
@@ -361,7 +390,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       // 因此这条断言真正在测「内置默认有没有被静默丢弃」，而不是自己喂给自己。
       expect(inst.timers[0]?.ms).toBe(10_000);
 
-      inst.tick();
+      await inst.tick();
       expect(inst.agent.calls).toHaveLength(1);
       expect((inst.agent.calls[0] as { role?: string }).role).toBe("user");
 
@@ -376,6 +405,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
         step: 1,
         error: { failure: { code: "CONTEXT_WINDOW_EXCEEDED", message: "too long" } },
       });
+      await flush();
       expect(inst.timers).toHaveLength(before);
     },
   );
@@ -395,9 +425,9 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       expect(inst.ctx.get("sessionRescue")).toBeDefined();
 
       // 事件驱动链在产物形态下等价：瞬时失败 → 定时器武装 → 触发 → followup 发出
-      emitRateLimitError(inst, 1);
+      await emitRateLimitError(inst, 1);
       expect(inst.timers).toHaveLength(1);
-      inst.tick();
+      await inst.tick();
       expect(inst.agent.calls).toHaveLength(1);
       expect((inst.agent.calls[0] as { role?: string }).role).toBe("user");
     },
@@ -428,11 +458,12 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       turnEnd(4, "completed"),
     );
     inst.ctx.emit(AGENT_STATUS_EVENT, { agent: inst.agent, status: "idle" });
+    await flush();
     expect(inst.timers).toHaveLength(1);
     // unfinishedDelayMs
     expect(inst.timers[0]?.ms).toBe(5000);
 
-    inst.tick();
+    await inst.tick();
     expect(inst.agent.calls).toHaveLength(1);
     const firstCall = inst.agent.calls[0] as { content?: { text?: string }[] } | undefined;
     const text = String(firstCall?.content?.[0]?.text);
@@ -467,22 +498,25 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
     // 打满 3 次 resume（maxResumes 取 schema 默认 3，本用例不再自己喂表）
     for (let i = 1; i <= 3; i += 1) {
       resetEvsTo(inst, i, "error");
-      emitRateLimitError(inst, i);
-      inst.tick();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 每次失败必须等上一发排期与触发都收敛
+      await emitRateLimitError(inst, i);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 定时器须按序逐个触发
+      await inst.tick();
       pastCooldown();
     }
     expect(inst.timers).toHaveLength(3);
 
     // 第 4 次：配额已满 → 不再武装（修复前这就是永久静默到重启）
     resetEvsTo(inst, 4, "error");
-    emitRateLimitError(inst, 4);
+    await emitRateLimitError(inst, 4);
     expect(inst.timers).toHaveLength(3);
 
     // 一次 completed 回合 → 配额恢复 → 第 6 轮失败可再续跑
     resetEvsTo(inst, 5, "completed");
     inst.ctx.emit(AGENT_STATUS_EVENT, { agent: inst.agent, status: "idle" });
+    await flush();
     resetEvsTo(inst, 6, "error");
-    emitRateLimitError(inst, 6);
+    await emitRateLimitError(inst, 6);
     expect(inst.timers).toHaveLength(4);
   });
 
@@ -508,13 +542,14 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       assertLoaded(inst);
 
       inst.agent.session.evs.push(turnEnd(1, "error"));
-      emitRateLimitError(inst, 1);
+      await emitRateLimitError(inst, 1);
       expect(reports).toHaveLength(1);
       expect(reports[0]?.["category"]).toBe("transient-failure");
       expect(passes).toHaveLength(0);
 
       resetEvsTo(inst, 2, "completed");
       inst.ctx.emit(AGENT_STATUS_EVENT, { agent: inst.agent, status: "idle" });
+      await flush();
       expect(passes).toHaveLength(1);
       expect(passes[0]?.["category"]).toBe("transient-failure");
       // 先验两侧都不是 undefined：宿主漏给 signature 时 undefined === undefined 会让
@@ -553,6 +588,7 @@ describe("加载 session-rescue host（真实 Loader 组合：源码副本 + 发
       turnEnd(7, "completed"),
     );
     inst.ctx.emit(AGENT_STATUS_EVENT, { agent: inst.agent, status: "idle" });
+    await flush();
     expect(inst.timers).toHaveLength(0);
   });
 });

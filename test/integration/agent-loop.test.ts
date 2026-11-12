@@ -113,6 +113,22 @@ async function boot(
     });
     await ctx.plugin(TimerPlugin);
     await mountAgentLoopTestDependencies(ctx);
+    // sessionQuery 替身：回退路径经 observeSession 异步读真会话事件流。testkit 不提供
+    // 该服务，这里桥接真会话的事件日志（读 agents 服务里的会话）。
+    ctx.provide("sessionQuery", {
+      observeSession: async (sessionId: string) => {
+        const agents = ctx.get("agents") as
+          | { get: (id: string) => { session: { snapshotEvents: () => unknown[] } } | undefined }
+          | undefined;
+        const target = agents?.get(sessionId);
+        return {
+          events: target?.session.snapshotEvents() ?? [],
+          [Symbol.dispose]: (): void => {
+            /* 替身无资源可释放 */
+          },
+        };
+      },
+    });
     await ctx.plugin(DeepSeekAdapter, {
       baseURL: server.baseURL,
       ...(options.withAdapterPolicy === false

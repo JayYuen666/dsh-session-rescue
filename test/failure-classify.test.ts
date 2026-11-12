@@ -26,8 +26,16 @@ const EMPTY_RESPONSE_TEXT_LITERAL = "Provider returned an empty response";
 const BAIDU_WINDOW_MESSAGE = "Allocated quota exceeded, please increase your quota limit.";
 
 describe("classifyFailure（失败分类：瞬时/永久）", () => {
-  it("瞬时：标准码 RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE", () => {
-    for (const code of ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"]) {
+  it("瞬时：标准码 RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE/STREAM_CLOSED/MALFORMED_RESPONSE", () => {
+    for (const code of [
+      "RATE_LIMIT",
+      "SERVER",
+      "TIMEOUT",
+      "TRANSPORT",
+      "EMPTY_RESPONSE",
+      "STREAM_CLOSED",
+      "MALFORMED_RESPONSE",
+    ]) {
       const verdict = classifyFailure({ code, message: "x" });
       assert.equal(verdict.transient, true, code);
     }
@@ -151,7 +159,15 @@ describe("classifyFailure（失败分类：瞬时/永久）", () => {
     // 反例由属性层给出（test/property/failure-classify.property.test.ts）：文本兜底一旦排在
     // code 路由之前，`{code:"RATE_LIMIT", message:"Insufficient quota…"}` 就永久不续跑——
     // 一个明确自称限速的失败被一句账单文案钉死，正是本包最不该漏的那一形。
-    for (const code of ["RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE"]) {
+    for (const code of [
+      "RATE_LIMIT",
+      "SERVER",
+      "TIMEOUT",
+      "TRANSPORT",
+      "EMPTY_RESPONSE",
+      "STREAM_CLOSED",
+      "MALFORMED_RESPONSE",
+    ]) {
       const verdict = classifyFailure({ code, message: BALANCE_TEXT });
       assert.equal(verdict.transient, true, `${code} 应按 code 路由判瞬时：${verdict.reason}`);
       assert.match(verdict.reason, /code /u);

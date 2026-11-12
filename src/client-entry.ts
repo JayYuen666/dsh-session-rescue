@@ -1699,20 +1699,20 @@ function presetOfRow(row: RetryProviderRow): string {
   if (row.maxRetries === 0) {
     return "off";
   }
-  if (row.mode === "normal" && row.hasQuota && row.maxRetries >= 12) {
+  if (row.mode === "normal" && row.hasQuota) {
     return "enhanced";
   }
   return "default";
 }
 
 /** 现行策略是否恰好是它所推断档位的规范形状（四档各自的精确取值）。
- *  投影只有 mode/maxRetries/hasQuota 三位，手写配置（如 normal/10 自定义码表）
- *  会被 presetOfRow 归到最近的档位；对非规范形状的行写档位会把那份手写配置整个
- *  覆盖掉（settings 的 user section 与行配置同文档，没有历史可回滚），因此
- *  非规范形状的行在写之前必须确认。盲区：恰好写成规范形状的手写配置检测不出来。
- *  各档分支只补投影可辨的判据——mode/maxRetries 的其余约束已由 presetOfRow
- *  的分流保证（always 已先行返回、off 已含 maxRetries===0、enhanced 已含
- *  mode normal + hasQuota），再写一遍会产生测不到的死分支。 */
+ *  手写配置（如 normal/10 自定义码表）会被 presetOfRow 归到最近的档位；对非规范形状的行
+ *  写档位会把那份手写配置整个覆盖掉（settings 的 user section 与行配置同文档，没有历史可回滚），
+ *  因此非规范形状的行在写之前必须确认。盲区：恰好写成规范形状的手写配置检测不出来。
+ *  enhanced 恒为规范：host 侧只**合并**码表（只增不删）并沿用用户现行 mode/maxRetries/backoff，
+ *  应用它永不破坏性覆盖，故无需确认（与 always 同档）。其余各档分支只补投影可辨的判据——
+ *  mode/maxRetries 的其余约束已由 presetOfRow 的分流保证（always 已先行返回、off 已含
+ *  maxRetries===0、enhanced 已含 mode normal + hasQuota），再写一遍会产生测不到的死分支。 */
 function isCanonicalPreset(row: RetryProviderRow): boolean {
   const preset = presetOfRow(row);
   if (preset === "always") {
@@ -1722,7 +1722,7 @@ function isCanonicalPreset(row: RetryProviderRow): boolean {
     return !row.hasQuota;
   }
   if (preset === "enhanced") {
-    return row.maxRetries === 12;
+    return true;
   }
   return !row.hasQuota && row.maxRetries === 5;
 }

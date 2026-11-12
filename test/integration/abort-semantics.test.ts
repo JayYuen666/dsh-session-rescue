@@ -70,6 +70,21 @@ async function boot(sequence: readonly MockLlmBehavior[]): Promise<Rig> {
     });
     await ctx.plugin(TimerPlugin);
     await mountAgentLoopTestDependencies(ctx);
+    // sessionQuery 替身：回退路径经 observeSession 异步读真会话事件流（testkit 不提供）。
+    ctx.provide("sessionQuery", {
+      observeSession: async (sessionId: string) => {
+        const agents = ctx?.get("agents") as
+          | { get: (id: string) => { session: { snapshotEvents: () => unknown[] } } | undefined }
+          | undefined;
+        const target = agents?.get(sessionId);
+        return {
+          events: target?.session.snapshotEvents() ?? [],
+          [Symbol.dispose]: (): void => {
+            /* 替身无资源可释放 */
+          },
+        };
+      },
+    });
     await ctx.plugin(DeepSeekAdapter, {
       baseURL: server.baseURL,
       retryPolicy: {

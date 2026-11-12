@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-session-rescue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-session-rescue/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,10 +31,11 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 目录
 
+- [ 目录](#-目录)
 - [ 它做什么](#-它做什么)
   - [判定是怎么做出来的](#判定是怎么做出来的)
 - [ 安装](#-安装)
-  - [shared 的版本下限](#shared-的版本下限)
+  - [ shared 的版本下限](#-shared-的版本下限)
 - [ 确认它真的在工作](#-确认它真的在工作)
 - [ 它不提供什么](#-它不提供什么)
 - [ 在 dsh 里启用](#-在-dsh-里启用)
@@ -84,7 +85,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 卸载：`dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`。包在公共 npm 上，安装不需要凭据，也不需要 scoped-registry 配置。
 
 - **需要 Node.js `>= 24.9`。** 本包仅 ESM；正是这个 Node 下限让 `require()` 一份 ESM 入口成为可能，`engines.node` 因此声明。
-- **需要宿主 `dsh` 在 `0.2.1-rc.5` 或 `0.2.2-alpha.3` 这条线上。** 宿主装插件时读的是 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`），而且它**单独决定**：那一支给出结论后不再读 `peerDependencies`。预发布版本参与范围比较（宿主按 `includePrerelease: true` 判）。`@deepseek-ai/dsh-*` 的 peer 写同一条窗口范围；精确钉版只在 `devDependencies` 里，那是编译期纪律，不参与装载判定。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **需要宿主 `dsh` 在 `0.2.2-rc.1` 或更新的 `0.2.2` 这条线上。** 宿主装插件时读的是 `engines.dsh`（`^0.2.2-rc.1`），而且它**单独决定**：那一支给出结论后不再读 `peerDependencies`。预发布版本参与范围比较（宿主按 `includePrerelease: true` 判）。`@deepseek-ai/dsh-*` 的 peer 写同一条窗口范围；精确钉版只在 `devDependencies` 里，那是编译期纪律，不参与装载判定。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里没有任何 `@deepseek-ai/*`，这是约定**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 以 `nodeLinker: hoisted` + `autoInstallPeers: false` 安装，`dependencies` 里的宿主包会被物化成一份真实目录、落在运行中宿主已装载的那份旁边——此后原生工具调用全部抛错，而构建、类型检查、覆盖率一路全绿。`host.js` 值导入的三枚宿主包（`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-typert-protocol`、`@deepseek-ai/schemastery`）是必备 peer、并以同一钉版重复落在 `devDependencies`，打包器因此把它们外部化而不是内联官方函数体。
 - **随包发布**：`prepare` 重建的 `host.js` 与 `client.js`、`types/`、`cordis.patch.yml`，加上 `README*`、`LICENSE`、`CHANGELOG.md` 与 `icon.svg`。产物不提交，也刻意不压缩——裸跨包说明符必须留在产物里，外部化断言才有意义。
 - 装不上报 404：该版本没发出去过（先看 `dist-tags.latest`）。更常见的原因是同组库包 `@jayyuen66/dsh-plugin-shared` 还没上 registry——`host.js` 值导入它的 `lib/locale`、`lib/record`、`lib/errors` 与 `lib/lesson-bus`，`client.js` 值导入 `client`，缺了就是 `ERR_MODULE_NOT_FOUND`。

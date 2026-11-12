@@ -48,7 +48,7 @@ const QUOTA_EXCEEDED_FULL_TEXT = "Allocated quota exceeded, please increase your
 //    与 cordis ctx 面（on/effect/get）。类型声明上以真实 cordis Context 接收。 ──
 
 interface TimerEntry {
-  fn: () => void;
+  fn: () => void | Promise<void>;
   ms: number;
   cancelled: boolean;
   fired: boolean;
@@ -94,7 +94,7 @@ interface MockProjections {
 }
 
 interface MockCtx {
-  handlers: Record<string, (payload: unknown) => void>;
+  handlers: Record<string, (payload: unknown) => void | Promise<void>>;
   timers: TimerEntry[];
   effects: (() => void)[];
   /** 投影注册表替身（默认**不在**宿主服务表里 ⇒ 注入不激活 ⇒ 三类判定走回退扫描；
@@ -133,7 +133,7 @@ interface MockCtx {
   fiber: { id: string };
   /** 可注入的 mutate 实现（测试拒绝路径用）。 */
   mutateImpl?: (ns: string, ops: unknown[]) => Promise<void>;
-  timer: { timeout: (fn: () => void, ms: number) => () => void };
+  timer: { timeout: (fn: () => void | Promise<void>, ms: number) => () => void };
   on: (event: string, handler: (payload: unknown) => void) => void;
   get: (name: string) => unknown;
   /** 官方服务注册口（Typert Remote 服务构造时用）。 */
@@ -143,13 +143,13 @@ interface MockCtx {
   inject: (deps: string[], activate: (child: MockInjectCtx) => void) => void;
   /** 变更宿主服务表（模拟可选服务后装载 / 重启换实例）。 */
   setService: (name: string, service: unknown) => void;
-  fire: (event: string, payload: unknown) => void;
-  tick: () => void;
+  fire: (event: string, payload: unknown) => Promise<void>;
+  tick: () => Promise<void>;
   disposeEffects: () => void;
 }
 
 function createMockCtx(): MockCtx {
-  const handlers: Record<string, (payload: unknown) => void> = {};
+  const handlers: Record<string, (payload: unknown) => void | Promise<void>> = {};
   const timers: TimerEntry[] = [];
   const effects: (() => void)[] = [];
   let configValue: Record<string, unknown> = {
@@ -198,7 +198,7 @@ function createMockCtx(): MockCtx {
     },
   };
   const timerService = {
-    timeout(fn: () => void, ms: number) {
+    timeout(fn: () => void | Promise<void>, ms: number) {
       const entry: TimerEntry = { fn, ms, cancelled: false, fired: false };
       timers.push(entry);
       return () => {
@@ -216,6 +216,20 @@ function createMockCtx(): MockCtx {
       return this.byId.get(id);
     },
   };
+  // sessionQuery 替身：observeSession 异步交回该会话的事件 cut（读 makeAgent 存的 evs），
+  // 与官方一样用完即 dispose。回退路径（投影缺席）经它读事件流。
+  const sessionQueryService = {
+    async observeSession(sessionId: string) {
+      const agent = agentsService.byId.get(sessionId);
+      const evs = agent?.session.evs ?? [];
+      return {
+        events: evs,
+        [Symbol.dispose]: (): void => {
+          /* 测试替身无资源可释放 */
+        },
+      };
+    },
+  };
   // 宿主服务表：cordis `ctx.get` 是无 inject 语义的存储读，这里用同一张表替身。
   // 用 Map 而非 Record：setService(name, undefined) 要能摘掉一个服务（模拟
   // 可选服务卸载），而 Record 的动态 delete 既慢又会被 lint 拒绝。
@@ -223,6 +237,7 @@ function createMockCtx(): MockCtx {
     ["agents", agentsService],
     ["settings", settingsService],
     ["timer", timerService],
+    ["sessionQuery", sessionQueryService],
   ]);
   const injections: { deps: string[]; activate: (child: MockInjectCtx) => void }[] = [];
   const childEffects: (() => void)[] = [];
@@ -366,17 +381,18 @@ function createMockCtx(): MockCtx {
       }
       runInjections();
     },
-    fire(event, data) {
-      handlers[event]?.(data);
+    async fire(event, data) {
+      await handlers[event]?.(data);
     },
-    tick() {
+    async tick() {
       // 先快照再触发：触发回调里链式排出的新定时器属下一轮，当场执行会把
       // 「重复调度/多枚定时器」这类回归并进同一次 tick 掩盖掉。
       const snapshot = [...timers];
       for (const entry of snapshot) {
         if (!entry.fired && !entry.cancelled) {
           entry.fired = true;
-          entry.fn();
+          // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+          await entry.fn();
         }
       }
     },
@@ -464,11 +480,11 @@ function payload(agent: MockAgent, turn: number, failure: unknown): Record<strin
 
 /** 走一次「agent/error → 自动续跑注入」，回注入正文。两个 locale 缓存用例共用这一条：
  *  会话 id 是唯一的自由度（换会话避开冷却/配额），其余路径完全同形。 */
-function runRescueInjectText(ctx: MockCtx, sessionId: string): string {
+async function runRescueInjectText(ctx: MockCtx, sessionId: string): Promise<string> {
   const agent = makeAgent(sessionId, "tokenrouter");
   register(ctx, agent);
-  ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
-  ctx.tick();
+  await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
+  await ctx.tick();
   return injectTextOf(agent);
 }
 
@@ -559,7 +575,7 @@ function replaceEvent(agent: { session: { evs?: unknown[] } }, event: unknown): 
 }
 
 describe("settings 隐式注册（0.1.7：命名空间 = profile 条目 id）", () => {
-  it("config schema 逐字段默认 = 0.1.6 交给 settings.register 的那份内置底座", () => {
+  it("config schema 逐字段默认 = 0.1.6 交给 settings.register 的那份内置底座", async () => {
     // 0.1.7 删了 settings.register(ns, schema, { base })：命名空间 = profile 条目 id，
     // 默认值改由 schema 自己带（cordis 装载期按同一份 schema 填默认、再把 volatile 字段
     // 包成引用交进 apply）。所以"底座"这层断言原样搬到这里，逐字段对齐——已批准的
@@ -591,7 +607,7 @@ describe("settings 隐式注册（0.1.7：命名空间 = profile 条目 id）", 
     assert.equal(patchEntryId(), "session-rescue");
   });
 
-  it("页面策略：settings.configure({ auto: false }) 恰好一次且 owner 是本插件 fiber", () => {
+  it("页面策略：settings.configure({ auto: false }) 恰好一次且 owner 是本插件 fiber", async () => {
     // 本包自带设置卡片，得让宿主别再自动生成一份自动表单页；owner 缺省是 settings
     // 服务自己的 fiber —— 传错就等于给别人的页面定了策略。
     const ctx = createMockCtx();
@@ -610,68 +626,107 @@ describe("agent/error 闸门", () => {
     applyPlugin(ctx);
   });
 
-  it("enabled=false → 不调度", () => {
+  it("enabled=false → 不调度", async () => {
     ctx.scope.set({ enabled: false });
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("provider 在 excludes → 不调度", () => {
+  it("provider 在 excludes → 不调度", async () => {
     ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER] });
     const agent = makeAgent("s1", EXCLUDED_PROVIDER);
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("触发时读会话活线：它在 excludes ⇒ 到点也不发", () => {
+  it("触发时读会话活线：它在 excludes ⇒ 到点也不发", async () => {
     ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER], resumeDelayMs: 7000 });
     const agent = makeAgent("s1", "tokenrouter");
     Object.assign(agent, { model: { current: () => ({ provider: EXCLUDED_PROVIDER }) } });
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 1, "先按瞬时失败武装");
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0, "到点读的是会话活线，它在排除名单里");
   });
 
-  it("触发时会话没记录过选择 ⇒ 回落 options.provider，照常发", () => {
+  it("触发时会话没记录过选择 ⇒ 回落 options.provider，照常发", async () => {
     ctx.scope.set({ providerExcludes: [EXCLUDED_PROVIDER], resumeDelayMs: 7000 });
     const agent = makeAgent("s1", "tokenrouter");
     Object.assign(agent, { model: { current: () => NO_RECORDED_SELECTION } });
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1, "options 那条不在排除名单，照常续跑");
   });
 
-  it("永久失败（上下文超长）→ 不调度", () => {
+  it("永久失败（上下文超长）→ 不调度", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(
+    await ctx.fire(
       AGENT_ERROR_EVENT,
       payload(agent, 1, { code: "CONTEXT_WINDOW_EXCEEDED", message: "too long" }),
     );
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("QUOTA 无限流证据 → 不调度", () => {
+  it("QUOTA 无限流证据 → 不调度", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(
+    await ctx.fire(
       AGENT_ERROR_EVENT,
       payload(agent, 1, { code: "QUOTA", message: "Insufficient quota" }),
     );
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("非根会话（子代理）→ 不调度", () => {
+  it("非根会话（子代理）→ 不调度", async () => {
     const agent = makeAgent("child1", "tokenrouter");
     // 可被 get 到，但不在 roots()
     ctx.agentsService.byId.set(agent.id, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 0);
+  });
+
+  it("rc.2 注册表（无 roots，list 命中且非 subagent）→ 照常调度", async () => {
+    // rc.2 删除了 roots()：顶层判定改走 list() + 持久会话头的 origin。
+    const agent = makeAgent("s1", "tokenrouter");
+    ctx.setService("agents", {
+      get: (id: string) => (id === "s1" ? agent : undefined),
+      list: () => [agent],
+    });
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 1);
+  });
+
+  it("rc.2 注册表（list 不含该 agent）→ 不调度", async () => {
+    const agent = makeAgent("s1", "tokenrouter");
+    ctx.setService("agents", {
+      get: () => agent,
+      list: () => [],
+    });
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 0);
+  });
+
+  it("rc.2 注册表（header.origin=subagent）→ 不调度", async () => {
+    const agent = makeAgent("child1", "tokenrouter");
+    Object.assign(agent.session, { header: { origin: "subagent" } });
+    ctx.setService("agents", {
+      get: () => agent,
+      list: () => [agent],
+    });
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    assert.equal(ctx.timers.length, 0);
+  });
+
+  it("注册表既无 roots 也无 list → 不调度（证不了顶层就不接管）", async () => {
+    const agent = makeAgent("s1", "tokenrouter");
+    ctx.setService("agents", { get: () => agent });
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
   });
 
@@ -679,7 +734,7 @@ describe("agent/error 闸门", () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
     remoteOf(ctx).toggle({ sessionId: "s1" });
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
   });
 });
@@ -691,11 +746,11 @@ describe("调度与触发", () => {
     applyPlugin(ctx);
   });
 
-  it("瞬时失败 → 按配置延时调度", () => {
+  it("瞬时失败 → 按配置延时调度", async () => {
     ctx.scope.set({ resumeDelayMs: 7000 });
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 1);
     assert.equal(ctx.timers[0]?.ms, 7000);
   });
@@ -703,8 +758,8 @@ describe("调度与触发", () => {
   it("触发时校验通过 → 发送已批准续跑文案，count+1", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     const msg = agent.followupCalls[0] as {
       role: string;
@@ -718,15 +773,15 @@ describe("调度与触发", () => {
     assert.equal((body.sessions["s1"] as { count: number }).count, 1);
   });
 
-  it("注入 source 必须是 producer-owned kind（不得回退到 'plugin'）", () => {
+  it("注入 source 必须是 producer-owned kind（不得回退到 'plugin'）", async () => {
     // 0.1.7 的 V4 准入（session-format-v3-to-v4/src/message-sources.ts）对每个
     // 持久消息位拒收退役包装 `{ kind: 'plugin', plugin }`，抛
     // "format v4 message requires a producer-owned source kind" —— 一条这样的
     // 续跑消息会直接把整个会话的写到磁盘拒绝掉。
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     const { source } = agent.followupCalls[0] as { source: Record<string, unknown> };
     assert.notEqual(source["kind"], "plugin");
@@ -738,7 +793,7 @@ describe("调度与触发", () => {
     assert.equal(source["plugin"], undefined, "退役包装的 plugin 字段不得再出现");
   });
 
-  it("locale 偏好读一次即缓存：重复判定不重复 describe，推送失效信号后才重读", () => {
+  it("locale 偏好读一次即缓存：重复判定不重复 describe，推送失效信号后才重读", async () => {
     // 注入正文经 runtime.localeMessages() 取，而跨命名空间读只剩 describe() 一条路
     // （它对每个活跃条目都要 schema.toJSON() + JSON.stringify 算 revision）。
     ctx.localePreference = "zh-CN";
@@ -749,22 +804,22 @@ describe("调度与触发", () => {
       return base();
     };
 
-    assert.match(runRescueInjectText(ctx, "s-warm"), /一/u, "首次判定取到中文");
+    assert.match(await runRescueInjectText(ctx, "s-warm"), /一/u, "首次判定取到中文");
     const warm = describeCalls;
     assert.ok(warm > 0, "首次判定读了 describe");
 
     // 缓存已捂热：换一个会话再走同一路，不该再读。
-    assert.match(runRescueInjectText(ctx, "s-next"), /一/u, "第二个会话仍走缓存");
+    assert.match(await runRescueInjectText(ctx, "s-next"), /一/u, "第二个会话仍走缓存");
     assert.equal(describeCalls, warm, "缓存捂热后不再读 describe()");
 
-    ctx.fire(SETTINGS_UPDATED, "llm-pi-ai");
-    assert.match(runRescueInjectText(ctx, "s-other-ns"), /一/u, "别的命名空间变更后仍走缓存");
+    await ctx.fire(SETTINGS_UPDATED, "llm-pi-ai");
+    assert.match(await runRescueInjectText(ctx, "s-other-ns"), /一/u, "别的命名空间变更后仍走缓存");
     assert.equal(describeCalls, warm, "别的命名空间变更不误伤本包的缓存");
 
     // 宿主推 locale 失效 → 下一趟重读一次；描述符此刻还是 zh-CN。
-    ctx.fire(SETTINGS_UPDATED, LOCALE_NS);
+    await ctx.fire(SETTINGS_UPDATED, LOCALE_NS);
     assert.match(
-      runRescueInjectText(ctx, "s-invalidated"),
+      await runRescueInjectText(ctx, "s-invalidated"),
       /一/u,
       "失效后重读到的是当时的描述符（仍中文）",
     );
@@ -772,16 +827,16 @@ describe("调度与触发", () => {
 
     // 描述符真变了，宿主再推一次 → 文案跟着换语言。
     ctx.localePreference = "en-US";
-    ctx.fire(SETTINGS_UPDATED, LOCALE_NS);
+    await ctx.fire(SETTINGS_UPDATED, LOCALE_NS);
     assert.doesNotMatch(
-      runRescueInjectText(ctx, "s-switched"),
+      await runRescueInjectText(ctx, "s-switched"),
       /[一-鿿]/u,
       "重读后注入正文换成英文",
     );
     assert.equal(describeCalls, warm + 2, "换语言那趟又读了一次");
   });
 
-  it("缺席不缓存：locale 条目迟到时每趟都重读，语言不会被永久钉死", () => {
+  it("缺席不缓存：locale 条目迟到时每趟都重读，语言不会被永久钉死", async () => {
     // localePreference 未设 = 官方 client-locale 那个条目没被投影 → find 取不到行。
     // 缓存一次缺席会把语言跟随永久钉死成中文，故缺席期间每趟都重读。
     let describeCalls = 0;
@@ -790,28 +845,28 @@ describe("调度与触发", () => {
       describeCalls += 1;
       return base();
     };
-    assert.match(runRescueInjectText(ctx, "s-absent-1"), /一/u, "缺席时走中文");
+    assert.match(await runRescueInjectText(ctx, "s-absent-1"), /一/u, "缺席时走中文");
     const afterFirst = describeCalls;
     assert.ok(afterFirst > 0, "缺席的那一趟读了 describe");
-    assert.match(runRescueInjectText(ctx, "s-absent-2"), /一/u, "缺席时第二次仍走中文");
+    assert.match(await runRescueInjectText(ctx, "s-absent-2"), /一/u, "缺席时第二次仍走中文");
     assert.ok(describeCalls > afterFirst, "缺席不缓存：第二趟又读了一次");
 
     ctx.localePreference = "en-US";
     assert.doesNotMatch(
-      runRescueInjectText(ctx, "s-arrives"),
+      await runRescueInjectText(ctx, "s-arrives"),
       /[一-鿿]/u,
       "条目到位后立即跟上语言",
     );
   });
 
-  it("英文偏好下走同一条调度路径 → 注入正文取自 en 字典", () => {
+  it("英文偏好下走同一条调度路径 → 注入正文取自 en 字典", async () => {
     // 与上一条同一路径，只把官方 locale 偏好切成 en-US：注入段的语言由
     // hostMessages 选表决定，调度器与纯函数都不读设置。
     ctx.localePreference = "en-US";
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "SERVER", message: "boom" }));
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     const msg = agent.followupCalls[0] as { content: { text: string }[] };
     const text = msg.content[0]?.text ?? "";
@@ -819,11 +874,11 @@ describe("调度与触发", () => {
     assert.doesNotMatch(text, /[一-鿿]/u, "注入段不得混进中文");
   });
 
-  it("待办期间第二次失败不重复调度", () => {
+  it("待办期间第二次失败不重复调度", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 1);
   });
 });
@@ -863,23 +918,23 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
   // 事件流推进：rescue fire 开出新轮（首条消息来自 session-rescue）
   // （模块级函数，见上方定义处）
 
-  it("失败轮由 rescue 消息开启 → 冷却旁路，延迟取 chainResumeDelayMs", () => {
+  it("失败轮由 rescue 消息开启 → 冷却旁路，延迟取 chainResumeDelayMs", async () => {
     const agent = rescueOpenedAgent(2);
     // 第一次失败（turn 2，非 rescue 开启，普通路径）
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     // fire → lastFireAt 设置，冷却开始
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     // rescue 消息开出了 turn 3（事件流推进）
     openRescueTurn(agent, 3);
     // turn 3（rescue 开出）再失败 → 链式例外：不被冷却吞掉
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     // 有新定时器，且延迟 = max(10000, 60000) = 60000
     assert.equal(ctx.timers.length, 2);
     assert.equal(ctx.timers[1]?.ms, 60_000);
   });
 
-  it("失败轮由用户消息开启 → 冷却照常拦截（链式判定不误伤）", () => {
+  it("失败轮由用户消息开启 → 冷却照常拦截（链式判定不误伤）", async () => {
     const agent = makeAgent("s1", "tokenrouter", {
       session: {
         id: "s1",
@@ -899,9 +954,9 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
     // fire → 冷却开始
-    ctx.tick();
+    await ctx.tick();
     // 用户手动开新轮 turn 3（普通 user 消息）→ 再失败
     (agent.session.evs ?? []).push({ type: TURN_START_EVENT, seq: 3, time: 3, data: { turn: 3 } });
     (agent.session.evs ?? []).push({
@@ -914,12 +969,12 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
         source: { kind: "user", rpcId: "r2" },
       },
     });
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     // 普通失败在冷却内 → 被拦截，无新定时器
     assert.equal(ctx.timers.length, 1);
   });
 
-  it("max-tokens continue 不走链式：自身冷却生效（rescue-opened 轮也不旁路）", () => {
+  it("max-tokens continue 不走链式：自身冷却生效（rescue-opened 轮也不旁路）", async () => {
     const agent = rescueOpenedAgent(2);
     // 先让 turn 2 以 max-tokens 结束 → 调度并 fire 一次 continue，建立它自己的冷却戳
     (agent.session.evs ?? []).push({
@@ -928,9 +983,9 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
       time: 40,
       data: { turn: 2, reason: { kind: MAX_TOKENS_REASON } },
     });
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "首个 continue 应调度");
-    ctx.tick();
+    await ctx.tick();
     // rescue 消息开出的 turn 3 又截断：continue 路径不带 chainDelayMs，
     // 必须被 continue 自身 60s 冷却拦住（若链式旁路误接入就会被放行）。
     openRescueTurn(agent, 3);
@@ -940,23 +995,23 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
       time: 50,
       data: { turn: 3, reason: { kind: MAX_TOKENS_REASON } },
     });
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "continue 不走链式：仍被自身冷却拦截");
   });
 
-  it("跨 kind 冷却互不干扰：resume fire 之后同刻的 continue 照常调度", () => {
+  it("跨 kind 冷却互不干扰：resume fire 之后同刻的 continue 照常调度", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     // resume fire → 只写下 resume 自己的冷却时间戳
-    ctx.tick();
+    await ctx.tick();
     (agent.session.evs ?? []).push({
       type: "turn/end",
       seq: 9,
       time: 9,
       data: { turn: 1, reason: { kind: MAX_TOKENS_REASON } },
     });
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 2, "continue 不得被 resume 的冷却跨 kind 误拦");
     assert.equal(ctx.timers[1]?.ms, 3000);
   });
@@ -964,8 +1019,13 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
   it("链式 fire 成功后 count+1，仍受 maxResumes 上限保护", async () => {
     const agent = rescueOpenedAgent(10);
     for (let i = 0; i < 3; i += 1) {
-      ctx.fire(AGENT_ERROR_EVENT, payload(agent, 10 + i, { code: "RATE_LIMIT", message: "x" }));
-      ctx.tick();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.fire(
+        AGENT_ERROR_EVENT,
+        payload(agent, 10 + i, { code: "RATE_LIMIT", message: "x" }),
+      );
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.tick();
       // rescue fire 开出新轮（事件流推进）
       openRescueTurn(agent, 11 + i);
     }
@@ -974,7 +1034,7 @@ describe("链式例外（rescue 开出的回合再失败）", () => {
     assert.equal((body.sessions["s1"] as { count: number }).count, 3);
     // 第 4 次链式失败 → max-resumes 拦截，无新定时器
     openRescueTurn(agent, 99);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 99, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 99, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 3);
   });
 });
@@ -986,11 +1046,11 @@ describe("配额耗尽的 blocked 位（/state 升级提示源）", () => {
     applyPlugin(ctx);
   });
 
-  it("max-resumes 拒绝 → /state 记 blocked；配额恢复（completed 回合）→ 位撤掉", () => {
+  it("max-resumes 拒绝 → /state 记 blocked；配额恢复（completed 回合）→ 位撤掉", async () => {
     ctx.scope.set({ maxResumes: 0 });
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     const body = remoteOf(ctx).state();
     assert.deepEqual(
       (body.sessions["s1"] as { blocked?: { kind: string; turn: number } }).blocked,
@@ -999,16 +1059,16 @@ describe("配额耗尽的 blocked 位（/state 升级提示源）", () => {
     );
     // completed 回合 → onSuccess 配额恢复 → 位撤掉（客户端下次耗尽会再报一次）
     replaceEvent(agent, evTurnEnd(2, "completed"));
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     const st = remoteOf(ctx).state().sessions["s1"] as { blocked?: unknown };
     assert.equal(st.blocked, undefined, "配额恢复即撤位");
   });
 
-  it("toggle 关闭会话 → blocked 一并撤掉", () => {
+  it("toggle 关闭会话 → blocked 一并撤掉", async () => {
     ctx.scope.set({ maxResumes: 0 });
     const agent = makeAgent("s2", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     remoteOf(ctx).toggle({ sessionId: "s2" });
     const st = remoteOf(ctx).state().sessions["s2"] as { blocked?: unknown };
     assert.equal(st.blocked, undefined, "关掉的会话不再需要耗尽解释");
@@ -1022,36 +1082,36 @@ describe("触发前校验否决", () => {
     applyPlugin(ctx);
   });
 
-  it("agent 已不存在 → 否决", () => {
+  it("agent 已不存在 → 否决", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     // 会话被移除
     ctx.agentsService.byId.delete("s1");
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0);
   });
 
-  it("触发时 agent 正在运行 → 否决", () => {
+  it("触发时 agent 正在运行 → 否决", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     // 用户在倒计时内手动继续
     agent.status = "running";
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0);
   });
 
-  it("触发时 inbox 有待处理消息 → 否决", () => {
+  it("触发时 inbox 有待处理消息 → 否决", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     agent.inbox = { nextTurn: [{ id: "queued" }], nextStep: [] };
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0);
   });
 
-  it("失败轮之后已有新轮开启 → 否决", () => {
+  it("失败轮之后已有新轮开启 → 否决", async () => {
     const agent = makeAgent("s1", "tokenrouter", {
       session: {
         id: "s1",
@@ -1059,20 +1119,20 @@ describe("触发前校验否决", () => {
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     (agent.session.evs ?? []).push({ type: TURN_START_EVENT, seq: 5, time: 1, data: { turn: 2 } });
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0);
   });
 
-  it("否决不进冷却：下一次失败仍可调度", () => {
+  it("否决不进冷却：下一次失败仍可调度", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     agent.status = "running";
-    ctx.tick();
+    await ctx.tick();
     agent.status = "idle";
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     // 第二次被接受（新定时器）
     assert.equal(ctx.timers.length, 2);
   });
@@ -1085,10 +1145,10 @@ describe("remote 读取接口的业务结果", () => {
     applyPlugin(ctx);
   });
 
-  it("state：返回调度与开关状态", () => {
+  it("state：返回调度与开关状态", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     const body = remoteOf(ctx).state();
     const session = body.sessions["s1"] as {
       pending: { turn: number; remainingMs: number } | null;
@@ -1099,28 +1159,28 @@ describe("remote 读取接口的业务结果", () => {
     assert.equal(session.disabled, false);
   });
 
-  it("cancel：取消待办并释放定时器", () => {
+  it("cancel：取消待办并释放定时器", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     assert.deepEqual(remoteOf(ctx).cancel({ sessionId: "s1" }), {
       ok: true,
       cancelled: true,
       turn: 3,
     });
     assert.equal(ctx.timers[0]?.cancelled, true);
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0);
   });
 
-  it("cancel 缺 sessionId → 400", () => {
+  it("cancel 缺 sessionId → 400", async () => {
     assert.equal(remoteOf(ctx).cancel({ sessionId: "" })["status"], 400);
   });
 
-  it("toggle：翻转会话开关；关闭时同时解除待办", () => {
+  it("toggle：翻转会话开关；关闭时同时解除待办", async () => {
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     assert.deepEqual(remoteOf(ctx).toggle({ sessionId: "s1" }), { ok: true, disabled: true });
     // 关闭即解除待办
     assert.equal(ctx.timers[0]?.cancelled, true);
@@ -1133,25 +1193,25 @@ describe("remote 读取接口的业务结果", () => {
 });
 
 describe("生命周期", () => {
-  it("effect 清理时释放所有待办定时器", () => {
+  it("effect 清理时释放所有待办定时器", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = makeAgent("s1", "tokenrouter");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     ctx.disposeEffects();
     assert.equal(ctx.timers[0]?.cancelled, true);
   });
 });
 
 describe("连接感知（connection/reset 恢复挂起的续跑，0.1.2-alpha.2）", () => {
-  it("无挂起待办时 resume 返回 restored=0", () => {
+  it("无挂起待办时 resume 返回 restored=0", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     assert.deepEqual(remoteOf(ctx).resume(), { ok: true, restored: 0 });
   });
 
-  it("fire 发送抛错时挂起待办；调用 resume 后按剩余时间重新武装并补发", () => {
+  it("fire 发送抛错时挂起待办；调用 resume 后按剩余时间重新武装并补发", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const rescueAgent: MockAgent = makeAgent("s1", "tokenrouter");
@@ -1160,10 +1220,13 @@ describe("连接感知（connection/reset 恢复挂起的续跑，0.1.2-alpha.2�
       throw new Error(CARRIER_DOWN_MESSAGE);
     };
     register(ctx, rescueAgent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(rescueAgent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(
+      AGENT_ERROR_EVENT,
+      payload(rescueAgent, 1, { code: "RATE_LIMIT", message: "x" }),
+    );
     assert.equal(ctx.timers.length, 1, "scheduled one timer");
     // 触发定时器 → followup 抛错 → 挂起进 suspendedSnapshots
-    ctx.timers[0]!.fn();
+    await ctx.timers[0]!.fn();
     assert.equal(rescueAgent.followupCalls.length, 0, "no message sent on carrier-down");
     // 恢复：改为不抛错的 followup，再调 resume → 重新武装 → 触发 → 补发成功
     rescueAgent.followup = (message) => {
@@ -1171,12 +1234,12 @@ describe("连接感知（connection/reset 恢复挂起的续跑，0.1.2-alpha.2�
     };
     assert.deepEqual(remoteOf(ctx).resume(), { ok: true, restored: 1 });
     assert.equal(ctx.timers.length, 2, "re-armed agent timer after reconnect");
-    ctx.timers[1]!.fn();
+    await ctx.timers[1]!.fn();
     assert.equal(rescueAgent.followupCalls.length, 1, "auto-resume message sent after reconnect");
   });
 });
 
-function suspendCtx(): { ctx: MockCtx; agent: MockAgent } {
+async function suspendCtx(): Promise<{ ctx: MockCtx; agent: MockAgent }> {
   const ctx = createMockCtx();
   applyPlugin(ctx);
   const agent = makeAgent("s1", "tokenrouter");
@@ -1184,15 +1247,15 @@ function suspendCtx(): { ctx: MockCtx; agent: MockAgent } {
     throw new Error(CARRIER_DOWN_MESSAGE);
   };
   register(ctx, agent);
-  ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+  await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
   // fire → followup 抛错 → 挂起
-  ctx.timers[0]!.fn();
+  await ctx.timers[0]!.fn();
   return { ctx, agent };
 }
 
 describe("挂起快照生命周期（可见/可取消/开关闸门/上限，审查修正）", () => {
-  it("挂起后 state 可见 suspended 待办（可取消横幅的数据源）", () => {
-    const { ctx } = suspendCtx();
+  it("挂起后 state 可见 suspended 待办（可取消横幅的数据源）", async () => {
+    const { ctx } = await suspendCtx();
     const st = remoteOf(ctx).state();
     const { pending } = st.sessions["s1"] as { pending: Record<string, unknown> };
     assert.equal(pending["suspended"], true);
@@ -1201,8 +1264,8 @@ describe("挂起快照生命周期（可见/可取消/开关闸门/上限，审�
     assert.equal(typeof pending["remainingMs"], "number");
   });
 
-  it("取消挂起待办：resume 不再恢复（restored=0，无新定时器，不补发）", () => {
-    const { ctx, agent } = suspendCtx();
+  it("取消挂起待办：resume 不再恢复（restored=0，无新定时器，不补发）", async () => {
+    const { ctx, agent } = await suspendCtx();
     assert.deepEqual(remoteOf(ctx).cancel({ sessionId: "s1" }), {
       ok: true,
       cancelled: true,
@@ -1213,15 +1276,15 @@ describe("挂起快照生命周期（可见/可取消/开关闸门/上限，审�
     assert.equal(agent.followupCalls.length, 0);
   });
 
-  it("toggle 关闭清除挂起待办：resume 恢复数为 0", () => {
-    const { ctx } = suspendCtx();
+  it("toggle 关闭清除挂起待办：resume 恢复数为 0", async () => {
+    const { ctx } = await suspendCtx();
     remoteOf(ctx).toggle({ sessionId: "s1" });
     assert.deepEqual(remoteOf(ctx).resume(), { ok: true, restored: 0 });
     assert.equal(ctx.timers.length, 1, "no re-armed timer after toggle-off");
   });
 
-  it("恢复受全局 enabled 闸门：插件关闭后 resume 丢弃挂起待办", () => {
-    const { ctx } = suspendCtx();
+  it("恢复受全局 enabled 闸门：插件关闭后 resume 丢弃挂起待办", async () => {
+    const { ctx } = await suspendCtx();
     ctx.scope.set({ enabled: false });
     const res = remoteOf(ctx).resume();
     // restored 读的是挂起时快照数（1），但快照被丢弃：无新定时器、state 不再显示
@@ -1232,7 +1295,7 @@ describe("挂起快照生命周期（可见/可取消/开关闸门/上限，审�
     assert.equal(pending?.["suspended"], undefined);
   });
 
-  it("挂起快照上限裁剪：超过 MAX_SUSPENDED 时淘汰最旧", () => {
+  it("挂起快照上限裁剪：超过 MAX_SUSPENDED 时淘汰最旧", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     for (let i = 0; i < 65; i += 1) {
@@ -1241,8 +1304,10 @@ describe("挂起快照生命周期（可见/可取消/开关闸门/上限，审�
         throw new Error(CARRIER_DOWN_MESSAGE);
       };
       register(ctx, agent);
-      ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
-      ctx.timers.at(-1)!.fn();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.timers.at(-1)!.fn();
     }
     const st = remoteOf(ctx).state();
     let suspended = 0;
@@ -1281,31 +1346,31 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
   ];
   const ALL_DONE = [{ content: "a", status: "completed" }];
 
-  it("completed + 本回合清单含未完成 → 调度 unfinished 并发出补跑文案", () => {
+  it("completed + 本回合清单含未完成 → 调度 unfinished 并发出补跑文案", async () => {
     const agent = agentWith(7, "completed", OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     assert.equal(ctx.timers[0]?.ms, 5000);
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     const msg = agent.followupCalls[0] as { content: { text: string }[] };
     assert.match(msg.content[0]?.text ?? "", /未完成|待办/u);
   });
 
-  it("开关关闭时不补跑（默认行为可关）", () => {
+  it("开关关闭时不补跑（默认行为可关）", async () => {
     ctx.scope.set({ resumeOnOpenTodos: false });
     const agent = agentWith(7, "completed", OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("清单全完成 → 不补跑", () => {
+  it("清单全完成 → 不补跑", async () => {
     const agent = agentWith(7, "completed", ALL_DONE);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("无 todo/write → 不补跑（无从判断）", () => {
+  it("无 todo/write → 不补跑（无从判断）", async () => {
     const agent = makeAgent("s1", "tokenrouter", {
       session: {
         id: "s1",
@@ -1315,11 +1380,11 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("清单是更早回合写的（陈旧）→ 不补跑", () => {
+  it("清单是更早回合写的（陈旧）→ 不补跑", async () => {
     const agent = makeAgent("s1", "tokenrouter", {
       session: {
         id: "s1",
@@ -1335,11 +1400,11 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("最后回合调用过 ask_user_question → 抑制（模型在等用户）", () => {
+  it("最后回合调用过 ask_user_question → 抑制（模型在等用户）", async () => {
     const agent = makeAgent("s1", "tokenrouter", {
       session: {
         id: "s1",
@@ -1353,11 +1418,11 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("goal 驱动的回合：排期照排，读不到停机位则在触发侧让路", () => {
+  it("goal 驱动的回合：排期照排，读不到停机位则在触发侧让路", async () => {
     const agent = makeAgent("s1", "tokenrouter", {
       session: {
         id: "s1",
@@ -1379,15 +1444,15 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     // 让路判据在触发侧（round driver 的 disarm 就发生在它自己的 agent/error 监听里，
     // 跨插件的监听先后不是契约）：这里 goals 服务不在位 ⇒ 证不了它停 ⇒ 不注入。
     assert.equal(ctx.timers.length, 1, "goal 轮也排期：不排期就没法在停机后接管");
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0, "读不到停机位 ⇒ 维持让路");
   });
 
-  it("schedule 驱动的回合 → 抑制（交官方定时任务，不双重注入）", () => {
+  it("schedule 驱动的回合 → 抑制（交官方定时任务，不双重注入）", async () => {
     const agent = makeAgent("s-sched", "tokenrouter", {
       session: {
         id: "s-sched",
@@ -1405,11 +1470,11 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0, "Schedule 开的回合不该触发 auto-unfinished");
   });
 
-  it("schedule 驱动且以 max-tokens 收尾的回合 → 也不触发 auto-continue", () => {
+  it("schedule 驱动且以 max-tokens 收尾的回合 → 也不触发 auto-continue", async () => {
     const agent = makeAgent("s-sched-cont", "tokenrouter", {
       session: {
         id: "s-sched-cont",
@@ -1431,11 +1496,11 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       },
     });
     register(ctx, agent);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0, "Schedule 开的回合不该触发 auto-continue");
   });
 
-  it("非 completed（error/aborted/max-tokens）→ 不走 unfinished 路径", () => {
+  it("非 completed（error/aborted/max-tokens）→ 不走 unfinished 路径", async () => {
     for (const kind of ["error", "aborted", MAX_TOKENS_REASON]) {
       const localCtx = createMockCtx();
       localCtx.scope.set({
@@ -1448,29 +1513,30 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
         session: { id: "s1", snapshotEvents: () => turnWithTodos(7, kind, OPEN) },
       });
       register(localCtx, agent);
-      localCtx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await localCtx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
       // max-tokens 走 continue 路径（1 个定时器，ms=continueDelayMs）；其它为 0
       const expected = kind === MAX_TOKENS_REASON ? 3000 : 0;
       assert.equal(localCtx.timers[0]?.ms ?? 0, expected, kind);
     }
   });
 
-  it("enabled=false → 一律不补跑", () => {
+  it("enabled=false → 一律不补跑", async () => {
     ctx.scope.set({ enabled: false });
     const agent = agentWith(7, "completed", OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("每会话开关关闭 → 不补跑", () => {
+  it("每会话开关关闭 → 不补跑", async () => {
     const agent = agentWith(7, "completed", OPEN);
     remoteOf(ctx).resume();
     remoteOf(ctx).toggle({ sessionId: "s1" });
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("补跑上限用尽后静默；清单闭合后配额恢复", () => {
+  it("补跑上限用尽后静默；清单闭合后配额恢复", async () => {
     // 冷却置 0：本例只验次数闸门，不让真实时钟下的冷却干扰。
     ctx.scope.set({ unfinishedCooldownMs: 0 });
     const agent = makeAgent("s1", "tokenrouter", {
@@ -1487,37 +1553,37 @@ describe("completed 回合：todo 未闭合自动补跑（unfinished）", () => 
       );
     };
     closedTurn(10, OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "第 1 次应调度");
-    ctx.tick();
+    await ctx.tick();
     closedTurn(11, OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 2, "第 2 次应调度");
-    ctx.tick();
+    await ctx.tick();
     closedTurn(12, OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 2, "第 3 次应被 maxUnfinished 拦住");
     // 清单闭合 → unfinished 配额恢复
     closedTurn(13, ALL_DONE);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 2, "清单闭合不该补跑");
     closedTurn(14, OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 3, "闭合恢复配额后应可再补跑");
   });
 
-  it("state 的 pending 携带 kind=unfinished", () => {
+  it("state 的 pending 携带 kind=unfinished", async () => {
     const agent = agentWith(7, "completed", OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     const st = remoteOf(ctx).state();
     const { pending } = st.sessions["s1"] as { pending: { kind: string } | null };
     assert.equal(pending?.kind, "unfinished");
   });
 
-  it("同一 idle 事件重复触发不产生两个待办（单待办不变量）", () => {
+  it("同一 idle 事件重复触发不产生两个待办（单待办不变量）", async () => {
     const agent = agentWith(7, "completed", OPEN);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
   });
 });
@@ -1539,18 +1605,20 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
     // 打满 3 次 resume（每次 fire 后推进回合，避开 newer-turn 否决）
     for (let i = 1; i <= 3; i += 1) {
       replaceEvent(agent, evTurnEnd(i, "error"));
-      ctx.fire(AGENT_ERROR_EVENT, {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.fire(AGENT_ERROR_EVENT, {
         agent,
         turn: i,
         step: 1,
         error: { failure: { code: "RATE_LIMIT", message: "429" } },
       });
-      ctx.tick();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.tick();
     }
     assert.equal(ctx.timers.length, 3, "前置：应已 fire 满 3 次");
     // 第 4 次瞬时失败：修复前会被 max-resumes 静默拦掉
     replaceEvent(agent, evTurnEnd(4, "error"));
-    ctx.fire(AGENT_ERROR_EVENT, {
+    await ctx.fire(AGENT_ERROR_EVENT, {
       agent,
       turn: 4,
       step: 1,
@@ -1559,9 +1627,9 @@ describe("completed 回合重置失败配额（A：长跑会话不得用完即�
     assert.equal(ctx.timers.length, 3, "满额后应无新定时器");
     // 一次成功回合 → 配额恢复
     replaceEvent(agent, evTurnEnd(5, "completed"));
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     replaceEvent(agent, evTurnEnd(6, "error"));
-    ctx.fire(AGENT_ERROR_EVENT, {
+    await ctx.fire(AGENT_ERROR_EVENT, {
       agent,
       turn: 6,
       step: 1,
@@ -1621,9 +1689,9 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
     Object.assign(agent, { model: { current: () => ({ provider: EXCLUDED_PROVIDER }) } });
     register(ctx, agent);
     await failRequest(agent, "tokenrouter");
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 1, "A 不在排除表，先按瞬时失败武装");
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0, "到点读活线 B，它在排除表");
     assert.equal(lessons.length, 1);
     assert.match(String(lessons[0]?.["signature"]), /^tokenrouter\b/u, "失败归因是请求实际走的 A");
@@ -1635,9 +1703,9 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
     Object.assign(agent, { model: { current: () => ({ provider: "tokenrouter" }) } });
     register(ctx, agent);
     await failRequest(agent, "tokenrouter");
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 1, "归因按请求线路 B 判，不因旧 options 的 A 吞掉");
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1, "B 不在排除表，照常续跑");
     assert.match(String(lessons[0]?.["signature"]), /^tokenrouter\b/u);
   });
@@ -1648,10 +1716,10 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
     Object.assign(agent, { model: { current: () => ({ provider: "pending-c" }) } });
     register(ctx, agent);
     await failRequest(agent, "beta");
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(lessons.length, 1);
     replaceEvent(agent, evTurnEnd(2, "completed"));
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(passes.length, 1, "成功回合兑一条 pass");
     assert.match(String(passes[0]?.["signature"]), /^beta\b/u, "兑的是失败请求 B，不是待选 C");
   });
@@ -1685,7 +1753,7 @@ describe("模型线路来源：排期、归因与 pass 各用各的来源", () =
       nextNoop,
     );
     await Promise.resolve();
-    ctx.tick();
+    await ctx.tick();
     assert.deepEqual(await action, { kind: "retry" });
     assert.equal(reads, 0, "重试途中不读活线，没有换到新选择的窗口");
   });
@@ -1711,50 +1779,50 @@ describe("max-tokens 自动继续（agent/status→idle 检测）", () => {
     return agent;
   }
 
-  it("最后回合 max-tokens → 调度 continue", () => {
+  it("最后回合 max-tokens → 调度 continue", async () => {
     const agent = turnEndAgent(5, MAX_TOKENS_REASON);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     // continueDelayMs 默认 3000
     assert.equal(ctx.timers[0]?.ms, 3000);
   });
 
-  it("最后回合完成 → 不调度", () => {
+  it("最后回合完成 → 不调度", async () => {
     const agent = turnEndAgent(5, "completed");
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("最后回合 error → 不调度（瞬时失败走 agent/error 路径）", () => {
+  it("最后回合 error → 不调度（瞬时失败走 agent/error 路径）", async () => {
     const agent = turnEndAgent(5, "error");
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("running 状态不触发；idle 触发后发送 CONTINUE_TEXT", () => {
+  it("running 状态不触发；idle 触发后发送 CONTINUE_TEXT", async () => {
     const agent = turnEndAgent(5, MAX_TOKENS_REASON);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "running" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "running" });
     assert.equal(ctx.timers.length, 0);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1);
     const msg = agent.followupCalls[0] as { content: { text: string }[] };
     assert.ok(msg.content[0]?.text.startsWith("请从截断处继续输出") === true);
   });
 
-  it("state 的 pending 携带 kind=continue", () => {
+  it("state 的 pending 携带 kind=continue", async () => {
     const agent = turnEndAgent(5, MAX_TOKENS_REASON);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     const st = remoteOf(ctx).state();
     const { pending } = st.sessions["s1"] as { pending: { kind: string } | null };
     assert.equal(pending?.kind, "continue");
   });
 
-  it("enabled=false 时不调度", () => {
+  it("enabled=false 时不调度", async () => {
     ctx.scope.set({ enabled: false });
     const agent = turnEndAgent(5, MAX_TOKENS_REASON);
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 0);
   });
 });
@@ -1763,10 +1831,10 @@ describe("max-tokens 自动继续（agent/status→idle 检测）", () => {
 //    所有平台 429 限流都要自动重试、不打断模型运行；waterfall 返回
 //    {kind:'retry'} 触发同回合重发，与 agent/error 回合级续跑互补） ──
 const quotaEvt = (agentId: string): Record<string, unknown> => ({
-  agent: makeAgent(agentId, "sensenova"),
+  agent: makeAgent(agentId, "xkiro"),
   turn: 1,
   step: 1,
-  provider: "sensenova",
+  provider: "xkiro",
   failure: { code: "QUOTA", message: QUOTA_EXCEEDED_TEXT },
   retryPolicy: undefined,
   signal: undefined,
@@ -1795,7 +1863,7 @@ describe("agent/request-error 请求级 429 重试", () => {
   async function fire(evt: unknown): Promise<unknown> {
     const result = reListener(ctx)(evt, nextNoop);
     await Promise.resolve();
-    ctx.tick();
+    await ctx.tick();
     return result;
   }
 
@@ -1814,7 +1882,7 @@ describe("agent/request-error 请求级 429 重试", () => {
       }
       const result = listener(evt, nextNoop);
       await Promise.resolve();
-      box.tick();
+      await box.tick();
       out.push(await result);
       return step(remaining - 1);
     };
@@ -1823,12 +1891,12 @@ describe("agent/request-error 请求级 429 重试", () => {
   }
 
   it('429 failure → 返回 {kind:"retry"}（触发同回合自动重发，不打断模型）', async () => {
-    const agent = makeAgent("re1", "sensenova");
+    const agent = makeAgent("re1", "xkiro");
     const act = await fire({
       agent,
       turn: 1,
       step: 1,
-      provider: "sensenova",
+      provider: "xkiro",
       failure: {
         code: "QUOTA",
         message: QUOTA_EXCEEDED_FULL_TEXT,
@@ -1840,10 +1908,33 @@ describe("agent/request-error 请求级 429 重试", () => {
     assert.deepEqual(act, retryAction);
   });
 
+  it("宿主显式码表覆盖该码 → 归宿主（next），本阶梯不叠加等待", async () => {
+    // sensenova 在夹具里显式配置了含 QUOTA 的码表：协调后这类码归宿主重试（含耗尽终态），
+    // 本阶梯不再接手，避免宿主 maxRetries 与插件 requestRetryMax 的等待相加。
+    const agent = makeAgent("re-coord", "sensenova");
+    let nextCalled = false;
+    const act = await reListener(ctx)(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider: "sensenova",
+        failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
+        retryPolicy: undefined,
+        signal: undefined,
+      },
+      async () => {
+        nextCalled = true;
+      },
+    );
+    assert.equal(nextCalled, true, "交给下游宿主重试裁决");
+    assert.equal(act, undefined, "宿主显式覆盖的码不由本阶梯重发");
+  });
+
   it("下游已返回 {kind:'retry'}（如官方 llm-retry 接手）→ 原样采纳，不占本阶梯名额", async () => {
     // 分工是「先问下游、无人接再自己来」：llm-retry 愿意接的失败（码表内、次数未耗尽）
     // 归它——本包采纳它的决策，码表过滤、Retry-After、抖动、持久 llm/retry 事件全部保留。
-    const agent = makeAgent("re-policy", "sensenova");
+    const agent = makeAgent("re-policy", "xkiro");
     const policy = {
       mode: "normal",
       maxRetries: 12,
@@ -1856,7 +1947,7 @@ describe("agent/request-error 请求级 429 重试", () => {
         agent,
         turn: 1,
         step: 1,
-        provider: "sensenova",
+        provider: "xkiro",
         failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
         retryPolicy: policy,
         signal: undefined,
@@ -1875,7 +1966,7 @@ describe("agent/request-error 请求级 429 重试", () => {
         agent,
         turn: 1,
         step: 1,
-        provider: "sensenova",
+        provider: "xkiro",
         failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
         retryPolicy: policy,
         signal: undefined,
@@ -1888,21 +1979,21 @@ describe("agent/request-error 请求级 429 重试", () => {
     const entry = ctx.timers[before];
     assert.notEqual(entry, undefined, "下游放行后确已武装退避");
     entry.fired = true;
-    entry.fn();
+    await entry.fn();
     assert.deepEqual(await second, retryAction);
   });
 
   it("宿主解析了 retryPolicy 但下游放行（undefined）→ 本阶梯接管（最后一级）", async () => {
     // llm 注册表对未配置的 provider 无条件补默认策略，「无策略 provider」在真宿主上
     // 不存在；「下游放行」（码表外 QUOTA / 次数耗尽 / Retry-After 超限）才是接手信号。
-    const agent = makeAgent("re-takeover", "sensenova");
+    const agent = makeAgent("re-takeover", "xkiro");
     let delegated = false;
     const pending = reListener(ctx)(
       {
         agent,
         turn: 1,
         step: 1,
-        provider: "sensenova",
+        provider: "xkiro",
         failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
         retryPolicy: {
           mode: "normal",
@@ -1918,20 +2009,20 @@ describe("agent/request-error 请求级 429 重试", () => {
       },
     );
     await Promise.resolve();
-    ctx.tick();
+    await ctx.tick();
     assert.equal(delegated, true, "先问下游");
     assert.deepEqual(await pending, retryAction, "下游不接，本阶梯是最后一级");
   });
 
   it("下游 next() 抛错 → 按无决策处理并 warn，本阶梯照常接手（Error 与非 Error 两面）", async () => {
-    const agent = makeAgent("re-throw", "sensenova");
+    const agent = makeAgent("re-throw", "xkiro");
     const fireOnce = async (nextImpl: () => Promise<unknown>): Promise<unknown> => {
       const pending = reListener(ctx)(
         {
           agent,
           turn: 1,
           step: 1,
-          provider: "sensenova",
+          provider: "xkiro",
           failure: { code: "QUOTA", message: QUOTA_EXCEEDED_FULL_TEXT, status: 429 },
           retryPolicy: undefined,
           signal: undefined,
@@ -1939,7 +2030,7 @@ describe("agent/request-error 请求级 429 重试", () => {
         nextImpl,
       );
       await Promise.resolve();
-      ctx.tick();
+      await ctx.tick();
       return pending;
     };
     assert.deepEqual(
@@ -1963,12 +2054,12 @@ describe("agent/request-error 请求级 429 重试", () => {
   });
 
   it("文本含 429 / rate limit / quota 且无 status 字段（pi-ai 丢 status 形态）→ retry", async () => {
-    const agent = makeAgent("re2", "sensenova");
+    const agent = makeAgent("re2", "xkiro");
     const act1 = await fire({
       agent,
       turn: 1,
       step: 1,
-      provider: "sensenova",
+      provider: "xkiro",
       failure: {
         code: "QUOTA",
         message: QUOTA_EXCEEDED_FULL_TEXT,
@@ -1993,7 +2084,7 @@ describe("agent/request-error 请求级 429 重试", () => {
   });
 
   it("非 429（如认证/上下文超长）→ 委托 next，不重试", async () => {
-    const agent = makeAgent("re3", "sensenova");
+    const agent = makeAgent("re3", "xkiro");
     let nextCalled = 0;
     const next = async (): Promise<undefined> => {
       nextCalled += 1;
@@ -2004,14 +2095,14 @@ describe("agent/request-error 请求级 429 重试", () => {
           agent,
           turn: 1,
           step: 1,
-          provider: "sensenova",
+          provider: "xkiro",
           failure: { code: "AUTH", message: "unauthorized" },
           retryPolicy: undefined,
           signal: undefined,
         },
         next,
       );
-      ctx.tick();
+      await ctx.tick();
       return result;
     })();
     assert.equal(act, undefined, "非 429 返回 undefined");
@@ -2030,7 +2121,7 @@ describe("agent/request-error 请求级 429 重试", () => {
 
   it("回合统一处理（status→idle）重置请求级重试计数：零星 429 不跨回合累加到永久失效", async () => {
     // 同一 agent 实例（计数键是 session.id）贯穿全程，才能验到"跨回合累加"。
-    const agent = makeAgent("re-reset", "sensenova");
+    const agent = makeAgent("re-reset", "xkiro");
     const evt: Record<string, unknown> = { ...quotaEvt("re-reset"), agent };
     const useAgent = (): Record<string, unknown> => evt;
     const round1 = await fireSequence(ctx, useAgent(), 4);
@@ -2038,7 +2129,7 @@ describe("agent/request-error 请求级 429 重试", () => {
       assert.deepEqual(act, retryAction, `回合1第${index + 1}次重试`);
     }
     // 回合统一处理 → idle：重置该会话计数（旧实现从不重置 → 累加到 5 后第 6 次永久放行给 llm-retry）
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     const round2 = await fireSequence(ctx, useAgent(), 5);
     for (const [index, act] of round2.entries()) {
       assert.deepEqual(act, retryAction, `回合2第${index + 1}次仍重试（计数已重置）`);
@@ -2048,7 +2139,7 @@ describe("agent/request-error 请求级 429 重试", () => {
   });
 
   it("退避：按尝试序取固定阶梯（2s/5s/10s/20s/30s），sleep 走宿主 timer（退避修复）", async () => {
-    const agent = makeAgent("re-backoff", "sensenova");
+    const agent = makeAgent("re-backoff", "xkiro");
     const listener = reListener(ctx);
     const delays: (number | undefined)[] = [];
     const results: unknown[] = [];
@@ -2062,7 +2153,7 @@ describe("agent/request-error 请求级 429 重试", () => {
           agent,
           turn: 1,
           step: 1,
-          provider: "sensenova",
+          provider: "xkiro",
           failure: { code: "QUOTA", message: QUOTA_EXCEEDED_TEXT },
           retryPolicy: undefined,
           signal: undefined,
@@ -2077,7 +2168,7 @@ describe("agent/request-error 请求级 429 重试", () => {
       const entry = ctx.timers[before];
       assert.ok(entry);
       entry.fired = true;
-      entry.fn();
+      await entry.fn();
       results.push(await result);
       return step(remaining - 1);
     };
@@ -2103,10 +2194,10 @@ describe("agent/request-error 请求级 429 重试", () => {
       },
     } as unknown as AbortSignal;
     const armed = (sessionId: string): unknown => ({
-      agent: makeAgent(sessionId, "sensenova"),
+      agent: makeAgent(sessionId, "xkiro"),
       turn: 1,
       step: 1,
-      provider: "sensenova",
+      provider: "xkiro",
       failure: { code: "QUOTA", message: QUOTA_EXCEEDED_TEXT },
       retryPolicy: undefined,
       signal: stub,
@@ -2115,7 +2206,7 @@ describe("agent/request-error 请求级 429 重试", () => {
     const first = reListener(ctx)(armed("lk-fire"), nextNoop);
     await Promise.resolve();
     assert.equal(counts.added, 1, "武装退避时登记一枚 abort 监听");
-    ctx.tick();
+    await ctx.tick();
     await first;
     assert.equal(counts.removed, 1, "计时到点这一支主动摘掉监听");
     // 卸载一支：effect 的释放器（runtime.backoffs 里那位）被调用时同样要摘。
@@ -2133,7 +2224,7 @@ describe("agent/request-error 请求级 429 重试", () => {
   });
 
   it("退避等待中 signal 已中止 → 终结，不重发也不占名额", async () => {
-    const agent = makeAgent("re-abort", "sensenova");
+    const agent = makeAgent("re-abort", "xkiro");
     let nextCalled = 0;
     const next = async (): Promise<undefined> => {
       nextCalled += 1;
@@ -2145,21 +2236,21 @@ describe("agent/request-error 请求级 429 重试", () => {
         agent,
         turn: 1,
         step: 1,
-        provider: "sensenova",
+        provider: "xkiro",
         failure: { code: "QUOTA", message: QUOTA_EXCEEDED_TEXT },
         retryPolicy: undefined,
         signal: controller.signal,
       },
       next,
     );
-    ctx.tick();
+    await ctx.tick();
     assert.equal(await result, undefined, "已中止不返回 retry");
     assert.equal(nextCalled, 1, "next 在采纳位被问询一次");
   });
 
   it("enabled=false 时不重试，委托 next", async () => {
     ctx.scope.set({ enabled: false });
-    const agent = makeAgent("re5", "sensenova");
+    const agent = makeAgent("re5", "xkiro");
     let nextCalled = 0;
     const next = async (): Promise<undefined> => {
       nextCalled += 1;
@@ -2170,14 +2261,14 @@ describe("agent/request-error 请求级 429 重试", () => {
           agent,
           turn: 1,
           step: 1,
-          provider: "sensenova",
+          provider: "xkiro",
           failure: { code: "QUOTA", message: QUOTA_EXCEEDED_TEXT, status: 429 },
           retryPolicy: undefined,
           signal: undefined,
         },
         next,
       );
-      ctx.tick();
+      await ctx.tick();
       return result;
     })();
     assert.equal(act, undefined, "disabled 委托");
@@ -2193,7 +2284,7 @@ describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略�
     applyPlugin(ctx);
   });
 
-  it("retryProviders：列出 llm-pi-ai providers 与当前策略摘要", () => {
+  it("retryProviders：列出 llm-pi-ai providers 与当前策略摘要", async () => {
     const body = remoteOf(ctx).retryProviders();
     assert.equal(body["ok"], true);
     const providers = body["providers"] as {
@@ -2209,7 +2300,7 @@ describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略�
     assert.equal(found.hasQuota, true);
   });
 
-  it("retryProviders：settings 服务缺失/不可读 → ok:false 不炸", () => {
+  it("retryProviders：settings 服务缺失/不可读 → ok:false 不炸", async () => {
     ctx.piAiDescribeValue = undefined;
     const body = remoteOf(ctx).retryProviders();
     assert.equal(body["ok"], false);
@@ -2230,7 +2321,8 @@ describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略�
     assert.equal(op.op, "set");
     assert.deepEqual(op.path, ["providers", "xkiro", "retryPolicy"]);
     assert.equal(op.value.mode, "normal");
-    assert.equal(op.value.maxRetries, 12);
+    // xkiro 无现行策略 → 沿用官方默认 5（enhanced 不再强设 12，不盖用户在宿主调的次数）
+    assert.equal(op.value.maxRetries, 5);
     assert.ok(
       op.value.retryableCodes.includes("QUOTA"),
       "enhanced 必含 QUOTA（429+quota 归码 QUOTA 的兜底）",
@@ -2312,7 +2404,7 @@ describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略�
     assert.equal(await errorOfThrown(ctx, { message: "has-message" }), "has-message");
   });
 
-  it("retryProviders：profile 非对象的行直接丢弃，缺字段按官方默认投影", () => {
+  it("retryProviders：profile 非对象的行直接丢弃，缺字段按官方默认投影", async () => {
     ctx.piAiDescribeValue = [
       {
         ns: "llm-pi-ai",
@@ -2344,34 +2436,36 @@ describe("retry-providers / retry-policy 读取接口 - 官方 llm-retry 策略�
 });
 // ── 行级 config（0.1.7：cordis 按导出 Config schema 校验行 config、填 .default() 后
 //    把 volatile 引用交进 apply；旧的「合进 base 再交给 settings.register」那一步没了）──
-function firstTimerAfterTransient(ctx: MockCtx): TimerEntry | undefined {
+async function firstTimerAfterTransient(ctx: MockCtx): Promise<TimerEntry | undefined> {
   const agent = makeAgent("s1", "tokenrouter");
   register(ctx, agent);
-  ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+  await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
   return ctx.timers[0];
 }
 
 describe("session-rescue 行级 config", () => {
   /** 一次瞬时失败后的调度结果（未调度 = undefined）。 */
 
-  it("行 config 覆盖 schema 默认，且真的走到调度那一步", () => {
+  it("行 config 覆盖 schema 默认，且真的走到调度那一步", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx, { resumeDelayMs: 7000 });
     // enabled 没出现在行 config → 仍按 schema 默认 true 注入（未提供字段保持默认）。
-    assert.equal(firstTimerAfterTransient(ctx)?.ms, 7000, "行 config 的 resumeDelayMs 生效");
+    const timer = await firstTimerAfterTransient(ctx);
+    assert.equal(timer?.ms, 7000, "行 config 的 resumeDelayMs 生效");
   });
 
-  it("行 config 关掉 enabled → 三类注入一律不调度", () => {
+  it("行 config 关掉 enabled → 三类注入一律不调度", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx, { enabled: false });
-    assert.equal(firstTimerAfterTransient(ctx), undefined);
+    assert.equal(await firstTimerAfterTransient(ctx), undefined);
     assert.equal(ctx.timers.length, 0);
   });
 
-  it("行 config 显式 undefined 的字段不得掩掉 schema 默认", () => {
+  it("行 config 显式 undefined 的字段不得掩掉 schema 默认", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx, { resumeDelayMs: undefined, maxUnfinished: undefined });
-    assert.equal(firstTimerAfterTransient(ctx)?.ms, 10_000, "显式 undefined → 取默认 10s");
+    const timer = await firstTimerAfterTransient(ctx);
+    assert.equal(timer?.ms, 10_000, "显式 undefined → 取默认 10s");
   });
 });
 
@@ -2381,7 +2475,7 @@ const retryEvt = (agent: unknown): unknown => ({
   agent,
   turn: 1,
   step: 1,
-  provider: "sensenova",
+  provider: "xkiro",
   failure: {
     code: "QUOTA",
     message: QUOTA_EXCEEDED_FULL_TEXT,
@@ -2421,7 +2515,7 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
   const uncheckedConfig = {} as never;
   /** 除被考察的那一项外全部齐备的宿主 ctx：其它项不得替被考察项挡下急停。 */
 
-  it("ctx 不是对象 → 抛错，不在半路上炸", () => {
+  it("ctx 不是对象 → 抛错，不在半路上炸", async () => {
     assert.throws(() => {
       plugin.apply(null as never, uncheckedConfig);
     }, contractError);
@@ -2430,7 +2524,7 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
     }, contractError);
   });
 
-  it("缺 get/effect/inject/on 任一 → 抛错", () => {
+  it("缺 get/effect/inject/on 任一 → 抛错", async () => {
     assert.throws(() => {
       plugin.apply({} as never, uncheckedConfig);
     }, contractError);
@@ -2446,7 +2540,7 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
     }, contractError);
   });
 
-  it("fiber 缺席/非对象 → 抛错（configure 的 owner 不能是 undefined）", () => {
+  it("fiber 缺席/非对象 → 抛错（configure 的 owner 不能是 undefined）", async () => {
     assert.throws(() => {
       plugin.apply({ ...coreHost(), fiber: undefined } as never, uncheckedConfig);
     }, contractError);
@@ -2455,7 +2549,7 @@ describe("宿主契约急停（isHostCtx / hasMethods 点名每个要被调用�
     }, contractError);
   });
 
-  it("timer / settings 面不完整（对象在但方法缺、或整个宿主服务非对象）→ 抛错", () => {
+  it("timer / settings 面不完整（对象在但方法缺、或整个宿主服务非对象）→ 抛错", async () => {
     assert.throws(() => {
       plugin.apply({ ...coreHost(), timer: null } as never, uncheckedConfig);
     }, contractError);
@@ -2522,7 +2616,7 @@ describe("0.1.7 隐式注册验收（volatile 字段投影）", () => {
     "unfinishedSteerMode",
   ];
 
-  it("volatileForm(Config) 的字段集恰为 session-rescue 条目的十四项可编辑字段", () => {
+  it("volatileForm(Config) 的字段集恰为 session-rescue 条目的十四项可编辑字段", async () => {
     const form = volatileFormOf(plugin.Config as unknown as SchemaNode);
     assert.ok(form !== null, "没有任何 volatile 字段 → 宿主 describe() 整条跳过本条目");
     assert.deepEqual(form.toSorted(), EDITABLE, "投影字段集与设置卡预期可编辑项不一致");
@@ -2530,7 +2624,7 @@ describe("0.1.7 隐式注册验收（volatile 字段投影）", () => {
 });
 
 describe("state 路由：调度器记录被淘汰后挂起快照仍如实可见", () => {
-  it("本包 Config 不含 secret 字段 ⇒测试替身读 raw meta.default 与宿主 plainSchema 同解", () => {
+  it("本包 Config 不含 secret 字段 ⇒测试替身读 raw meta.default 与宿主 plainSchema 同解", async () => {
     // 见 test/config-refs.ts 的 secretBearingFields：宿主对 meta.role==="secret"
     // 会抹掉 default/required，本测试替身不抹。今天没有这类字段，所以两条路同解。
     assert.deepEqual(secretBearingFields(), []);
@@ -2544,8 +2638,8 @@ describe("state 路由：调度器记录被淘汰后挂起快照仍如实可见"
       throw new Error(CARRIER_DOWN_MESSAGE);
     };
     register(ctx, kept);
-    ctx.fire(AGENT_ERROR_EVENT, payload(kept, 4, { code: "RATE_LIMIT", message: "x" }));
-    ctx.timers.at(-1)!.fn();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(kept, 4, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.timers.at(-1)!.fn();
     // 把调度器的会话记录灌满（lib/resume-scheduler.ts MAX_SESSIONS=200）。
     // 挂起中的记录**不参与淘汰**：它欠着一次补发，counts 还是有效的防失控闸门，
     // 被淘汰后由 restorePending 重建会拿到一枚全 0 的新记录（长跑 daemon 上每满
@@ -2553,8 +2647,10 @@ describe("state 路由：调度器记录被淘汰后挂起快照仍如实可见"
     for (let index = 0; index < 200; index += 1) {
       const filler = makeAgent(`filler-${String(index)}`, "tokenrouter");
       register(ctx, filler);
-      ctx.fire(AGENT_ERROR_EVENT, payload(filler, 1, { code: "RATE_LIMIT", message: "x" }));
-      ctx.tick();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.fire(AGENT_ERROR_EVENT, payload(filler, 1, { code: "RATE_LIMIT", message: "x" }));
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.tick();
     }
     const st = remoteOf(ctx).state();
     const keptRow = st.sessions["kept"] as {
@@ -2591,7 +2687,7 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
   it("会话 dispose 后请求级重试计数清零（重新进入重试而非判耗尽）", async () => {
     const localCtx = createMockCtx();
     applyPlugin(localCtx);
-    const agent = makeAgent("dx1", "sensenova");
+    const agent = makeAgent("dx1", "xkiro");
     const listener = localCtx.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as (
       result: unknown,
       next: () => Promise<unknown>,
@@ -2603,7 +2699,7 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
       }
       const result = listener(retryEvt(agent), nextNoop);
       await Promise.resolve();
-      localCtx.tick();
+      await localCtx.tick();
       results.push(await result);
       return step(remaining - 1);
     };
@@ -2616,7 +2712,7 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
     await step(1);
     assert.equal(results[5], undefined);
     // agent/disposed → 计数清零；同会话再次失败回到重试路径（若未清理则仍是耗尽）
-    localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
+    await localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
     await step(1);
     assert.deepEqual(results[6], { kind: "retry" });
   });
@@ -2627,10 +2723,10 @@ describe("agent/disposed 清理 requestRetryCounts 与 disabledSessions", () => 
     const agent = makeAgent("dx2", "tokenrouter");
     register(localCtx, agent);
     remoteOf(localCtx).toggle({ sessionId: "dx2" });
-    localCtx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await localCtx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(localCtx.timers.length, 0, "toggle 关闭期间不调度");
-    localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
-    localCtx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await localCtx.handlers[AGENT_DISPOSED_EVENT]?.({ agent });
+    await localCtx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(localCtx.timers.length, 1, "dispose 清理开关后同 id 新会话恢复调度");
   });
 });
@@ -2650,13 +2746,18 @@ function attach(ctx: MockCtx): MockProjections {
   return ctx.projections;
 }
 
-/** 给 agent 的 snapshotEvents 套一层计数：投影路径应读到 0 次，回退路径 >0 次。 */
-function countScans(agent: MockAgent): { value: number } {
+/** 给 sessionQuery.observeSession 套一层计数：投影路径应读到 0 次，回退路径 >0 次。 */
+function countScans(ctx: MockCtx): { value: number } {
   const counter = { value: 0 };
-  const inner = agent.session.snapshotEvents;
-  agent.session.snapshotEvents = () => {
+  const sq = ctx.get("sessionQuery") as {
+    observeSession: (
+      sessionId: string,
+    ) => Promise<{ events: readonly unknown[]; [Symbol.dispose]: () => void }>;
+  };
+  const inner = sq.observeSession;
+  sq.observeSession = async (sessionId: string) => {
     counter.value += 1;
-    return inner();
+    return inner(sessionId);
   };
   return counter;
 }
@@ -2686,17 +2787,17 @@ function agentWithEvents(ctx: MockCtx, events: unknown[]): MockAgent {
 const OPEN_LIST = [{ content: "a", status: "in_progress" }];
 
 describe("投影读路径（注册表在位时不再全量扫描）", () => {
-  it("注册表缺席 → 从不注册单元，也不读 stateOf（回退扫描）", () => {
+  it("注册表缺席 → 从不注册单元，也不读 stateOf（回退扫描）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.deepEqual(ctx.projections.registered, []);
     assert.equal(ctx.projections.reads.length, 0, "读口从未装上 ⇒ 从不走 stateOf");
     assert.equal(ctx.timers.length, 1, "无投影也照常兜底（这一条即迁移前的全部行为）");
   });
 
-  it("注册表到位 → 注册本包单元（同一个对象引用）", () => {
+  it("注册表到位 → 注册本包单元（同一个对象引用）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     assert.deepEqual(attach(ctx).registered, [rescueFactsProjection]);
@@ -2711,13 +2812,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const projections = attach(ctx);
     await settle();
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(projections.reads.length, 1, "装载期内经投影读，而不是全量扫描");
     ctx.disposeEffects();
     assert.deepEqual(projections.disposed, [rescueFactsProjection], "官方 disposer 必须被跑过");
     const before = projections.reads.length;
     const timersBefore = ctx.timers.length;
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(projections.reads.length, before, "卸载后读口必须已清空，不再走 stateOf");
     assert.equal(ctx.timers.length, timersBefore + 1, "读口清空后由回退扫描兜底，功能不塌");
   });
@@ -2726,10 +2827,10 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     const projections = attach(ctx);
     await settle();
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     assert.equal(ctx.timers[0]?.ms, 5000, "unfinished 延迟与回退路径同值");
     assert.equal(scans.value, 0, "主路径不再读弃用面");
@@ -2737,7 +2838,7 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
       session: agent.session,
       key: RESCUE_FACTS_KEY,
     });
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1, "注入照常发出");
   });
 
@@ -2745,13 +2846,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(5, "goal"));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     attach(ctx);
     await settle();
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
     // 排期侧不再判 goal：让路/接管要到触发侧读 round driver 自己的停机位。
     assert.equal(ctx.timers.length, 1, "排期发生");
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0, "goals 服务不在位 ⇒ 证不了停机 ⇒ 让路");
     assert.equal(scans.value, 0, "opener 与 newer-turn 两位判定都读投影");
   });
@@ -2761,21 +2862,21 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     ctx.setService("goals", { get: () => ({ phase: "active", activation: "disarmed" }) });
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(5, "goal"));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     attach(ctx);
     await settle();
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 1, "round driver 只 disarm 不重试 ⇒ 本包接管");
     assert.equal(scans.value, 0, "接管路径同样不读全量日志");
   });
 
-  it("schedule 轮次驱动的失败回合 → 投影路径同样让路（不抢官方定时任务的话）", () => {
+  it("schedule 轮次驱动的失败回合 → 投影路径同样让路（不抢官方定时任务的话）", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(5, "schedule"));
     attach(ctx);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 5, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 0);
   });
 
@@ -2783,13 +2884,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(2, "user"));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     attach(ctx);
     await settle();
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.tick();
     openRescueTurn(agent, 3);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 2);
     assert.equal(ctx.timers[1]?.ms, 60_000);
     assert.equal(scans.value, 0);
@@ -2799,12 +2900,12 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, openedTurn(1, "user"));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     attach(ctx);
     await settle();
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     (agent.session.evs ?? []).push({ type: TURN_START_EVENT, seq: 9, time: 9, data: { turn: 2 } });
-    ctx.tick();
+    await ctx.tick();
     assert.equal(agent.followupCalls.length, 0);
     assert.equal(scans.value, 0, "veto 判定也只读投影");
   });
@@ -2813,13 +2914,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     const projections = attach(ctx);
     // 读口要等 register 的微任务落地才发布；不 await 的话 events 仍是 undefined，
     // 走的是「本来就没投影」那条回退，坏形状这条支一次都没跑到。
     await settle();
     projections.foldOverride.value = () => ({});
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "坏状态不改变判定，只是退回扫描读法");
     assert.ok(scans.value > 0, "回退路径确实读了全量日志");
     assert.ok(projections.reads.length > 0, "确实经 stateOf 读过一次投影");
@@ -2829,14 +2930,14 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
-    const scans = countScans(agent);
+    const scans = countScans(ctx);
     const projections = attach(ctx);
     await settle();
     projections.foldOverride.value = (evs) => {
       const state = foldEvents(evs);
       return { ...state, end: { ...state.end, aligned: false } };
     };
-    ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     assert.ok(scans.value > 0);
   });
@@ -2847,13 +2948,13 @@ describe("投影读路径（注册表在位时不再全量扫描）", () => {
     const agent = agentWithEvents(ctx, openedTurn(2, "user"));
     const projections = attach(ctx);
     await settle();
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
-    ctx.tick();
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 2, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.tick();
     openRescueTurn(agent, 3);
     // 抹掉 opener 表 ⇒ turnOpenerKind 交回 undefined ⇒ host 走 scanOpenerKind
     projections.foldOverride.value = (evs) => ({ ...foldEvents(evs), openers: [] });
-    const scans = countScans(agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
+    const scans = countScans(ctx);
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 3, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers[1]?.ms, 60_000, "回退扫描给出同一个链式判定");
     assert.ok(scans.value > 0);
   });
@@ -2872,7 +2973,7 @@ function remoteServiceWithAgent(agent: unknown): SessionRescueRemoteService {
 }
 
 describe("官方 Typert Remote 读取接口", () => {
-  it("state/cancel/toggle/resume：与 HTTP 路由同一份运行时", () => {
+  it("state/cancel/toggle/resume：与 HTTP 路由同一份运行时", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const remote = remoteOf(ctx);
@@ -2881,12 +2982,12 @@ describe("官方 Typert Remote 读取接口", () => {
     ctx.agentsService.rootsList.push(agent);
     ctx.agentsService.byId.set("s1", agent);
     agent.session.evs?.push(evTurnEnd(1, "error"));
-    ctx.fire(AGENT_ERROR_EVENT, {
+    await ctx.fire(AGENT_ERROR_EVENT, {
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
     });
-    ctx.tick();
+    await ctx.tick();
     assert.deepEqual(Object.keys(remote.state().sessions), ["s1"]);
     const cancelled = remote.cancel({ sessionId: "s1" });
     assert.equal(cancelled["ok"], true);
@@ -2901,7 +3002,7 @@ describe("官方 Typert Remote 读取接口", () => {
     assert.deepEqual(remote.resume(), { ok: true, restored: 0 });
   });
 
-  it("toggle 台账满且全是活会话 ⇒ 409", () => {
+  it("toggle 台账满且全是活会话 ⇒ 409", async () => {
     const ctx = createMockCtx();
     applyPlugin(ctx);
     const remote = remoteOf(ctx);
@@ -2918,7 +3019,7 @@ describe("官方 Typert Remote 读取接口", () => {
     assert.equal(refused["status"], 409);
   });
 
-  it("cancel 交回被裁掉的挂起待办", () => {
+  it("cancel 交回被裁掉的挂起待办", async () => {
     const runtime = {
       scheduler: {
         cancel: () => ({ cancelled: true }),
@@ -2937,7 +3038,7 @@ describe("官方 Typert Remote 读取接口", () => {
     });
   });
 
-  it("reask：host 侧 cancel → prepend → 唤醒，按 requestId 去重", () => {
+  it("reask：host 侧 cancel → prepend → 唤醒，按 requestId 去重", async () => {
     const calls: string[] = [];
     const prepended: string[] = [];
     const agent = {
@@ -2993,7 +3094,7 @@ describe("官方 Typert Remote 读取接口", () => {
     assert.equal(missing.reask({ sessionId: "s1", text: "hi", requestId: "r3" })["status"], 404);
   });
 
-  it("reask：cancel 抛错答半成功；inbox 不可写答 500", () => {
+  it("reask：cancel 抛错答半成功；inbox 不可写答 500", async () => {
     const warning = remoteServiceWithAgent({
       cancel: (): void => {
         throw new Error("cancel");
@@ -3085,7 +3186,7 @@ describe("调度器容量饱和的可观测性（capacity skip 升级 warn）", 
     applyPlugin(ctx);
   });
 
-  it("200 条 pending 占满调度器 → 新会话 skip(capacity) 升级 warn（去重）→ 释放一条后回落再武装", () => {
+  it("200 条 pending 占满调度器 → 新会话 skip(capacity) 升级 warn（去重）→ 释放一条后回落再武装", async () => {
     // 饱和的正确形态：200 个会话在延迟窗口内同时失败（fire 不 tick）→ 200 条 pending
     // + 已武装定时器 → 全部不可淘汰。挂起路径不饱和：挂起快照自身有上限，裁剪最旧时
     // releaseSuspended 把记录落回空闲（实测，见 pushSuspended）。
@@ -3093,7 +3194,8 @@ describe("调度器容量饱和的可观测性（capacity skip 升级 warn）", 
       const sessionId = `s-${String(index)}`;
       const agent = makeAgent(sessionId, "tokenrouter");
       register(ctx, agent);
-      ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 测试步骤须串行（后一步依赖前一步结果）
+      await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     }
     const stateCount = Object.keys(
       (remoteOf(ctx).state() as { sessions: Record<string, unknown> }).sessions,
@@ -3105,18 +3207,18 @@ describe("调度器容量饱和的可观测性（capacity skip 升级 warn）", 
     // 新会话瞬时失败：capacity skip → 第一次 warn。
     const overflow = makeAgent("overflow", "tokenrouter");
     register(ctx, overflow);
-    ctx.fire(AGENT_ERROR_EVENT, payload(overflow, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(overflow, 1, { code: "RATE_LIMIT", message: "x" }));
     const afterFirst = capacityWarnCount();
     assert.equal(afterFirst, baseline + 1, "饱和 skip 必须升 warn");
 
     // 再来一条：去重位生效，不刷第二条。
     const overflow2 = makeAgent("overflow-2", "tokenrouter");
     register(ctx, overflow2);
-    ctx.fire(AGENT_ERROR_EVENT, payload(overflow2, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(overflow2, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(capacityWarnCount(), afterFirst, "饱和期间 warn 必须去重");
 
     // 释放一条：s-0 的定时器到点且 followup 成功（不挂起）→ 该记录回到可淘汰态。
-    ctx.timers[0]!.fn();
+    await ctx.timers[0]!.fn();
     assert.ok(
       logged().some((row) => row.text.includes("s-0: auto-resume message sent")),
       "前置：s-0 的注入成功送出",
@@ -3126,11 +3228,11 @@ describe("调度器容量饱和的可观测性（capacity skip 升级 warn）", 
     // 此刻 200 条又满（199 pending + 新会话）→ 再 skip → warn 重新出现。
     const overflow3 = makeAgent("overflow-3", "tokenrouter");
     register(ctx, overflow3);
-    ctx.fire(AGENT_ERROR_EVENT, payload(overflow3, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(overflow3, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(capacityWarnCount(), afterFirst, "回落本身不应告警");
     const overflow4 = makeAgent("overflow-4", "tokenrouter");
     register(ctx, overflow4);
-    ctx.fire(AGENT_ERROR_EVENT, payload(overflow4, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(overflow4, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(capacityWarnCount(), afterFirst + 1, "回落后 warn 必须重新武装");
   });
 });
@@ -3165,22 +3267,26 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
     applyPlugin(ctx);
   });
 
-  function fireStopping(agent: MockAgent, turn = 2, signal?: { aborted?: boolean }): void {
-    ctx.fire(AGENT_TURN_STOPPING_EVENT, { agent, turn, signal });
+  async function fireStopping(
+    agent: MockAgent,
+    turn = 2,
+    signal?: { aborted?: boolean },
+  ): Promise<void> {
+    await ctx.fire(AGENT_TURN_STOPPING_EVENT, { agent, turn, signal });
   }
 
-  it("默认关 → 不 steer", () => {
+  it("默认关 → 不 steer", async () => {
     const agent = openTodoAgent("st1");
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0, "unfinishedSteerMode 默认 false");
   });
 
-  it("开启后：开放回合清单未闭合 → steer 同回合续做，补跑配额 -1", () => {
+  it("开启后：开放回合清单未闭合 → steer 同回合续做，补跑配额 -1", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st2");
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 1);
     const msg = agent.steerCalls[0] as {
       content?: { text?: string }[];
@@ -3192,15 +3298,15 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
     assert.equal(st.counts?.unfinished, 1, "消耗补跑配额（与 unfinished 注入共轨）");
   });
 
-  it("配额耗尽（maxUnfinished=0）→ 不 steer，回合照常收尾", () => {
+  it("配额耗尽（maxUnfinished=0）→ 不 steer，回合照常收尾", async () => {
     ctx.scope.set({ unfinishedSteerMode: true, maxUnfinished: 0 });
     const agent = openTodoAgent("st3");
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("开放回合在等用户（ask_user_question）→ 不 steer", () => {
+  it("开放回合在等用户（ask_user_question）→ 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st4", [
       {
@@ -3211,11 +3317,11 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
       },
     ]);
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0, "等用户时不得插话");
   });
 
-  it("开放回合由 Schedule 开启 → 不 steer", () => {
+  it("开放回合由 Schedule 开启 → 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st5", [
       {
@@ -3226,11 +3332,11 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
       },
     ]);
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("goal 轮（opener 是 goal）→ 不 steer", () => {
+  it("goal 轮（opener 是 goal）→ 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st6", [
       {
@@ -3241,11 +3347,11 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
       },
     ]);
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0, "round driver 还在 driving 时 steer 会打架");
   });
 
-  it("开放回合清单已闭合（openTodos=0）→ 否决（open-todos）", () => {
+  it("开放回合清单已闭合（openTodos=0）→ 否决（open-todos）", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = makeAgent("st12", "tokenrouter", {
       session: {
@@ -3263,11 +3369,11 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
       },
     });
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0, "清单闭合不续做");
   });
 
-  it("没有开放回合（事件流以 turn/end 收尾）→ 无从判定即不 steer", () => {
+  it("没有开放回合（事件流以 turn/end 收尾）→ 无从判定即不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = makeAgent("st13", "tokenrouter", {
       session: {
@@ -3280,69 +3386,162 @@ describe("steer 续跑（agent/turn-stopping，默认关）", () => {
       },
     });
     register(ctx, agent);
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("steer 抛错 → 记错误日志，不炸监听", () => {
+  it("steer 抛错 → 记错误日志，不炸监听", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st14");
     register(ctx, agent);
     agent.steer = (): void => {
       throw new Error("steer-blast");
     };
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("每会话开关关闭 → 不 steer", () => {
+  it("每会话开关关闭 → 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st7");
     register(ctx, agent);
     remoteOf(ctx).toggle({ sessionId: "st7" });
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("调度器已有已武装待办 → 不 steer（不叠加）", () => {
+  it("调度器已有已武装待办 → 不 steer（不叠加）", async () => {
     ctx.scope.set({ unfinishedSteerMode: true, resumeDelayMs: 30_000 });
     const agent = openTodoAgent("st8");
     register(ctx, agent);
-    ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
+    await ctx.fire(AGENT_ERROR_EVENT, payload(agent, 1, { code: "RATE_LIMIT", message: "x" }));
     assert.equal(ctx.timers.length, 1, "先武装一发续跑待办");
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0, "有待办在等，不再叠加 steering");
   });
 
-  it("turn 号与开放回合不符 → 不 steer", () => {
+  it("turn 号与开放回合不符 → 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st9");
     register(ctx, agent);
-    fireStopping(agent, 5);
+    await fireStopping(agent, 5);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("turn 号不可信（NaN）→ 归零后与开放回合不符，按 turn-mismatch 否决", () => {
+  it("turn 号不可信（NaN）→ 归零后与开放回合不符，按 turn-mismatch 否决", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st15");
     register(ctx, agent);
-    fireStopping(agent, Number.NaN);
+    await fireStopping(agent, Number.NaN);
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("signal 已中止 → 不 steer", () => {
+  it("signal 已中止 → 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st10");
     register(ctx, agent);
-    fireStopping(agent, 2, { aborted: true });
+    await fireStopping(agent, 2, { aborted: true });
     assert.equal(agent.steerCalls.length, 0);
   });
 
-  it("非根会话 → 不 steer", () => {
+  it("非根会话 → 不 steer", async () => {
     ctx.scope.set({ unfinishedSteerMode: true });
     const agent = openTodoAgent("st11");
     // 不注册进 roots：isRootAgent 判 false
-    fireStopping(agent);
+    await fireStopping(agent);
     assert.equal(agent.steerCalls.length, 0);
+  });
+});
+
+describe("异步回退安全网与降级（方案A）", () => {
+  interface SqMock {
+    observeSession: (
+      id: string,
+    ) => Promise<{ events: readonly unknown[]; [Symbol.dispose]: () => void }>;
+  }
+
+  it("observeSession 抛错 → readEvents 空表，绝不注入", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
+    const sq = ctx.get("sessionQuery") as SqMock;
+    sq.observeSession = async () => {
+      throw new Error("query down");
+    };
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    assert.equal(ctx.timers.length, 0, "读不到事件流 → 宁缺勿滥");
+  });
+
+  it("await 间隙 agent 变非 idle → preFireCheck 安全网否决，不注入", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
+    const projections = attach(ctx);
+    await settle();
+    projections.foldOverride.value = () => ({});
+    const sq = ctx.get("sessionQuery") as SqMock;
+    const inner = sq.observeSession;
+    let calls = 0;
+    sq.observeSession = async (id) => {
+      calls += 1;
+      // 第一次读（reviewOf）不动状态；第二次读（preFireCheck）期间变非 idle，触发安全网。
+      if (calls >= 2) {
+        agent.status = "running";
+      }
+      return inner(id);
+    };
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.tick();
+    assert.equal(agent.followupCalls.length, 0, "await 间隙变非 idle → 安全网否决");
+  });
+
+  it("await 间隙 inbox 出现待办 → preFireCheck 安全网否决，不注入", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const agent = agentWithEvents(ctx, turnWithTodos(3, "completed", OPEN_LIST));
+    const projections = attach(ctx);
+    await settle();
+    projections.foldOverride.value = () => ({});
+    const sq = ctx.get("sessionQuery") as SqMock;
+    const inner = sq.observeSession;
+    let calls = 0;
+    sq.observeSession = async (id) => {
+      calls += 1;
+      if (calls >= 2) {
+        agent.inbox?.nextTurn?.push({ turn: 9 });
+      }
+      return inner(id);
+    };
+    await ctx.fire(AGENT_STATUS_EVENT, { agent, status: "idle" });
+    await ctx.tick();
+    assert.equal(agent.followupCalls.length, 0, "await 间隙 inbox 有待办 → 安全网否决");
+  });
+
+  it("请求级失败无 code（仅 status）→ hostOwnsRetry 按空码不让路", async () => {
+    const ctx = createMockCtx();
+    ctx.scope.set({ requestRetryBackoffMs: [0] });
+    applyPlugin(ctx);
+    const agent = makeAgent("s-nocode", "tokenrouter");
+    register(ctx, agent);
+    const handler = ctx.handlers[AGENT_REQUEST_ERROR_EVENT] as unknown as (
+      payload: unknown,
+      next: () => Promise<unknown>,
+    ) => Promise<unknown>;
+    const action = await handler(
+      {
+        agent,
+        turn: 1,
+        step: 1,
+        provider: "tokenrouter",
+        failure: { status: 429, message: "rate limited" },
+        retryPolicy: undefined,
+        signal: undefined,
+      },
+      async () => {
+        /* 下游无决策 */
+      },
+    );
+    // 无 code → hostOwnsRetry 交回 false（不让路），本阶梯按限速接管重发。
+    assert.deepEqual(action, { kind: "retry" });
   });
 });

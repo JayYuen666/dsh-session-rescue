@@ -14,7 +14,7 @@ import { applyRescue, schemaDefaults, volatileFieldNames } from "./config-refs.t
 // 判定永远空扫，是死代码，已删。
 
 interface TimerEntry {
-  fn: () => void;
+  fn: () => void | Promise<void>;
   ms: number;
   cancelled: boolean;
   fired: boolean;
@@ -48,7 +48,7 @@ interface MockInjectCtx {
 }
 
 interface MockCtx {
-  handlers: Record<string, (payload: unknown) => void>;
+  handlers: Record<string, (payload: unknown) => void | Promise<void>>;
   timers: TimerEntry[];
   /** apply 各层 effect 交回的卸载函数（宿主在插件卸载时逐个调用）。 */
   disposers: (() => void)[];
@@ -114,7 +114,7 @@ function createCtx(): MockCtx {
     },
   };
   const timer = {
-    timeout(fn: () => void, ms: number) {
+    timeout(fn: () => void | Promise<void>, ms: number) {
       const entry: TimerEntry = { fn, ms, cancelled: false, fired: false };
       ctx.timers.push(entry);
       return () => {
@@ -126,6 +126,18 @@ function createCtx(): MockCtx {
     agents: ctx.agentsService,
     settings,
     timer,
+    sessionQuery: {
+      async observeSession(sessionId: string) {
+        const agent = ctx.agentsService.byId.get(sessionId);
+        const evs = agent?.session.evs ?? [];
+        return {
+          events: evs,
+          [Symbol.dispose]: (): void => {
+            /* 测试替身无资源可释放 */
+          },
+        };
+      },
+    },
   });
   // 0.1.7：apply 第二参是 volatile 引用（按 scopeValue 现读，引用不变、值可变）。
   applyRescue(
@@ -212,13 +224,14 @@ function countsOf(ctx: MockCtx): Record<string, number> {
  * `ctx.timers` 时，push 进去的条目会被同一个 for 循环顺带处理掉，「同一轮里二次武装」
  * 就成了测试替身独有的行为，与宿主的 timer 语义相反。
  */
-function tick(ctx: MockCtx): void {
+async function tick(ctx: MockCtx): Promise<void> {
   // 先快照再触发：fn 内部新 push 的定时器属下一轮，不该在同一轮里被顺带触发。
   const snapshot = [...ctx.timers];
   for (const entry of snapshot) {
     if (!entry.fired && !entry.cancelled) {
       entry.fired = true;
-      entry.fn();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- 定时器须按序逐个触发
+      await entry.fn();
     }
   }
 }
@@ -227,7 +240,7 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
   let ctx: MockCtx;
 
   /** 取 agent/status 处理器；apply 没注册时直接红，避免 `?.()` 让用例永远通过。 */
-  function idleHandler(context: MockCtx): (payload: unknown) => void {
+  function idleHandler(context: MockCtx): (payload: unknown) => void | Promise<void> {
     const handler = context.handlers["agent/status"];
     assert.ok(handler, "apply 必须注册 agent/status 处理器，否则本用例恒绿");
     return handler;
@@ -237,54 +250,54 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
     ctx = createCtx();
   });
 
-  it("aborted 回合的 idle 事件不重置也不消耗配额（counts 原样保留）", () => {
+  it("aborted 回合的 idle 事件不重置也不消耗配额（counts 原样保留）", async () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(1, "error"));
-    ctx.handlers["agent/error"]?.({
+    await ctx.handlers["agent/error"]?.({
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
     });
-    tick(ctx);
+    await tick(ctx);
     assert.deepEqual(countsOf(ctx), { s1: 1 });
     // 武装延迟必须是 resume 那一档：误用 continue/unfinished 的延迟同样能进后续断言。
     assert.equal(ctx.timers[0]?.ms, ctx.scopeValue["resumeDelayMs"], "武装延迟取 resumeDelayMs");
     // 用户 abort turn 2 → idle：既不调度新待办，也不重置已有 count
     agent.session.evs?.push(turnEnd(2, "aborted"));
-    idleHandler(ctx)({ agent, status: "idle" });
+    await idleHandler(ctx)({ agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "aborted idle 不得新增定时器");
     assert.deepEqual(countsOf(ctx), { s1: 1 }, "aborted 不得重置也不得消耗");
     // 直接钉住「没有注入」：首轮 error 已注入过一次，abort 之后不得出现第二次。
-    tick(ctx);
+    await tick(ctx);
     assert.equal(agent.followupCalls.length, 1, "aborted 回合不得再次注入");
   });
 
-  it("interrupted 的 idle 事件同样既不调度也不重置配额", () => {
+  it("interrupted 的 idle 事件同样既不调度也不重置配额", async () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(1, "error"));
-    ctx.handlers["agent/error"]?.({
+    await ctx.handlers["agent/error"]?.({
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
     });
-    tick(ctx);
+    await tick(ctx);
     agent.session.evs?.push(turnEnd(2, "interrupted"));
-    idleHandler(ctx)({ agent, status: "idle" });
+    await idleHandler(ctx)({ agent, status: "idle" });
     assert.equal(ctx.timers.length, 1);
     assert.deepEqual(countsOf(ctx), { s1: 1 });
-    tick(ctx);
+    await tick(ctx);
     assert.equal(agent.followupCalls.length, 1, "interrupted 回合同样不得二次注入");
   });
 
-  it("aborted 回合带着未闭合 todo 与待发送 inbox → idle 也不按 unfinished 补跑", () => {
+  it("aborted 回合带着未闭合 todo 与待发送 inbox → idle 也不按 unfinished 补跑", async () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(1, "error"));
-    ctx.handlers["agent/error"]?.({
+    await ctx.handlers["agent/error"]?.({
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
     });
-    tick(ctx);
+    await tick(ctx);
     assert.equal(ctx.timers.length, 1, "基线：首轮 error 已武装一个待办");
     // turn 2：本回合写过清单且未闭合，inbox 也有下一轮可投 —— 完成态走到的 unfinished
     // 分支在这里全部满足；aborted 判定必须在它之前把整条路关死。
@@ -297,13 +310,13 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
     });
     agent.session.evs?.push(turnEnd(2, "aborted"));
     agent.inbox = { nextTurn: [{}], nextStep: [] };
-    idleHandler(ctx)({ agent, status: "idle" });
+    await idleHandler(ctx)({ agent, status: "idle" });
     assert.equal(ctx.timers.length, 1, "aborted 回合不得被当成 unfinished 的补跑时机");
-    tick(ctx);
+    await tick(ctx);
     assert.equal(agent.followupCalls.length, 1, "不得出现第二次注入");
   });
 
-  it("tick 只触发本轮已武装的定时器：回调里新排的那一等下一轮", () => {
+  it("tick 只触发本轮已武装的定时器：回调里新排的那一等下一轮", async () => {
     // 直接遍历数组时，回调里 push 进来的定时器会被同一个循环顺带处理掉——「同一轮里二次触发」
     // 就成了替身独有的行为，与宿主 timer 的语义相反，而 scheduleInjection 的回调正是会再排一发的形状。
     const order: string[] = [];
@@ -323,16 +336,16 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
       cancelled: false,
       fired: false,
     });
-    tick(ctx);
+    await tick(ctx);
     assert.deepEqual(order, ["first"], "同一轮不得触发刚登记的那一枚");
-    tick(ctx);
+    await tick(ctx);
     assert.deepEqual(order, ["first", "nested"], "下一轮才轮到它");
   });
 
-  it("插件卸载：effect 的清理函数要撤掉在途的调度待办", () => {
+  it("插件卸载：effect 的清理函数要撤掉在途的调度待办", async () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(1, "error"));
-    ctx.handlers["agent/error"]?.({
+    await ctx.handlers["agent/error"]?.({
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
@@ -346,14 +359,14 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
       ctx.timers.every((entry) => entry.cancelled),
       "卸载后在途待办全部撤销，不再唤醒注入",
     );
-    tick(ctx);
+    await tick(ctx);
     assert.equal(agent.followupCalls.length, 0, "卸载后不得注入");
   });
 
-  it("倒计时内用户开新轮并 abort → fire 时按 newer-turn 否决，不补发不计数", () => {
+  it("倒计时内用户开新轮并 abort → fire 时按 newer-turn 否决，不补发不计数", async () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(1, "error"));
-    ctx.handlers["agent/error"]?.({
+    await ctx.handlers["agent/error"]?.({
       agent,
       turn: 1,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
@@ -362,21 +375,21 @@ describe("用户中止的回合不消耗续跑/继续配额", () => {
     // 用户在倒计时内亲手开了 turn 2 又停掉它：turn/start 2 已写到磁盘即代表"人在干活"。
     agent.session.evs?.push({ type: "turn/start", seq: 20, time: 20, data: { turn: 2 } });
     agent.session.evs?.push(turnEnd(2, "aborted"));
-    tick(ctx);
+    await tick(ctx);
     assert.equal(agent.followupCalls.length, 0, "用户接手的回合不得被自动注入打断");
     assert.deepEqual(countsOf(ctx), { s1: 0 }, "被否决的注入不消耗配额");
   });
 
-  it("对照：普通 error 回合仍照常调度（abort 判定不误伤正常路径）", () => {
+  it("对照：普通 error 回合仍照常调度（abort 判定不误伤正常路径）", async () => {
     const agent = makeAgent(ctx);
     agent.session.evs?.push(turnEnd(2, "error"));
-    ctx.handlers["agent/error"]?.({
+    await ctx.handlers["agent/error"]?.({
       agent,
       turn: 2,
       error: { failure: { code: "RATE_LIMIT", message: "x" } },
     });
     assert.equal(ctx.timers.length, 1);
-    tick(ctx);
+    await tick(ctx);
     assert.equal(agent.followupCalls.length, 1, "武装的待办真的注入");
     assert.deepEqual(countsOf(ctx), { s1: 1 }, "注入消耗配额");
   });

@@ -448,18 +448,6 @@ export interface TurnStoppingPayload {
 }
 
 /**
- * agents 服务的本插件读取接口 = 官方 `AgentRegistry`（installed
- * @deepseek-ai/dsh-agent/lib/types/index.d.ts:19-21 交出 `Context.agents`）的两枚成员投影：
- * `roots(): Agent[]` :364 与 `get(id: SessionId): Agent | undefined` :343。
- * 入参就此是带官方类型品牌的 `SessionId`（经 `Parameters<AgentRegistry["get"]>[0]` 索引，不重述），
- * 返回值域换成 {@link RescueAgent} 投影而不是官方整枚 `Agent`：本包只读 id/followup/status/
- * inbox/session 五位，且官方 `Agent.session` 是 dsh-session 的 `Session` **类**（private 字段
- * → 名义比较），替身会话满足不了整类，渗进本包会让那几条运行时守卫在编译器眼里变成死代码
- * （规则与 danger-guard/host.ts 的 `GuardExecution` 一致：借键名、换值域）。
- * `roots()` 返回按 `readonly` 收：本包只遍历不改写。
- */
-
-/**
  * agent **下一步**要走哪条线：新版按 `model.current()`（含会话里已记录的待切换选择），
  * 旧版没有这一位，回落到初始化时的 `options.provider`。
  *
@@ -478,9 +466,41 @@ function currentProviderOf(agent: RescueAgent): string | undefined {
   return typeof fallback === "string" ? fallback : undefined;
 }
 
+/**
+ * agents 服务的本插件读取接口 = 官方 `AgentRegistry`（installed
+ * @deepseek-ai/dsh-agent/lib/types/index.d.ts）的成员投影：
+ * - `get(id: SessionId): Agent | undefined`：两版都有，入参就此是带官方类型品牌的
+ *   `SessionId`（经 `Parameters<AgentRegistry["get"]>[0]` 索引，不重述）；
+ * - `list(): Agent[]`：两版都有，存活代理全集；
+ * - `roots()`：**只有 rc.1 有**（rc.1「All live top-level agents」）。rc.2 删除了它
+ *   （所有权改由 cordis fiber 承载，注册表条目不再记录 owner），顶层/子代理改由持久会话头
+ *   的 `origin` 判定（见 isRootAgent）。故这里按可缺失收，供两版宿主共用。
+ * 返回值域换成 {@link RescueAgent} 投影而不是官方整枚 `Agent`：本包只读 id/followup/status/
+ * inbox/session 五位，且官方 `Agent.session` 是 dsh-session 的 `Session` **类**（private 字段
+ * → 名义比较），替身会话满足不了整类，渗进本包会让那几条运行时守卫在编译器眼里变成死代码
+ * （规则与 danger-guard/host.ts 的 `GuardExecution` 一致：借键名、换值域）。
+ * 两个读口返回按 `readonly` 收：本包只遍历不改写。
+ */
 export interface RescueAgents {
-  roots: () => readonly RescueAgent[];
+  /** rc.1 的顶层代理读口；rc.2 已移除（读 `typeof` 分流，见 isRootAgent）。 */
+  roots?: (() => readonly RescueAgent[]) | undefined;
+  /** 两版宿主都有的存活代理全集；rc.2 判顶层时与 `session.header.origin` 合用。 */
+  list?: (() => readonly RescueAgent[]) | undefined;
   get: (id: Parameters<AgentRegistry["get"]>[0]) => RescueAgent | undefined;
+}
+
+/** 宿主 sessionQuery 服务的最小读取面（官方 @deepseek-ai/dsh-session-query）：
+ *  observeSession 异步交回一份不可变事件 cut（Disposable）。本包只读 events 一位，
+ *  用完即 dispose；projectionMode:"none" 不算投影（本包回退路径只要原始事件流）。 */
+interface SessionObservationLike {
+  readonly events: readonly unknown[];
+  [Symbol.dispose]: () => void;
+}
+interface SessionQueryLike {
+  observeSession: (
+    sessionId: string,
+    options?: { projectionMode?: "all" | "none" },
+  ) => Promise<SessionObservationLike>;
 }
 
 /** 插件用到的宿主 ctx 面：注入的服务（timer/settings）+ 无 inject 语义的服务读
@@ -493,7 +513,7 @@ export interface RescueAgents {
  *  apply 用 isHostCtx 把 Context 收窄到本类型（不写 `as unknown as` 断言，
  *  也不靠 lint 忽略注释：见 lesson-loop/ocr-review 同款守卫写法）。 */
 export interface HostCtx {
-  timer: { timeout: (fn: () => void, ms: number) => TimerDisposer };
+  timer: { timeout: (fn: () => void | Promise<void>, ms: number) => TimerDisposer };
   /** 0.1.7 的 settings 服务对本包只剩三件事（`register`/`get`/`installSection` 均已
    *  被宿主移除，命名空间改为按 profile 条目 id 隐式注册，见下方 `Config`）：
    *  - `describe()`：跨命名空间读的**唯一**入口（locale 偏好、llm-pi-ai providers）；
@@ -507,7 +527,8 @@ export interface HostCtx {
   settings: SettingsForms;
   get: ((name: "agents") => RescueAgents | undefined) &
     ((name: "lessonLoop") => LessonLoopReporter | undefined) &
-    ((name: "goals") => RescueGoalService | undefined);
+    ((name: "goals") => RescueGoalService | undefined) &
+    ((name: "sessionQuery") => SessionQueryLike | undefined);
   /** 本插件 fiber：`settings.configure` 的 owner 必须显式传它（缺省是 settings
    *  服务自己的 fiber，传错等于给别人的页面定策略）。类型取官方 cordis `Fiber`。 */
   fiber: Fiber;
@@ -523,8 +544,14 @@ export interface HostCtx {
       sessionProjections: ProjectionsRegistry;
     }) => void,
   ) => unknown;
-  on: ((event: "agent/error", listener: (payload: AgentErrorPayload) => void) => unknown) &
-    ((event: "agent/status", listener: (payload: AgentStatusPayload) => void) => unknown) &
+  on: ((
+    event: "agent/error",
+    listener: (payload: AgentErrorPayload) => void | Promise<void>,
+  ) => unknown) &
+    ((
+      event: "agent/status",
+      listener: (payload: AgentStatusPayload) => void | Promise<void>,
+    ) => unknown) &
     ((
       event: "agent/request-error",
       listener: (
@@ -598,39 +625,31 @@ export interface LessonLoopReporter {
 
 // ── 会话事件读口 ───────────────────────────────────────────────────────────
 
-/** 守卫收窄到的那一份：`snapshotEvents` 已确认在位。官方把它记成必选成员
- *  （@deepseek-ai/dsh-session lib/types/index.d.ts:224），这里按可缺失收（见
- *  SessionEventsLike 的 Partial）——这一条守卫同时挡「整块类型缺席」与「宿主没实现」。
- *  谓词钉的是**成员**而不是整块类型，调用方因此既不必再判一次、也不经断言、更不必 `.call`。 */
-type SessionWithReader = SessionEventsLike & {
-  readonly snapshotEvents: NonNullable<SessionEventsLike["snapshotEvents"]>;
-};
-
-function hasEventReader(session: SessionEventsLike | undefined): session is SessionWithReader {
-  return typeof fieldOf(session, "snapshotEvents") === "function";
-}
-
-/** 读会话事件流的统一入口（宿主交出来的类型是 `snapshotEvents()`）。
- *  session 缺失 / 未实现 / 返回非数组 → 空数组（触发前校验宁可误 veto 也不误发，
- *  判定失败优于崩溃）。直接返回宿主数组，调用方就地倒扫，不复制事件日志。
- *  官方零参即「从日志首读到末尾」（index.d.ts:220 的 @param 注记：fromSeq 缺省为日志
- *  起点），故本包不给 `SessionLogOffset` 造类型品牌——包内唯一的 `brand` 值导入是注入 id 那位
- *  `brandString<MessageId>`（见文件头）。 */
-function readEvents(session: SessionEventsLike | undefined): readonly unknown[] {
-  if (!hasEventReader(session)) {
+/** 读会话事件流的统一入口（回退路径）：经宿主 sessionQuery.observeSession 异步取一份
+ *  不可变事件 cut，读完即 dispose。sessionQuery 缺席 / session.id 非字符串 / 读取抛错
+ *  → 空数组（触发前校验宁可误 veto 也不误发，判定失败优于崩溃）。
+ *  主路径是 lib/turn-facts.ts 的同步投影读；本异步读只在投影缺席/窗口淘汰/终态对不上时走。
+ *  调用方把本读法**前置**到同步 veto+fire 块之前（方案A）：await 落在 veto 之前，
+ *  veto+fire 仍在同一同步块，原子不变量不破；veto 内同步重判 agent.status 兜住 await 间隙的新回合。 */
+async function readEvents(
+  runtime: ApplyRuntime,
+  session: SessionEventsLike | undefined,
+): Promise<readonly unknown[]> {
+  const sessionQuery = runtime.svc.get("sessionQuery");
+  const sessionId = fieldOf(session, "id");
+  if (sessionQuery === undefined || typeof sessionId !== "string") {
     return [];
   }
-  // 官方 snapshotEvents 自带 @deprecated（index.d.ts:218-219 "new calls are prohibited"）：
-  // 把返回形状钉回官方成员之后，lint 的 typescript/no-deprecated 才**第一次**看得见它——
-  // 旧版自己抄的那份没有那枚标记，那条绿一直是假的。如今这条读只剩**回退**用途（三类判定的主路径
-  // 是 lib/turn-facts.ts 的投影读）：注册表缺席/迟到（未装 dsh-session-projection 的 profile、
-  // headless 组装）、opener 被窗口淘汰、或最后一条 end 对不上它的 start 时才走，
-  // 故豁免留在这里并写清它兜的是哪三件事。
-  // oxlint-disable-next-line typescript/no-deprecated -- 回退扫描的全量同步读（注册表缺席/窗口淘汰/终态对不上才走），主路径见 turn-facts 投影；官方替代 `sessionQuery.observeSession()` 是异步，而本读点在定时器回调的触发前校验里，改 await 即动时序
-  const raw = session.snapshotEvents();
-  // 官方契约交回 readonly SessionEvent[]，Array.isArray 挡的是**类型外**的输入（宿主版本
-  // 漂移 / 自定义 session 实现送来 null、字符串）：那时按「读不到事件」降级。
-  return Array.isArray(raw) ? raw : [];
+  try {
+    const observation = await sessionQuery.observeSession(sessionId, { projectionMode: "none" });
+    try {
+      return observation.events;
+    } finally {
+      observation[Symbol.dispose]();
+    }
+  } catch {
+    return [];
+  }
 }
 
 /** 投影注册表的读取接口定义在 lib/projection-reader.ts（双协议分流同在那个文件）。 */
@@ -664,13 +683,13 @@ function factsOf(runtime: ApplyRuntime, session: SessionEventsLike): RescueFacts
  * 最后回合的复盘（agent/status→idle 的三项判定之源）：投影可用则 O(1) 读，
  * 否则回退全量扫描（与迁移前同一入口、同一判据）。
  */
-function reviewOf(runtime: ApplyRuntime, agent: RescueAgent): TurnReview {
+async function reviewOf(runtime: ApplyRuntime, agent: RescueAgent): Promise<TurnReview> {
   const state = factsOf(runtime, agent.session);
   const projected = state === undefined ? undefined : reviewFromFacts(state);
   if (projected !== undefined) {
     return projected;
   }
-  return reviewLastTurn(readEvents(agent.session));
+  return reviewLastTurn(await readEvents(runtime, agent.session));
 }
 
 /**
@@ -682,18 +701,18 @@ function reviewOf(runtime: ApplyRuntime, agent: RescueAgent): TurnReview {
  * `preRead` 给调用方复用已到手的那份投影态：`asFacts` 每次都要过一遍 schema 校验，
  * 同一次判定里读两遍等于白解析一遍（preFireCheck 的 newer-turn 与 goal 判据同源）。
  */
-function openerKindOf(
+async function openerKindOf(
   runtime: ApplyRuntime,
   agent: RescueAgent,
   turn: number,
   preRead: RescueFacts | undefined = factsOf(runtime, agent.session),
-): string | null {
+): Promise<string | null> {
   const state = preRead;
   const kind = state === undefined ? undefined : turnOpenerKind(state, turn);
   if (kind !== undefined) {
     return kind;
   }
-  return scanOpenerKind(readEvents(agent.session), turn);
+  return scanOpenerKind(await readEvents(runtime, agent.session), turn);
 }
 
 /** 待处理队列的**防御读型**：`Inbox` 的两个只读待办队列（@deepseek-ai/dsh-agent 安装态
@@ -805,12 +824,12 @@ function goalTakeoverVerdict(runtime: ApplyRuntime, agent: RescueAgent): string 
  *  定时器，而排期侧（handleAgentError/handleAgentStatus）也先判它——到得了这里的
  *  只剩「关掉之后再排期」那一种，那条路已在排期侧挡下。
  *  用户中止的判定不在此处（agent/error 时该轮的 turn/end 尚未写到磁盘，见文件头）。 */
-function preFireCheck(
+async function preFireCheck(
   runtime: ApplyRuntime,
   agent: RescueAgent | null,
   failedTurn: number,
   cfg: ResolvedSettings,
-): PreFireVerdict {
+): Promise<PreFireVerdict> {
   if (!agent) {
     return { ready: false, reason: "agent-gone" };
   }
@@ -834,7 +853,7 @@ function preFireCheck(
   const state = factsOf(runtime, agent.session);
   const newer =
     state === undefined
-      ? scanNewerTurn(readEvents(agent.session), failedTurn)
+      ? scanNewerTurn(await readEvents(runtime, agent.session), failedTurn)
       : hasNewerTurn(state, failedTurn);
   if (newer) {
     return { ready: false, reason: "newer-turn" };
@@ -842,11 +861,21 @@ function preFireCheck(
   // goal 轮次的让路判据在此而不在排期侧（判据的来路见 goalTakeoverVerdict）。opener 读
   // 的是失败轮自己那条 `turn/start` 之后的首条 user/message——投影在位时 O(1)，与上面
   // 那次 factsOf 同一份状态，不额外读日志。
-  if (openerKindOf(runtime, agent, failedTurn, state) === GOAL_SOURCE_KIND) {
+  if ((await openerKindOf(runtime, agent, failedTurn, state)) === GOAL_SOURCE_KIND) {
     const blocked = goalTakeoverVerdict(runtime, agent);
     if (blocked !== null) {
       return { ready: false, reason: blocked };
     }
+  }
+  // 方案A 安全网：异步读（readEvents/openerKindOf）完成后同步重判活状态，兜住 await 间隙
+  // 介入的新回合/dispose。此后到调用方 followup 无 await（同一同步块），原子不变量不破。
+  // agent.status 是活态，以 string 重读避开 TS 把上方的 idle 收窄当成恒真。
+  const liveStatus: string = agent.status;
+  if (liveStatus !== "idle") {
+    return { ready: false, reason: "not-idle" };
+  }
+  if (inboxHasPending(agent.inbox)) {
+    return { ready: false, reason: "inbox-pending" };
   }
   return { ready: true, agent };
 }
@@ -1006,15 +1035,15 @@ function findAgent(runtime: ApplyRuntime, sessionId: string): RescueAgent | null
 
 /** 定时器到点时的现读判定：preFireCheck 里任何一步抛错都必须把待办结算掉，否则
  *  `rec.pending` 永久非空——该会话此后再也排不进新的续跑，记录也不再可淘汰。 */
-function preFireCheckSafely(
+async function preFireCheckSafely(
   runtime: ApplyRuntime,
   sessionId: string,
   turn: number,
   kind: RescueKind | "",
-): PreFireVerdict | undefined {
+): Promise<PreFireVerdict | undefined> {
   let verdict: PreFireVerdict | undefined;
   try {
-    verdict = preFireCheck(
+    verdict = await preFireCheck(
       runtime,
       findAgent(runtime, sessionId),
       turn,
@@ -1033,12 +1062,27 @@ function isRootAgent(runtime: ApplyRuntime, agent: RescueAgent): boolean {
   if (!agents) {
     return false;
   }
-  for (const root of agents.roots()) {
-    if (root.id === agent.id) {
-      return true;
+  // rc.1：roots() 是「运行时无 owner 的顶层代理」的权威读口，优先用它（fork 恢复的
+  // 子代理会话在运行时也是顶层，旧行为逐字保留）。
+  if (typeof agents.roots === "function") {
+    for (const root of agents.roots()) {
+      if (root.id === agent.id) {
+        return true;
+      }
     }
+    return false;
   }
-  return false;
+  // rc.2 移除了 roots()：顶层与否改由持久会话头的 `origin` 判定。dsh-session 的
+  // SessionHeader 明写「parentSession 单独出现不算，区分 subagent 要用 origin」
+  // （installed dsh-session/types.d.ts:70-86：普通 fork 会保留 parentSession）。
+  // list() 先确认目标仍在注册表里（与 roots() 同一存活语义）。
+  if (typeof agents.list !== "function") {
+    return false;
+  }
+  if (!agents.list().some((live) => live.id === agent.id)) {
+    return false;
+  }
+  return agent.session.header?.origin !== "subagent";
 }
 
 /** 入列挂起快照：同会话去重（后进覆盖），超上限裁剪最旧。 */
@@ -1390,6 +1434,84 @@ function requestBackoffMs(
  *  `next()` 一次性：开始自查之后不能再调——采纳之后的任何出口都返回 undefined（终态）
  *  或自己的 retry 决策。与 agent/error（回合级续跑）互补：请求级先重试，耗尽仍失败才续跑。
  *  等待中 signal 中止 → 终结，不重发**也不占重试名额**。 */
+const OFFICIAL_DEFAULT_BACKOFF = {
+  initialDelayMs: 500,
+  maxDelayMs: 10_000,
+  jitterRatio: 0.1,
+} as const;
+
+const OFFICIAL_DEFAULT_RETRY_POLICY: Record<string, unknown> = {
+  mode: "normal",
+  maxRetries: 5,
+  retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
+  backoff: { ...OFFICIAL_DEFAULT_BACKOFF },
+};
+
+/** 从 describe 的 namespace value 投影出 providers（动态键 + 守卫，不经 unsafe 断言）。 */
+function piAiProviders(runtime: ApplyRuntime): Record<string, { retryPolicy?: unknown }> | null {
+  try {
+    const hit = runtime.svc.settings.describe().find((desc) => desc.ns === PI_AI_NS);
+    const rawProviders = fieldOf(hit?.value, "providers");
+    if (!isRecord(rawProviders)) {
+      return null;
+    }
+    const providers: Record<string, { retryPolicy?: unknown }> = {};
+    for (const [name, profile] of Object.entries(rawProviders)) {
+      if (isRecord(profile)) {
+        providers[name] = { retryPolicy: fieldOf(profile, "retryPolicy") };
+      }
+    }
+    return providers;
+  } catch {
+    return null;
+  }
+}
+
+/** 读取现行码表：只收非空字符串，去空白、去重；坏项静默丢弃（只用于读侧并集）。 */
+function retryCodesOf(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const codes: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string") {
+      const code = item.trim();
+      if (code !== "" && !codes.includes(code)) {
+        codes.push(code);
+      }
+    }
+  }
+  return codes;
+}
+
+/** 宿主**显式配置**的重试码表是否覆盖这次失败的码：覆盖则重试归宿主（含 normal 次数耗尽后的
+ *  终态），本阶梯不再叠加，避免宿主 maxRetries 与插件 requestRetryMax 的等待相加。按**码覆盖**
+ *  划线，不是按「有没有解析出 retryPolicy」（那恒真，见 handleRequestError 头注）。只看用户在
+ *  RetryPolicyEditor 里显式写下的 retryableCodes：未显式配置时不让路，默认码（RATE_LIMIT/SERVER
+ *  等）的救援仍由本阶梯承担——否则会把插件对最常见失败码的救援整个废掉。 */
+function hostOwnsRetry(runtime: ApplyRuntime, provider: unknown, failure: unknown): boolean {
+  if (typeof provider !== "string" || provider.length === 0 || !isRecord(failure)) {
+    return false;
+  }
+  const code = typeof failure["code"] === "string" ? failure["code"] : "";
+  if (code === "") {
+    return false;
+  }
+  const policy = piAiProviders(runtime)?.[provider]?.retryPolicy;
+  const configured = isRecord(policy) ? retryCodesOf(policy["retryableCodes"]) : [];
+  return configured.includes(code);
+}
+
+/** 本阶梯是否该接手这次请求失败：值得请求级重试，且宿主显式码表没有覆盖它。
+ *  收成一枚谓词，handleRequestError 的早退守卫复杂度不随协调逻辑增长。 */
+function pluginLadderWorthy(
+  runtime: ApplyRuntime,
+  provider: unknown,
+  failure: LlmFailureLike | null | undefined,
+): boolean {
+  return isRequestRetryWorthy(failure) && !hostOwnsRetry(runtime, provider, failure);
+}
+
 async function handleRequestError(
   runtime: ApplyRuntime,
   payload: RequestErrorPayload,
@@ -1417,7 +1539,9 @@ async function handleRequestError(
   // 这里原先另写了一份 `status === 429 || 文本`，于是 QUOTA@429（真宿主对余额/配额
   // 到期的交回形，见 test/integration/agent-loop.test.ts 抓的原始载荷）在无策略
   // provider 上仍被当限速连发最多 requestRetryMax 次：回合级修好了，请求级还坏着。
-  if (!isRequestRetryWorthy(failure)) {
+  // 值得请求级重试、且宿主显式码表没覆盖时才由本阶梯接手；宿主显式覆盖的码归宿主
+  // （含耗尽终态），避免等待相加。判定收在 pluginLadderWorthy。
+  if (!pluginLadderWorthy(runtime, requestProvider, failure)) {
     return next();
   }
   // 先问下游：官方 llm-retry（与 compaction 等其他监听者）愿意接的失败在这里就归它们，
@@ -1553,9 +1677,10 @@ function scheduleInjection(runtime: ApplyRuntime, opts: InjectionOptions): void 
       `[session-rescue] ${sessionId}: ${kind} trigger at turn ${turn} — auto-${kind} in ${decision.delayMs}ms`,
     );
   }
-  const dispose = runtime.svc.timer.timeout(() => {
+  const dispose = runtime.svc.timer.timeout(async () => {
+    // 异步读前置（方案A）：await 落在 veto 之前，veto+fire 仍在同一同步块，原子不变量不破。
     // 设置现读：这一发从排期到这里隔着整个 delay 窗口。
-    const check = preFireCheckSafely(runtime, sessionId, turn, kind);
+    const check = await preFireCheckSafely(runtime, sessionId, turn, kind);
     if (check === undefined) {
       return;
     }
@@ -1644,8 +1769,13 @@ function resumeAfterReconnect(runtime: ApplyRuntime): void {
         const msgId = brandString<MessageId>(
           `${PLUGIN_NAME}-${Date.now()}-${runtime.msgSeq.value}`,
         );
-        const dispose = runtime.svc.timer.timeout(() => {
-          const check = preFireCheckSafely(runtime, item.sessionId, pending.turn, pending.kind);
+        const dispose = runtime.svc.timer.timeout(async () => {
+          const check = await preFireCheckSafely(
+            runtime,
+            item.sessionId,
+            pending.turn,
+            pending.kind,
+          );
           if (check === undefined) {
             return;
           }
@@ -1720,7 +1850,7 @@ function observeUnclassifiedFailure(
   });
 }
 
-function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): void {
+async function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): Promise<void> {
   const { agent } = payload;
   if (!agent) {
     return;
@@ -1791,7 +1921,7 @@ function handleAgentError(runtime: ApplyRuntime, payload: AgentErrorPayload): vo
     return;
   }
   // 该回合的 opener：一次读，两位判定共用（两次独立倒扫会把同一份日志读两遍）。
-  const opener = openerKindOf(runtime, agent, turn);
+  const opener = await openerKindOf(runtime, agent, turn);
   // goal 轮次不在这里让路：round driver 在 agent/error 上只 disarm、绝不自动重试
   // （其 README「No abnormal auto-retry」），排期侧一律让路等于这条失败回合永久没人收尾。
   // 让路/接管的判据在触发侧读它的停机位（见 goalTakeoverVerdict）。
@@ -1908,10 +2038,10 @@ function handleCompletedTurn(
   });
 }
 
-function handleAgentStatus(
+async function handleAgentStatus(
   runtime: ApplyRuntime,
   payload: AgentStatusPayload | null | undefined,
-): void {
+): Promise<void> {
   if (payload === null || payload === undefined) {
     return;
   }
@@ -1935,7 +2065,7 @@ function handleAgentStatus(
     return;
   }
 
-  const review = reviewOf(runtime, agent);
+  const review = await reviewOf(runtime, agent);
   if (review.lastTurn === null) {
     return;
   }
@@ -1994,12 +2124,12 @@ function handleAgentStatus(
 
 /** steer 的开放回合判据簇：交回否决理由，null = 可以 steer。从 handleTurnStopping
  *  拆出（complexity 门）：主函数只留开关与配额闸门，判据本体在这里逐项给因。 */
-function steerReviewVerdict(
+async function steerReviewVerdict(
   runtime: ApplyRuntime,
   agent: RescueAgent,
   review: OpenTurnReview,
   turn: number,
-): string | null {
+): Promise<string | null> {
   if (review.turn === null || review.turn !== turn) {
     return "turn-mismatch";
   }
@@ -2012,7 +2142,7 @@ function steerReviewVerdict(
   if (review.scheduleDrivenTurn) {
     return "schedule-driven";
   }
-  if (openerKindOf(runtime, agent, review.turn) === GOAL_SOURCE_KIND) {
+  if ((await openerKindOf(runtime, agent, review.turn)) === GOAL_SOURCE_KIND) {
     return "goal-driven";
   }
   return null;
@@ -2030,7 +2160,10 @@ function steerReviewVerdict(
  * （reviewOpenTurn）：此刻本回合还没有 turn/end，reviewLastTurn 那套读法够不着。
  * goal 轮让路：round driver 在 driving 时有自己的续轮机制，steer 插进去会打架。
  */
-function handleTurnStopping(runtime: ApplyRuntime, payload: TurnStoppingPayload): void {
+async function handleTurnStopping(
+  runtime: ApplyRuntime,
+  payload: TurnStoppingPayload,
+): Promise<void> {
   const { agent } = payload;
   if (!agent || payload.signal?.aborted === true) {
     return;
@@ -2046,13 +2179,13 @@ function handleTurnStopping(runtime: ApplyRuntime, payload: TurnStoppingPayload)
   if (runtime.disabledSessions.has(sessionId) || runtime.scheduler.hasPending(sessionId)) {
     return;
   }
-  const review = reviewOpenTurn(readEvents(agent.session));
+  const review = reviewOpenTurn(await readEvents(runtime, agent.session));
   if (review === null) {
     return;
   }
   const turn =
     typeof payload.turn === "number" && Number.isSafeInteger(payload.turn) ? payload.turn : 0;
-  const veto = steerReviewVerdict(runtime, agent, review, turn);
+  const veto = await steerReviewVerdict(runtime, agent, review, turn);
   if (veto !== null) {
     console.info(`[session-rescue] ${sessionId}: steer vetoed (${veto})`);
     return;
@@ -2089,7 +2222,7 @@ function handleTurnStopping(runtime: ApplyRuntime, payload: TurnStoppingPayload)
 //   default   → 显式写官方默认对象（normal 5 次，码表 EMPTY_RESPONSE/RATE_LIMIT/
 //               SERVER/TIMEOUT/TRANSPORT，500ms→10s；不再 unset，理由见
 //               OFFICIAL_DEFAULT_RETRY_POLICY 处的注释）
-//   enhanced  → normal 12 次 + QUOTA + 8s→60s（settings.yaml 现行四家同款）
+//   enhanced  → 合并 QUOTA 等预设码；mode/maxRetries/backoff 沿用用户现行策略（不盖掉宿主 RetryPolicyEditor 的调参）
 //   always    → 官方无限重试（until success/cancellation/disposal）+ 5s→60s
 //   off       → normal maxRetries:0（码表非空校验所迫带单 RATE_LIMIT 占位）
 //
@@ -2112,19 +2245,6 @@ interface RetryPreset {
   readonly mergeCodes?: boolean;
 }
 
-const OFFICIAL_DEFAULT_BACKOFF = {
-  initialDelayMs: 500,
-  maxDelayMs: 10_000,
-  jitterRatio: 0.1,
-} as const;
-
-const OFFICIAL_DEFAULT_RETRY_POLICY: Record<string, unknown> = {
-  mode: "normal",
-  maxRetries: 5,
-  retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
-  backoff: { ...OFFICIAL_DEFAULT_BACKOFF },
-};
-
 const RETRY_PRESETS = new Map<string, RetryPreset>([
   ["default", { op: "set", value: OFFICIAL_DEFAULT_RETRY_POLICY }],
   [
@@ -2133,10 +2253,7 @@ const RETRY_PRESETS = new Map<string, RetryPreset>([
       op: "set",
       mergeCodes: true,
       value: {
-        mode: "normal",
-        maxRetries: 12,
         retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "QUOTA"],
-        backoff: { initialDelayMs: 8000, maxDelayMs: 60_000, jitterRatio: 0.2 },
       },
     },
   ],
@@ -2164,43 +2281,6 @@ const RETRY_PRESETS = new Map<string, RetryPreset>([
   ],
 ]);
 
-/** 从 describe 的 namespace value 投影出 providers（动态键 + 守卫，不经 unsafe 断言）。 */
-function piAiProviders(runtime: ApplyRuntime): Record<string, { retryPolicy?: unknown }> | null {
-  try {
-    const hit = runtime.svc.settings.describe().find((desc) => desc.ns === PI_AI_NS);
-    const rawProviders = fieldOf(hit?.value, "providers");
-    if (!isRecord(rawProviders)) {
-      return null;
-    }
-    const providers: Record<string, { retryPolicy?: unknown }> = {};
-    for (const [name, profile] of Object.entries(rawProviders)) {
-      if (isRecord(profile)) {
-        providers[name] = { retryPolicy: fieldOf(profile, "retryPolicy") };
-      }
-    }
-    return providers;
-  } catch {
-    return null;
-  }
-}
-
-/** 读取现行码表：只收非空字符串，去空白、去重；坏项静默丢弃（只用于读侧并集）。 */
-function retryCodesOf(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const codes: string[] = [];
-  for (const item of value) {
-    if (typeof item === "string") {
-      const code = item.trim();
-      if (code !== "" && !codes.includes(code)) {
-        codes.push(code);
-      }
-    }
-  }
-  return codes;
-}
-
 /** custom 请求的码表入参：非数组/含非字符串/含空项 → null（写侧回 400）；重复项去重。 */
 function parseRequestedRetryCodes(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0) {
@@ -2222,20 +2302,6 @@ function parseRequestedRetryCodes(value: unknown): string[] | null {
   return codes;
 }
 
-/** enhanced：预设码在前，现行自定义码追加在后，不删任何一边。 */
-function mergedPresetValue(
-  preset: RetryPreset,
-  currentPolicy: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-  const merged = retryCodesOf(preset.value["retryableCodes"]);
-  for (const code of retryCodesOf(currentPolicy?.["retryableCodes"])) {
-    if (!merged.includes(code)) {
-      merged.push(code);
-    }
-  }
-  return { ...preset.value, retryableCodes: merged };
-}
-
 /** custom：只替换码表；mode/maxRetries/backoff 沿用现行策略（缺省回官方默认）。 */
 function customPolicyValue(
   codes: readonly string[],
@@ -2254,6 +2320,21 @@ function customPolicyValue(
       ? rawMaxRetries
       : 5;
   return { mode, maxRetries, retryableCodes: [...codes], backoff };
+}
+
+/** enhanced：预设码在前、现行自定义码追加在后（不删任何一边）；mode/maxRetries/backoff
+ *  沿用现行策略（缺省回官方默认），不盖掉用户在宿主 RetryPolicyEditor 里调的次数与等待。 */
+function mergedPresetValue(
+  preset: RetryPreset,
+  currentPolicy: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const merged = retryCodesOf(preset.value["retryableCodes"]);
+  for (const code of retryCodesOf(currentPolicy?.["retryableCodes"])) {
+    if (!merged.includes(code)) {
+      merged.push(code);
+    }
+  }
+  return customPolicyValue(merged, currentPolicy);
 }
 
 interface RetryPolicyApplied {
@@ -2694,7 +2775,7 @@ function apply(ctx: Context, config: PluginConfig): void {
   // 都要 schema.toJSON() + JSON.stringify 算 revision 再投影 value/base/user 三份。
   // 失效链：写配置 → app-boot/config-reload → SettingsForms invalidate() → 微任务里
   // describe() → 对 raw 变化的条目 emit('settings/document-updated', ns, revision)。
-  let cachedPreference: unknown = undefined;
+  let cachedPreference: unknown;
   let hasCachedPreference = false;
   svc.on("settings/document-updated", (ns: unknown) => {
     if (ns === LOCALE_SETTINGS_NAMESPACE) {
@@ -2796,17 +2877,13 @@ function apply(ctx: Context, config: PluginConfig): void {
   //    代价是重发的 token 数——阶梯的次数上限就是它的上限。
   // ── steer 续跑（默认关）：turn-stopping serial 边界咨询，steer 表达异议；
   //    闸门与配额语义见 handleTurnStopping。
-  svc.on("agent/turn-stopping", (payloadRaw) => {
-    handleTurnStopping(runtime, payloadRaw);
-  });
+  svc.on("agent/turn-stopping", (payloadRaw) => handleTurnStopping(runtime, payloadRaw));
 
   svc.on("agent/request-error", (payloadRaw, next) =>
     handleRequestError(runtime, payloadRaw, next),
   );
 
-  svc.on("agent/error", (payload: AgentErrorPayload) => {
-    handleAgentError(runtime, payload);
-  });
+  svc.on("agent/error", (payload: AgentErrorPayload) => handleAgentError(runtime, payload));
 
   // 回合终态处理（agent/status→idle 检测）：
   //   max-tokens → 截断续写（continue）；
@@ -2814,9 +2891,7 @@ function apply(ctx: Context, config: PluginConfig): void {
   //                ②清单已闭合 → 恢复 unfinished 配额；
   //                ③本回合自己写的清单仍有未完成 → 自动补跑（unfinished，C）。
   //   error/aborted/interrupted → 不处理（error 走 agent/error 路径）。
-  svc.on("agent/status", (payload: AgentStatusPayload) => {
-    handleAgentStatus(runtime, payload);
-  });
+  svc.on("agent/status", (payload: AgentStatusPayload) => handleAgentStatus(runtime, payload));
 
   svc.inject([], (child) => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- inject 子上下文在运行时就是 Context；本地类型只投影了本包用到的成员

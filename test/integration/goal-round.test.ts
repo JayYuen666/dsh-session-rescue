@@ -81,6 +81,21 @@ async function bootInto(ctx: Context, server: MockLlmServer): Promise<void> {
   });
   await ctx.plugin(TimerPlugin);
   await mountAgentLoopTestDependencies(ctx);
+  // sessionQuery 替身：回退路径经 observeSession 异步读真会话事件流（testkit 不提供）。
+  ctx.provide("sessionQuery", {
+    observeSession: async (sessionId: string) => {
+      const agents = ctx.get("agents") as
+        | { get: (id: string) => { session: { snapshotEvents: () => unknown[] } } | undefined }
+        | undefined;
+      const target = agents?.get(sessionId);
+      return {
+        events: target?.session.snapshotEvents() ?? [],
+        [Symbol.dispose]: (): void => {
+          /* 替身无资源可释放 */
+        },
+      };
+    },
+  });
   await ctx.plugin(DeepSeekAdapter, {
     baseURL: server.baseURL,
     // 适配器自带重试压到零次：本层要观测的是回合级的让路/接管，不是请求级退避。

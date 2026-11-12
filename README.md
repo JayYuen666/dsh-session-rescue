@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-session-rescue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-session-rescue/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,21 +31,22 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Contents
 
-- [What it does](#what-it-does)
+- [ Contents](#-contents)
+- [ What it does](#-what-it-does)
   - [How a decision is made](#how-a-decision-is-made)
-- [Install](#install)
-  - [Shared version floor](#shared-version-floor)
-- [Verify it is live](#verify-it-is-live)
-- [What it does not provide](#what-it-does-not-provide)
-- [Enabling it in dsh](#enabling-it-in-dsh)
-- [The three automatic actions](#the-three-automatic-actions)
-- [Settings](#settings)
-- [Public interface](#public-interface)
-- [Data and privacy](#data-and-privacy)
-- [Known boundaries](#known-boundaries)
-- [FAQ](#faq)
-- [Development](#development)
-- [License](#license)
+- [ Install](#-install)
+  - [ Shared version floor](#-shared-version-floor)
+- [ Verify it is live](#-verify-it-is-live)
+- [ What it does not provide](#-what-it-does-not-provide)
+- [ Enabling it in dsh](#-enabling-it-in-dsh)
+- [ The three automatic actions](#-the-three-automatic-actions)
+- [ Settings](#-settings)
+- [ Public interface](#-public-interface)
+- [ Data and privacy](#-data-and-privacy)
+- [ Known boundaries](#-known-boundaries)
+- [ FAQ](#-faq)
+- [ Development](#-development)
+- [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
 
@@ -84,7 +85,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`. The package is on the public npm registry, so installation needs no credentials and no scoped-registry line.
 
 - **Requires Node.js `>= 24.9`.** This is an ESM-only package; that Node floor is what makes `require()` of an ESM entry work at all, which is why `engines.node` is declared.
-- **Requires host `dsh` at the `0.2.1-rc.5` or `0.2.2-alpha.3` line.** The requirement the host reads is `engines.dsh` (`^0.2.1-rc.5 || ^0.2.2-alpha.3`), and it **decides alone**: once that branch answers, `peerDependencies` is not consulted. Prereleases take part in the range comparison (the host calls it with `includePrerelease: true`). The `@deepseek-ai/dsh-*` peers carry the same window; the exact `devDependencies` pins are the compile-time discipline, not an install gate. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
+- **Requires host `dsh` at the `0.2.2-rc.1` line or later.** The requirement the host reads is `engines.dsh` (`^0.2.2-rc.1`), and it **decides alone**: once that branch answers, `peerDependencies` is not consulted. Prereleases take part in the range comparison (the host calls it with `includePrerelease: true`). The `@deepseek-ai/dsh-*` peers carry the same window; the exact `devDependencies` pins are the compile-time discipline, not an install gate. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package under `dependencies` is materialized as a real directory next to the copy the running host already loaded — native tool calls then throw while build, typecheck and coverage stay green. The host packages `host.js` imports for value (`@deepseek-ai/dsh-brand`, `@deepseek-ai/dsh-typert-protocol`, `@deepseek-ai/schemastery`) are required peers repeated under `devDependencies` at the same pin, so the bundler externalizes them instead of inlining official function bodies.
 - **What ships**: the `prepare`-rebuilt `host.js` and `client.js`, `types/`, `cordis.patch.yml`, plus `README*`, `LICENSE`, `CHANGELOG.md` and `icon.svg`. Artifacts are not committed, and are not minified on purpose — the bare cross-package specifiers must survive for the externalization assertions to mean anything.
 - Install fails with 404: that version was never published (check `dist-tags.latest`). It usually means the sibling library package `@jayyuen66/dsh-plugin-shared` is not on the registry yet — `host.js` value-imports its `lib/locale`, `lib/record`, `lib/errors` and `lib/lesson-bus`, and `client.js` value-imports `client`, so a missing one surfaces as `ERR_MODULE_NOT_FOUND`.

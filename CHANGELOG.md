@@ -4,6 +4,18 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.13
+
+失败分类码表补全、enhanced 重试预设保留用户调参、请求级重试与宿主策略协调；宿主开发基线抬到 `0.2.2-rc.2`，支持窗口收到 `^0.2.2-rc.1`。
+
+### Changed
+
+- **失败码表补全**：`failure-classify` 的回合级瞬时码补上 `STREAM_CLOSED` / `MALFORMED_RESPONSE`（宿主 `LLM_FAILURE_CODES` 标 `retryChoice` 的非 QUOTA 码此前漏了这两枚），不再落「未分类=永久」而永不自动续跑。
+- **enhanced 预设保留用户调参**：`enhanced` 重试预设只合并码表，`mode/maxRetries/backoff` 沿用用户在宿主 `RetryPolicyEditor` 设的值（不再强设 12 次 / 8s→60s）；卡片档位识别随之改为按码表（normal+QUOTA）而非 `maxRetries>=12`。`always/off/default` 本职不变。
+- **请求级重试协调**：宿主显式配置的重试码表覆盖该失败码时，请求级重试归宿主（含耗尽终态），本阶梯不再叠加等待；按**码覆盖**而非策略存在性划线（默认策略恒在，按存在性会让阶梯永远不可达）。码表外的码（如默认不含的 QUOTA）仍由本阶梯填补。
+- **宿主开发基线抬到 `0.2.2-rc.2`**：`devDependencies` 整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-rc.2`，并补上 rc.2 新增的 `@deepseek-ai/dsh-error`（`dsh-llm` 的精确 peer，`autoInstallPeers: false` 下须显式声明）。
+- **支持窗口收到 `^0.2.2-rc.1`**：`engines.dsh` 与 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 改为 `^0.2.2-rc.1`（单条 0.2.2 线）；`@deepseek-ai/schemastery` peer 由 `^3.18.5 || ^3.18.6-alpha.1` 收到 `^3.19.0`。devDependencies 仍精确钉版。
+
 ## 0.1.12
 
 修复「停止并重问」在宿主真实取消语义下的发送问题：重问不再停在排队区，取消后的失败也不再静默丢草稿。

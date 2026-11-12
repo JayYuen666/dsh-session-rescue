@@ -170,15 +170,18 @@ function quotaVerdict(text: string, retryAfterMs: number | undefined, status: nu
 const TRANSIENT_STATUS = new Set([408, 425]);
 const BILLING_STATUS = 402;
 
-/** 少数 code 路由（RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE → 瞬时；
- *  QUOTA 已由 quotaVerdict 先判，其余交回后续模式判断）。 */
+/** 少数 code 路由（RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE/STREAM_CLOSED/
+ *  MALFORMED_RESPONSE → 瞬时；QUOTA 已由 quotaVerdict 先判，其余交回后续模式判断）。
+ *  这一组与官方 `LLM_FAILURE_CODES` 里标 `retryChoice` 的非 QUOTA 码逐一对应。 */
 function specialCodeVerdict(code: string): Verdict | null {
   if (
     code === "RATE_LIMIT" ||
     code === "SERVER" ||
     code === "TIMEOUT" ||
     code === "TRANSPORT" ||
-    code === "EMPTY_RESPONSE"
+    code === "EMPTY_RESPONSE" ||
+    code === "STREAM_CLOSED" ||
+    code === "MALFORMED_RESPONSE"
   ) {
     return { transient: true, reason: `code ${code}` };
   }
