@@ -10,8 +10,8 @@ catalogs:
       specifier: 0.8.1
       version: 0.8.1
     '@jayyuen66/dsh-plugin-shared':
-      specifier: ^0.2.5
-      version: 0.2.5
+      specifier: ^0.2.8
+      version: 0.2.8
     '@types/node':
       specifier: 26.6.6
       version: 26.6.6
@@ -173,7 +173,7 @@ importers:
     dependencies:
       '@jayyuen66/dsh-plugin-shared':
         specifier: 'catalog:'
-        version: 0.2.5(acbb46afa9c71b5eead719eb521418af)
+        version: 0.2.8(acbb46afa9c71b5eead719eb521418af)
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -1168,8 +1168,8 @@ packages:
     resolution: {integrity: sha512-S5txT8FeUircxA9w/Uhe3GJXvcOTI4TK5CsAbrgecLsgCRsV67+2MBk6FT3/GjgfXgFahox10iwm9LOePDhnjA==}
     engines: {node: ^20.19 || ^22.12 || >=24}
 
-  '@jayyuen66/dsh-plugin-shared@0.2.5':
-    resolution: {integrity: sha512-duJPndOBSL3igNFPq1lvY6A6BBlBkeGCK3EG33DIczwNrt4f195WCZ31OgirS1Xl37QUrfXDThEhrrWo6LBt2w==}
+  '@jayyuen66/dsh-plugin-shared@0.2.8':
+    resolution: {integrity: sha512-3jmqVyYgXy6b2rHpHrKGUFXRvfSYxdfz8xD2k1pQXamf4rcIwV2ZDooEG3TpM8vo3cCR3WIlmxhxSIgBSYHu6A==}
     engines: {dsh: ^0.2.2-rc.1, node: '>=24.9.0'}
     peerDependencies:
       '@deepseek-ai/cordis': 4.1.0
@@ -3367,7 +3367,7 @@ snapshots:
       '@typescript-eslint/types': 8.72.1
       esquery: 1.7.0
 
-  '@jayyuen66/dsh-plugin-shared@0.2.5(acbb46afa9c71b5eead719eb521418af)':
+  '@jayyuen66/dsh-plugin-shared@0.2.8(acbb46afa9c71b5eead719eb521418af)':
     dependencies:
       '@deepseek-ai/dsh-fs-patch': 0.2.2-rc.2(@deepseek-ai/cordis@4.1.0)
     optionalDependencies:

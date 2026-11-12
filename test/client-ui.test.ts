@@ -4480,7 +4480,14 @@ describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
       ).onChange({ target: { value: "5000" } });
     });
     assert.equal(saveBtn().disabled, true, "越界不进 touched");
-    assert.ok(container.textContent.includes("超出允许范围"), "越界就地提示可见");
+    // shared 0.2.7 起数字字段的错误改为**失焦后**展示：输入过程中只清旧错误（forms 指南的校验时机）。
+    // 所以要看到这句提示必须先离开输入框，而不是在 onChange 之后立刻断言。
+    await act(async () => {
+      reactProps<{ onBlur: () => void }>(
+        container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!,
+      ).onBlur();
+    });
+    assert.ok(container.textContent.includes("超出允许范围"), "越界失焦后就地提示可见");
     const before = JSON.stringify(ctx.scope.getSnapshot().value);
     // disabled 按钮收不到 click（React 19），陈旧 handler 直调命中的正是 save 的
     // `!dirty` 早退闸门——它保证任何路径下都不会发出空写入。
