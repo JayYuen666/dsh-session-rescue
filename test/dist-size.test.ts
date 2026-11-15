@@ -31,7 +31,14 @@ const HOST_BUDGET_BYTES = 144_000;
 // 实测约 120.8 KB；预算按实量上沿重定为 124 KB。
 // 0.1.12：停止重问编排迁入 lib/reask-action.ts（cancel 收敛等待 + requestId 幂等台账
 // + steer 插队 + 半成功提示 + host reask 路径），实测 128,012 B；预算按实量上沿重定为 130 KB。
-const CLIENT_BUDGET_BYTES = 130_000;
+// 0.1.15：设置卡接「有字段越界就不许保存」那道门禁 —— 越界状态与保存条搬进
+// src/card-invalid.ts（`useInvalidFields` + `settingsSaveBar`），两张数字行补
+// `resetToken` / `onInvalidChange` 两位，`src/ui-messages.ts` 多一句 `invalidFields`。
+// 实测 134,348 B。**同时记一笔既有漂移**：按已装的 shared 0.2.9 把 src/client-entry.ts 换回
+// HEAD 那份重建得 130,547 B，也就是说旧常量 130,000 在换 shared 之后就已经压不住（这 547 B
+// 不是本轮带来的）。
+// 预算按实量上沿重定为 136 KB。
+const CLIENT_BUDGET_BYTES = 136_000;
 /** `types/` 入口声明体积预算：整目录进 `files`，体积会计进 tarball。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 35_000;
 

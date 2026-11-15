@@ -1204,6 +1204,32 @@ describe("生命周期", () => {
   });
 });
 
+describe("单实例锁（market 热挂 + bundle 层双路径）", () => {
+  it("同一作用域第二次装配让路：不建调度器、不挂事件监听、不重复注册", async () => {
+    const ctx = createMockCtx();
+    applyPlugin(ctx);
+    const configureAfterFirst = ctx.configureCalls.length;
+    const effectsAfterFirst = ctx.effects.length;
+    // 第一次 apply 经 reflect.provide 把锁写进 provided；第二次同一份 ctx 读得到它 ⇒ 让路。
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      assert.doesNotThrow(() => {
+        applyPlugin(ctx);
+      }, "让路那一份不该抛：撞名抛错正是这条锁要挡掉的形态");
+    } finally {
+      console.warn = original;
+    }
+    assert.equal(warnings.length, 1, "让路时大声说明一次");
+    assert.match(String(warnings[0]), /本次装配让路/u, "文案要点明成因与去处");
+    assert.equal(ctx.configureCalls.length, configureAfterFirst, "第二次不该再登记页面策略");
+    assert.equal(ctx.effects.length, effectsAfterFirst, "第二次不该再挂清理效应");
+  });
+});
+
 describe("连接感知（connection/reset 恢复挂起的续跑，0.1.2-alpha.2）", () => {
   it("无挂起待办时 resume 返回 restored=0", async () => {
     const ctx = createMockCtx();

@@ -4,6 +4,29 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.15
+
+market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（此前第二遍会撞「同名已注册」把 fiber 打成 failed）；设置卡接「有字段越界就不许保存」那道门禁；卡片样式改用 shared 的共享 `<style>`；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距；宿主 peer 窗口抬到 `^0.2.2-rc.2`。续跑与重问行为不变。
+
+### Added
+
+- **单实例锁**：`apply` 最前面用 shared 的 `claimInstance` 抢 `INSTANCE_LOCK_KEY = "@jayyuen66/dsh-session-rescue/instance"`，抢不到就 `console.warn` 一行「本次装配让路，续跑与设置卡由在册的那一份提供」并直接返回。本包的注册面（调度器、事件监听、Typert Remote 服务）在第二遍会撞名抛错，把 fiber 打成 failed —— 那正是这条锁要挡掉的形态。
+- **`src/card-invalid.ts`**：设置卡的越界状态机与保存条各占一半。状态机本体（`useInvalidFields`）来自 shared，本文件只再做一层 `export`；**保存条是本仓自己的**——撤销按钮的文案键是 `discard` 而不是别处的 `revert`。抽成独立文件的直接原因是 `src/client-entry.ts` 已经贴着 `eslint/max-lines`（2000）的上限。
+- **回归测试**：`test/host.test.ts` 新增「同一作用域第二次装配让路：不建调度器、不挂事件监听、不重复注册」，判据含「让路那一份不该抛」与 `warn` 恰好一次、文案匹配 `/本次装配让路/u`；`test/client-ui.test.ts` 新增「越界草稿 + 其他改动 → 保存被拦、撤销仍可点；撤销后非法草稿清回已提交值」，盯住 `blocked` 与 `dirty` 分开算这条（撤销不跟着灰）。
+
+### Changed
+
+- **卡片样式改用 shared 的 `ensureCardUiCss()`**：不再把 `CARD_UI_CSS` 整段拼进本仓的 `<style>`，改为固定 id `dsh-card-ui-css` 的幂等注入 + 引用计数。
+- **`test/dist-size.test.ts` 的 `CLIENT_BUDGET_BYTES` 从 130,000 调到 136,000**，注释写明两条：① 本轮接越界门禁（`src/card-invalid.ts` + 两张数字行各补两位 + 一句文案），实测 134,348 B；② **既有漂移也记一笔**——按已装的 shared 0.2.9 把 `src/client-entry.ts` 换回 HEAD 那份重建得 130,547 B，旧常量 130,000 在换 shared 之后就已经压不住（那 547 B 不是本轮带来的）。
+- **运行时依赖 shared 抬到 `^0.2.9`**；**宿主 peer 窗口 `^0.2.2-rc.1` → `^0.2.2-rc.2`**（三枚 `@deepseek-ai/dsh*` peer 与 `engines.dsh` 一起抬；`devDependencies` 的整组钉版自 0.1.13 起已是 rc.2），两份 README 的徽章跟着改。
+
+### Fixed
+
+- **越界数字草稿会被静默丢掉**：`NumberField` 对越界草稿**不调 `onChange`**，于是它根本不进 `touched`。两张数字行现在都接 `onInvalidChange` 上报，卡片据此灰掉保存并在保存条上点名「有字段超出范围，先修正或撤销后再保存。」；`resetToken` 在保存/撤销后把框里的非法草稿清回已提交值。**本仓的 `dirty` 刻意不含越界**——否则只改了一格的用户连撤销都点不动。
+- **越界时连撤销都点不动**：上一版两个按钮会一起灰掉。现在 `SaveBar` 分开算：保存被 `blocked` 拦下，撤销保持可点。
+- **输入控件撑出容器**（shared 侧）：`.dsu-form` 整棵子树统一 `border-box`，否则 `.dsu-input` 的 `width:100%` 会连同左右 padding 一起撑出容器 26px。
+- **小节内相邻元素间距为 0**（shared 侧）：`.dsu-form .dsu-section>*+*` 给 10px，`.dsu-sectionHint` 4px，`.dsu-field` 之间仍 0。
+
 ## 0.1.14
 
 设置卡的下拉候选与说明浮层不再漂到浏览器最左边；shared 抬到 `^0.2.8`（含运行时几何自检），CI 的 action 钉版升到最新。续跑与重问行为不变。

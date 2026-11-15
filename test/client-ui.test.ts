@@ -4499,6 +4499,40 @@ describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
     });
     assert.equal(JSON.stringify(ctx.scope.getSnapshot().value), before, "无改动 → 一次都不写");
   });
+
+  it("越界草稿 + 其他改动 → 保存被拦、撤销仍可点；撤销后非法草稿清回已提交值", async () => {
+    const ctx = applyWithCtx();
+    reflectingScope(ctx, { enabled: true, resumeDelayMs: 10_000 }, true);
+    const container = await mountInjectedSettingsCard(ctx);
+    const saveBtn = (): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
+    const discardBtn = (): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>('[data-field="discard"]')!;
+    const delayInput = (): HTMLInputElement =>
+      container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!;
+    // 先落一处合法改动：dirty 成立后越界必须能把它拦回去——只按 dirty 判的门禁在这里会放行。
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(ENABLE_TOGGLE_SELECTOR)!.click();
+    });
+    assert.equal(saveBtn().disabled, false, "合法改动 → 保存可点");
+    await act(async () => {
+      reactProps<{ onChange: (ev: { target: { value: string } }) => void }>(delayInput()).onChange({
+        target: { value: "5000" },
+      });
+    });
+    await act(async () => {
+      reactProps<{ onBlur: () => void }>(delayInput()).onBlur();
+    });
+    assert.equal(saveBtn().disabled, true, "越界草稿拦住保存");
+    assert.ok(container.textContent.includes("有字段超出范围"), "保存条点名越界");
+    assert.equal(discardBtn().disabled, false, "撤销是出路，不能一起灰");
+    await act(async () => {
+      discardBtn().click();
+    });
+    assert.equal(delayInput().value, "10", "撤销后非法草稿清回已提交值");
+    assert.equal(container.textContent.includes("有字段超出范围"), false, "撤销后提示消失");
+    assert.equal(saveBtn().disabled, true, "撤销后回到无改动");
+  });
 });
 
 // ── RetryPolicySection：传输失败与暂存语义 ──────────────────────────────

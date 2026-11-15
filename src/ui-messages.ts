@@ -95,6 +95,9 @@ export interface UiMessages {
   /** 前缀 + 失败明细。明细走 `{detail}` 占位符而不是靠尾部空白拼接：靠空白意味着任何一次
    *  本地化改写（换全角冒号、去掉尾空格）都会让下一段粘上去，而那种错在类型系统里看不出来。 */
   readonly saveFailed: string;
+  /** 有字段越界时的保存条提示：`NumberField` 对越界草稿不调 `onChange`，
+   *  只看草稿差异的门禁会以为什么都没改，于是照样提交其余字段。 */
+  readonly invalidFields: string;
   /** 多条失败原因的连接符。 */
   readonly failureJoiner: string;
   readonly statusReadOnly: string;
@@ -272,6 +275,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     toggleWaiting: "状态同步中，稍后重试",
     saveRejected: "宿主拒绝了本次保存（设置可能已在别处被改动），请核对后重试",
     saveFailed: "保存失败：{detail}",
+    invalidFields: "有字段超出范围，先修正或撤销后再保存。",
     failureJoiner: "；",
     statusReadOnly: "当前作用域只读",
     statusClean: "无未保存的修改",
@@ -398,6 +402,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saveRejected:
       "The host rejected this save (the settings may have changed elsewhere); review and retry",
     saveFailed: "save failed: {detail}",
+    invalidFields: "Some fields are out of range; fix them or revert before saving.",
     failureJoiner: "; ",
     statusReadOnly: "This scope is read-only",
     statusClean: "No unsaved changes",

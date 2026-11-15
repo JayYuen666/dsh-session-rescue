@@ -85,22 +85,22 @@ import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
 import { z } from "zod";
 import {
-  CARD_UI_CSS,
   CardForm,
   ListField,
   NumberField,
-  SaveBar,
   Section,
   SelectField,
   TextField,
   ToggleField,
   claimApply,
   diffTouched,
+  ensureCardUiCss,
   fieldOf,
   isRecord,
   splitHint,
 } from "@jayyuen66/dsh-plugin-shared/client";
 import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
+import { settingsSaveBar, useInvalidFields } from "./card-invalid.ts";
 import { createRescueReader } from "./remote.ts";
 import type { RescueReader } from "./remote.ts";
 
@@ -1048,7 +1048,7 @@ function toggleWaitingTitles(t: Translate): Record<ToggleState, string> {
 }
 
 /** 每会话开关行（三态：on=开启 / off=已关闭 / unknown=快照未就绪）。
- *  控件是设置卡同款 switch（.dsu-switch 样式随 CARD_UI_CSS 注入 dock，靠右对齐）：
+ *  控件是设置卡同款 switch（.dsu-switch 样式由 shared 的 card-ui 统一注入，靠右对齐）：
  *  状态文字在标签里，开关本体只承载动作。unknown 时开关禁用、标签显示中性 "—"，
  *  避免把「还没同步到」显示成「已关闭」；busy = 写通道在途，toggle 是翻转语义，
  *  往返中再点一次会把刚设好的状态翻回去。 */
@@ -2204,6 +2204,9 @@ interface SectionInputs {
   /** 渲染取值：touched 优先，快照兜底。 */
   eff: (field: string) => unknown;
   setField: (field: string, value: SettingsPathValue) => void;
+  /** 保存/撤销后清掉数字框里的越界草稿；`reportInvalid` 把「本字段越界」报给保存门禁。 */
+  resetToken: number;
+  reportInvalid: (field: string, invalid: boolean) => void;
 }
 
 interface SecondsSpec {
@@ -2235,6 +2238,10 @@ function secondsField(inputs: SectionInputs, spec: SecondsSpec): ReactNode {
     unit: inputs.t("unitSeconds"),
     invalidHint: inputs.t("outOfRange"),
     disabled: inputs.disabled,
+    resetToken: inputs.resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      inputs.reportInvalid(spec.field, invalid);
+    },
     onChange: (next: number | undefined): void => {
       if (next === undefined) {
         return;
@@ -2268,6 +2275,10 @@ function countField(inputs: SectionInputs, spec: CountSpec): ReactNode {
     unit: inputs.t("unitTimes"),
     invalidHint: inputs.t("outOfRange"),
     disabled: inputs.disabled,
+    resetToken: inputs.resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      inputs.reportInvalid(spec.field, invalid);
+    },
     onChange: (next: number | undefined): void => {
       if (next === undefined) {
         return;
@@ -2445,6 +2456,8 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   const [excludesEdit, setExcludesEdit] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // 越界草稿不进 touched（`NumberField` 对它不调 `onChange`），与「草稿为空」在保存条上同形。
+  const invalid = useInvalidFields();
   const eff = (field: string): unknown => (field in touched ? touched[field] : value[field]);
   const excludesBaseline = excludesText(value);
   const excludesDraft = excludesEdit ?? excludesBaseline;
@@ -2455,7 +2468,7 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
   const save = async (): Promise<void> => {
-    if (!dirty) {
+    if (!dirty || invalid.blocked) {
       return;
     }
     setBusy(true);
@@ -2477,25 +2490,25 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
     // 宿主已受理整批写入 → 交回「没动过」态，草稿跟着快照走。
     setTouched({});
     setExcludesEdit(null);
+    invalid.clear();
   };
   const discard = (): void => {
     setTouched({});
     setExcludesEdit(null);
     setSaveError(null);
+    invalid.clear();
   };
 
-  const inputs: SectionInputs = { t, disabled, eff, setField };
-  const saveBar = createElement(SaveBar, {
+  // 越界那两位直接由 `useInvalidFields()` 摊进来（`SectionInputs` 只认它们，多余键不参与渲染）。
+  const inputs: SectionInputs = { t, disabled, eff, setField, ...invalid };
+  const saveBar = settingsSaveBar({
+    t,
     dirty,
     busy,
     writable: !disabled,
-    error: saveError,
-    saveLabel: t("save"),
-    savingLabel: t("saving"),
-    revertLabel: t("discard"),
-    dirtyLabel: t("dirtyCount", { count: dirtyCount }),
-    cleanLabel: t("statusClean"),
-    readOnlyLabel: t("statusReadOnly"),
+    saveError,
+    blocked: invalid.blocked,
+    dirtyCount,
     onSave: () => {
       void save();
     },
@@ -2651,12 +2664,14 @@ function apply(ctx: ClientCtx): void {
   notifyHostConnected(ctx);
 
   ctx.effect(() => {
+    const disposeShared = ensureCardUiCss();
     const tag = document.createElement("style");
     tag.id = "session-rescue-css";
-    tag.textContent = `${CSS}\n${CARD_UI_CSS}`;
+    tag.textContent = CSS;
     document.head.append(tag);
     return () => {
       tag.remove();
+      disposeShared();
     };
   }, "session-rescue: styles");
 

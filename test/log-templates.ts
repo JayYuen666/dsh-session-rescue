@@ -40,6 +40,7 @@ export const LOG_SKELETONS: readonly string[] = [
   "[session-rescue] ⟨slot⟩: steer at turn ⟨slot⟩ (open todos) — continuing in-turn",
   "[session-rescue] ⟨slot⟩: steer failed: ⟨slot⟩",
   "[session-rescue] retry-policy mutate failed (⟨slot⟩/⟨slot⟩):",
+  "[session-rescue] 检测到本插件已在同一作用域内装载：本次装配让路，续跑与设置卡由在册的那一份提供。",
   "[session-rescue] sessionProjections register failed, falling back to log scan: ⟨slot⟩",
   "[session-rescue] sessionProjections handle dispose failed (registration already released): ⟨slot⟩",
 ];

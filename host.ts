@@ -111,8 +111,20 @@ import {
 import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
 import { fieldOf, hasMethods, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { isSettingsConflict } from "@jayyuen66/dsh-plugin-shared/lib/errors";
+// 双路径装载的自保：dshmarket 运行期热装时会在 `<profile>/.dsh-market/` 下造一棵它自己的
+// Include 子树（条目 id 形如 `mkt-<包>`），把同一份 host.js 再挂一次；而 profile 的
+// `dsh.profile.bundles` 那条 bundle 行仍会被宿主按 patch 重新组装。于是同一个进程里
+// `apply` 跑两遍，第二次的注册面（这里是 Typert Remote 的「构造即注册」）撞「同名已注册」
+// 而抛，那条 fiber 落 failed —— 用户在插件页看到「启动失败」。抢这把锁把第二遍挡在
+// 注册面之外；锁随在册那一份的 fiber 卸载自动释放，所以后续装配仍能抢到。
+import { claimInstance } from "@jayyuen66/dsh-plugin-shared/lib/instance-lock";
 
 const PLUGIN_NAME = "session-rescue";
+/**
+ * 单实例锁的服务名。取包名形态而**不带随机后缀**：名字必须每一份实例都算出同一个串才可能
+ * 互斥，随机后缀等于谁都能抢到。判据与边界见 shared 的 lib/instance-lock 头注释。
+ */
+const INSTANCE_LOCK_KEY = "@jayyuen66/dsh-session-rescue/instance";
 /** 官方 llm-pi-ai 的 settings namespace（mutate 目标；与 pi-ai src/index.ts NS 一致）。 */
 const PI_AI_NS = "llm-pi-ai";
 
@@ -528,7 +540,18 @@ export interface HostCtx {
   get: ((name: "agents") => RescueAgents | undefined) &
     ((name: "lessonLoop") => LessonLoopReporter | undefined) &
     ((name: "goals") => RescueGoalService | undefined) &
-    ((name: "sessionQuery") => SessionQueryLike | undefined);
+    ((name: "sessionQuery") => SessionQueryLike | undefined) &
+    /** 泛型兜底：cordis 的 `get(name: string)` 对任何未声明的名字同样返回 undefined
+     *  （installed reflect.d.ts 的兜底重载）。前四条给本包真正用到的服务名收窄类型，
+     *  这一条让「读一个不进契约的名字」也能照实读——单实例锁那一位就是这种情况。 */
+    ((name: string) => unknown);
+  /** cordis 的注册口（单实例锁要用；`Context["reflect"]` 的 `provide` 那一位）。
+   *  可选：本包其余部分从不碰它，缺了就是「能力缺席」，锁按放行处理（见 shared 的
+   *  lib/instance-lock 头注释）。取值时**直接交对象本身**，不要包一层 `{ provide }`：
+   *  包出来的箭头恒是函数，会让「没有注册口」伪装成「有注册口但 provide 抛错」。 */
+  reflect?:
+    | { readonly provide?: ((name: string, value?: unknown) => unknown) | undefined }
+    | undefined;
   /** 本插件 fiber：`settings.configure` 的 owner 必须显式传它（缺省是 settings
    *  服务自己的 fiber，传错等于给别人的页面定策略）。类型取官方 cordis `Fiber`。 */
   fiber: Fiber;
@@ -2647,11 +2670,8 @@ markRemote(SessionRescueRemoteService.prototype, "retryPolicy");
 
 /** 注册读取接口（构造即注册）；替身上下文没有注册口时只少掉这一栏。 */
 export function installSessionRescueRemote(ctx: HostCtx, runtime: ApplyRuntime): boolean {
-  if (
-    !isRecord(ctx) ||
-    !isRecord(ctx["reflect"]) ||
-    typeof ctx["reflect"]["provide"] !== "function"
-  ) {
+  // `HostCtx` 现在带可选的 reflect（单实例锁要用），所以这一处可以按成员读。
+  if (!isRecord(ctx) || !isRecord(ctx.reflect) || typeof ctx.reflect.provide !== "function") {
     return false;
   }
   // oxlint-disable-next-line eslint/no-new, typescript/no-unsafe-type-assertion -- 构造即注册；HostCtx 是 apply 上下文的结构投影，Service 构造只读 reflect/provide
@@ -2749,6 +2769,23 @@ function apply(ctx: Context, config: PluginConfig): void {
   // 交并后的 svc 只保留本插件声明过的成员：`Context.get(name): any` 那条
   // 兜底重载不得混进来（否则每个服务读都成了 any）。
   const svc: HostCtx = ctx;
+
+  // 抢单实例锁：抢不到说明同一作用域里已经有一份在册（market 热挂 + bundle 层双路径），
+  // 那一份已经把读取面上齐了，本份再注册一遍不可能成功，只会把 fiber 打成 failed。
+  // 放在最前面：让路那一份不该建调度器、不该挂任何事件监听。
+  // `get` 要箭头包一层（成员的 `this` 不能丢），`reflect` 整个传对象本身 —— 再包一层
+  // `{ provide }` 会让「这台上下文根本没有注册口」伪装成「有注册口但 provide 抛错」，
+  // 让路判据当场误判而把插件整个关掉。
+  const lockContext = {
+    get: (name: string): unknown => svc.get(name),
+    reflect: svc.reflect,
+  };
+  if (!claimInstance(lockContext, INSTANCE_LOCK_KEY)) {
+    console.warn(
+      `[session-rescue] 检测到本插件已在同一作用域内装载：本次装配让路，续跑与设置卡由在册的那一份提供。`,
+    );
+    return;
+  }
 
   // 0.1.7 起命名空间是**隐式**的：宿主把本条目导出的 Config 里标了 `.volatile()` 的
   // 十四项投影成设置表单，ns = profile 条目 id（`session-rescue`，见 cordis.patch.yml）。
