@@ -4,6 +4,10 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.16
+
+`cordis.patch.yml` 显式插入固定 id `dsh-plugin-shared` 的 shared 供应行——多消费者共用同一个 id 时宿主把开关标成「无法唯一定位」并禁用，单插件 profile 里不再有能被误关的供应组件，误关导致的 `missed the module table`（dsh-ocr-review 仓 issue #2）路径被堵死；`package.json` 新增 `dsh.client.external` 声明该行，`client.js` 的外置清单从 react 家族 + zod 扩到 shared 的 `./client`。client 产物开启压缩并按新 shared 重建：134,348 B → 53,106 B，体积预算由 136 KB 重定为 67 KB；外部化断言改由冒烟夹具的 stub require 判定，`test/profile-bundle.ts` 随之适配压缩产物的声明形态。`@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`：设置卡吸底保存条的旧固定 id 样式冲突与底色随 shared 修复。双语 README 与 DETAIL 增加 Feedback 入口，「随包发布」一条改述压缩后的产物形态。续跑与重问行为不变。
+
 ## 0.1.15
 
 market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（此前第二遍会撞「同名已注册」把 fiber 打成 failed）；设置卡接「有字段越界就不许保存」那道门禁；卡片样式改用 shared 的共享 `<style>`；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距；宿主 peer 窗口抬到 `^0.2.2-rc.2`。续跑与重问行为不变。

@@ -29,3 +29,9 @@
 ## 更完整的说明
 
 调度器的状态机、失败如何分类、回合尾部操作行与 dock 区显示什么，都写在随包 README（`README.md` / `README.zh-CN.md`）。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-session-rescue/issues](https://github.com/JayYuen666/dsh-session-rescue/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。

@@ -7,11 +7,12 @@
 // 预算怎么定的：取当前实测值上加约 25%。留这 25% 是给正常演进的——加一条规则、改一句文案
 // 不该立刻要求改预算；翻倍一定会顶穿。确需突破时改这些常量并写明理由。
 //
-// 明确不做的事：**不开 minify**。压缩后的产物里跨包说明符字符串（`from "@deepseek-ai/dsh-brand"`
-// 与 `from "@jayyuen66/dsh-plugin-shared/lib/record"`）会双双消失，于是 test/build-host.test.ts 那
-// 两条「跨包依赖必须外部化」的断言从「被内联了也不报」变成永远通过——它们防的正是 isRecord /
-// brandString 这类单点被就地复制成多份。省下的体积不值得废掉两道真门禁，所以产物保持可读，
-// 体积改用预算盯着。
+// minify 只开在 client 半：host.js 保持可读——压缩会把跨包说明符字符串（`from "@deepseek-ai/dsh-brand"`
+// 与 `from "@jayyuen66/dsh-plugin-shared/lib/record"`）抹掉，test/build-host.test.ts 那
+// 两条「跨包依赖必须外部化」的断言会从「被内联了也不报」变成永远通过——它们防的正是 isRecord /
+// brandString 这类单点被就地复制成多份，省下的体积不值得废掉两道真门禁。client.js 自 0.1.16 起
+// 开启压缩（shared card-ui 的字节随供应行外置，不再计入本产物），它的外部化由
+// test/build-client.test.ts 的 stub require 判定（unexpected require 即红），不依赖可读的函数名。
 import { describe, it } from "vitest";
 import { strict as assert } from "node:assert";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -24,21 +25,9 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
 // 0.2.x 一轮：请求级重试改「先问下游」、steer 续跑（turn-stopping + 开放回合复盘）、
 // blocked 台账与 /state 位，实测涨到约 114.7 KB，预算按实量 +25% 重定。
 const HOST_BUDGET_BYTES = 144_000;
-/** client 半产物体积预算：浏览器侧加载，按平台计账。 */
-// 设置卡迁到 @jayyuen66/dsh-plugin-shared/lib/card-ui 后，卡片样式与组件逻辑随包进
-// client.js（实测增加约 18 KB），预算按迁移后的实量重定。
-// 0.1.11：设置卡新增按 provider 的自定义码表编辑（ListField + 保存按钮 + 提示），
-// 实测约 120.8 KB；预算按实量上沿重定为 124 KB。
-// 0.1.12：停止重问编排迁入 lib/reask-action.ts（cancel 收敛等待 + requestId 幂等台账
-// + steer 插队 + 半成功提示 + host reask 路径），实测 128,012 B；预算按实量上沿重定为 130 KB。
-// 0.1.15：设置卡接「有字段越界就不许保存」那道门禁 —— 越界状态与保存条搬进
-// src/card-invalid.ts（`useInvalidFields` + `settingsSaveBar`），两张数字行补
-// `resetToken` / `onInvalidChange` 两位，`src/ui-messages.ts` 多一句 `invalidFields`。
-// 实测 134,348 B。**同时记一笔既有漂移**：按已装的 shared 0.2.9 把 src/client-entry.ts 换回
-// HEAD 那份重建得 130,547 B，也就是说旧常量 130,000 在换 shared 之后就已经压不住（这 547 B
-// 不是本轮带来的）。
-// 预算按实量上沿重定为 136 KB。
-const CLIENT_BUDGET_BYTES = 136_000;
+/** client 半产物体积预算：浏览器侧加载，按平台计账。shared 客户端行改为 external 并开启
+ *  minify 后实测 53,106 B；shared card-ui 的字节不再计入本产物，按实测 × 1.25 取整重定。 */
+const CLIENT_BUDGET_BYTES = 67_000;
 /** `types/` 入口声明体积预算：整目录进 `files`，体积会计进 tarball。 */
 const DECLARATION_ENTRY_BUDGET_BYTES = 35_000;
 

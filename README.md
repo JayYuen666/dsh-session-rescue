@@ -46,6 +46,7 @@
 - [ Known boundaries](#-known-boundaries)
 - [ FAQ](#-faq)
 - [ Development](#-development)
+- [ Feedback](#feedback)
 - [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
@@ -87,7 +88,7 @@ Remove with `dsh plugin --profile web remove @jayyuen66/dsh-session-rescue`. The
 - **Requires Node.js `>= 24.9`.** This is an ESM-only package; that Node floor is what makes `require()` of an ESM entry work at all, which is why `engines.node` is declared.
 - **Requires host `dsh` at the `0.2.2-rc.2` line or later.** The requirement the host reads is `engines.dsh` (`^0.2.2-rc.2`), and it **decides alone**: once that branch answers, `peerDependencies` is not consulted. Prereleases take part in the range comparison (the host calls it with `includePrerelease: true`). The `@deepseek-ai/dsh-*` peers carry the same window; the exact `devDependencies` pins are the compile-time discipline, not an install gate. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package under `dependencies` is materialized as a real directory next to the copy the running host already loaded — native tool calls then throw while build, typecheck and coverage stay green. The host packages `host.js` imports for value (`@deepseek-ai/dsh-brand`, `@deepseek-ai/dsh-typert-protocol`, `@deepseek-ai/schemastery`) are required peers repeated under `devDependencies` at the same pin, so the bundler externalizes them instead of inlining official function bodies.
-- **What ships**: the `prepare`-rebuilt `host.js` and `client.js`, `types/`, `cordis.patch.yml`, plus `README*`, `LICENSE`, `CHANGELOG.md` and `icon.svg`. Artifacts are not committed, and are not minified on purpose — the bare cross-package specifiers must survive for the externalization assertions to mean anything.
+- **What ships**: the `prepare`-rebuilt `host.js` and `client.js`, `types/`, `cordis.patch.yml`, plus `README*`, `LICENSE`, `CHANGELOG.md` and `icon.svg`. Artifacts are not committed. The client bundle is minified; externalization is asserted structurally from the chunk's module list, not from readable function names.
 - Install fails with 404: that version was never published (check `dist-tags.latest`). It usually means the sibling library package `@jayyuen66/dsh-plugin-shared` is not on the registry yet — `host.js` value-imports its `lib/locale`, `lib/record`, `lib/errors` and `lib/lesson-bus`, and `client.js` value-imports `client`, so a missing one surfaces as `ERR_MODULE_NOT_FOUND`.
 
 ### <img src="https://api.iconify.design/lucide/arrow-down-to-line.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Shared version floor
@@ -114,7 +115,7 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
-- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, a list of operations whose `insert:` block carries a single `- id: session-rescue` entry with `name: "@jayyuen66/dsh-session-rescue"` — the host scans `dsh.client` on bare-name entries only. The card components are bundled into `client.js` (only `react` / `zod` stay external to the host's module table), so the card does not depend on a second package being loaded. `dsh plugin add/remove` maintains the assembly layer.
+- Bundle form: `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, a list of operations whose `insert:` block carries a `- id: dsh-plugin-shared` supplier row (keep it enabled; disabling it removes the cards' shared component supply) plus the `- id: session-rescue` entry with `name: "@jayyuen66/dsh-session-rescue"` — the host scans `dsh.client` on bare-name entries only. The card components come from the shared client row, externalized as `@jayyuen66/dsh-plugin-shared/client`; the host module table provides `react`, `zod` and that shared row. `dsh plugin add/remove` maintains the assembly layer.
 - The host half hard-depends on `timer` and `settings` (`inject: ["timer", "settings"]`); the read surface is registered through an injected child fiber into the host `remote` gateway. It does not depend on `webServer`, so a host without that service (TUI) keeps auto-recovery working and only loses the settings card's data plane.
 - The settings card lives in `plugins.bundle.config` on the plugin page, keyed by the **bundle package name**; `configForms.get()` and the settings namespace stay the bare entry id `session-rescue`. Edits are staged, Save writes them into settings, Revert discards.
 - Without UI, deployment defaults go on the registration line's `config:`; precedence = card runtime value > line `config` > schema `.default()`, and an invalid `config` fails the plugin load loudly.
@@ -220,6 +221,12 @@ pnpm run check   # typecheck → lint → client build → host build → types 
 - `test/property/` (fast-check) covers the classification order, the turn-facts fold, the `/state` payload parse, and the scheduler's state-machine invariants under random command sequences — each property carries a reach guard, so a criterion that was never exercised turns red instead of green.
 - Coverage thresholds are 100% across four metrics, so a new branch needs a case that reaches it.
 - `test/publish-manifest.test.ts` guards the published shape: entry targets shipped, no source entry, no `@deepseek-ai/*` under `dependencies`, `dsh-*` **devDependencies** pinned exactly and all on one version, `@deepseek-ai/dsh*` **peers** carrying the same support-window range as `engines.dsh`, and no dates or machine paths in comments or docs. `test/dist-size.test.ts` holds a size budget over the artifacts.
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-session-rescue/issues](https://github.com/JayYuen666/dsh-session-rescue/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License
 

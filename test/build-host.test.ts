@@ -74,8 +74,9 @@ describe("buildHost()", () => {
     // 内联判据不绑「行首 + function + 紧接左括号」一种形态：const/let/var/class 声明、
     // 泛型参数与缩进同样算内联已发生（打包器会改写声明形态）。
     assert.ok(!declares(out, "brandString"), "host.js 不得内联 brandString 的函数体");
-    // 本包 client 半是**结构性例外**：build-client.mjs 只 external react（浏览器侧解析不了
-    // 裸说明符），故 client.js 里仍是内联的 brandString——那条不由外部化裁定消灭。
+    // client 半不在这条断言的射程里：本包 client 代码不导入 dsh-brand（产物里没有它的痕迹），
+    // 外置清单也只认 react 家族、zod 与 shared 的 client 行；client 产物已开启 minify，
+    // 跨包依赖改由 test/build-client.test.ts 的 stub require 判定（unexpected require 即红）。
     assert.ok(
       importsFrom(out, "@deepseek-ai/dsh-typert-protocol"),
       "dsh-typert-protocol 必须外部化（读取接口的服务基类与注册口都来自宿主）",

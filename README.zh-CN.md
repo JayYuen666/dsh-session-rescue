@@ -46,6 +46,7 @@
 - [ 已知边界](#-已知边界)
 - [ 常见问题](#-常见问题)
 - [ 开发](#-开发)
+- [ 反馈](#反馈)
 - [ 许可](#-许可)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
@@ -87,7 +88,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 - **需要 Node.js `>= 24.9`。** 本包仅 ESM；正是这个 Node 下限让 `require()` 一份 ESM 入口成为可能，`engines.node` 因此声明。
 - **需要宿主 `dsh` 在 `0.2.2-rc.2` 或更新的 `0.2.2` 这条线上。** 宿主装插件时读的是 `engines.dsh`（`^0.2.2-rc.2`），而且它**单独决定**：那一支给出结论后不再读 `peerDependencies`。预发布版本参与范围比较（宿主按 `includePrerelease: true` 判）。`@deepseek-ai/dsh-*` 的 peer 写同一条窗口范围；精确钉版只在 `devDependencies` 里，那是编译期纪律，不参与装载判定。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里没有任何 `@deepseek-ai/*`，这是约定**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 以 `nodeLinker: hoisted` + `autoInstallPeers: false` 安装，`dependencies` 里的宿主包会被物化成一份真实目录、落在运行中宿主已装载的那份旁边——此后原生工具调用全部抛错，而构建、类型检查、覆盖率一路全绿。`host.js` 值导入的三枚宿主包（`@deepseek-ai/dsh-brand`、`@deepseek-ai/dsh-typert-protocol`、`@deepseek-ai/schemastery`）是必备 peer、并以同一钉版重复落在 `devDependencies`，打包器因此把它们外部化而不是内联官方函数体。
-- **随包发布**：`prepare` 重建的 `host.js` 与 `client.js`、`types/`、`cordis.patch.yml`，加上 `README*`、`LICENSE`、`CHANGELOG.md` 与 `icon.svg`。产物不提交，也刻意不压缩——裸跨包说明符必须留在产物里，外部化断言才有意义。
+- **随包发布**：`prepare` 重建的 `host.js` 与 `client.js`、`types/`、`cordis.patch.yml`，加上 `README*`、`LICENSE`、`CHANGELOG.md` 与 `icon.svg`。产物不提交；客户端产物已开启压缩，外部化改由 chunk 的模块清单做结构性断言，不再依赖可读的函数名。
 - 装不上报 404：该版本没发出去过（先看 `dist-tags.latest`）。更常见的原因是同组库包 `@jayyuen66/dsh-plugin-shared` 还没上 registry——`host.js` 值导入它的 `lib/locale`、`lib/record`、`lib/errors` 与 `lib/lesson-bus`，`client.js` 值导入 `client`，缺了就是 `ERR_MODULE_NOT_FOUND`。
 
 ### <img src="https://api.iconify.design/lucide/arrow-down-to-line.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> shared 的版本下限
@@ -114,7 +115,7 @@ dsh plugin --profile web add @jayyuen66/dsh-session-rescue
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，内容是一串操作项，其 `insert:` 块只有一条 `- id: session-rescue`、`name: "@jayyuen66/dsh-session-rescue"`——宿主只对裸包名条目扫描 `dsh.client`。卡片组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不依赖第二份包被装载。`dsh plugin add/remove` 维护装配层。
+- 组合包形态：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，内容是一串操作项，其 `insert:` 块含一条 `- id: dsh-plugin-shared` 供应行（必须保持开启；停用后卡片会失去 shared 组件供应），再加一条 `- id: session-rescue`、`name: "@jayyuen66/dsh-session-rescue"`——宿主只对裸包名条目扫描 `dsh.client`。卡片组件来自 shared 的客户端行，以 `@jayyuen66/dsh-plugin-shared/client` 外置；宿主模块表提供 `react`、`zod` 与这条 shared 供应。`dsh plugin add/remove` 维护装配层。
 - host 半硬依赖 `timer` 与 `settings`（`inject: ["timer", "settings"]`）；读取接口经注入子 fiber 注册进宿主 `remote` 网关。不依赖 `webServer`，没有该服务的宿主（TUI）自动续跑照常、只是设置卡读不到数据那一栏。
 - 设置卡在插件页的 `plugins.bundle.config`，按 **bundle 包名** keyed；`configForms.get()` 与 settings 命名空间仍是裸条目 id `session-rescue`。改动点「保存」才写 settings、「撤销」丢弃。
 - 不开 UI 时，部署默认值写在注册行 `config:` 上；优先级 = 卡运行时值 > 行 `config` > schema `.default()`，配置非法则插件加载失败（响亮报错）。
@@ -220,6 +221,12 @@ pnpm run check   # typecheck → lint → client build → host build → types 
 - `test/property/`（fast-check）覆盖分类判序、回合事实折叠、`/state` 载荷解析，以及随机指令序列下调度器的状态机不变量——每条属性都带「判据真被走到」的守卫，没走到的判据直接红而不是绿。
 - 覆盖率门是四项 100%，新增分支必须有走到它的用例。
 - `test/publish-manifest.test.ts` 看住发布清单：入口目标随包、无源码入口、`dependencies` 无 `@deepseek-ai/*`、`dsh-*` 的 **devDependencies** 精确钉版且这一组包同值、`@deepseek-ai/dsh*` 的 **peer** 与 `engines.dsh` 同一条支持窗口范围、注释与文档无日期与本机路径。`test/dist-size.test.ts` 给产物设体积预算。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-session-rescue/issues](https://github.com/JayYuen666/dsh-session-rescue/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
 

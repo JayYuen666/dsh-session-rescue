@@ -51,7 +51,8 @@
 // "owns no runtime identity or mutable state, so independently installed copies produce
 // interchangeable values"（同文件 :9-10）。本仓据此把它落在 dependencies、
 // 产物留 @deepseek-ai/dsh-brand 裸说明符；放 devDependencies 时 rolldown 会把函数体内联进
-// host.js（本包 client 半仍是内联——build-client.mjs 只 external react，见 test/ 里的说明）。
+// host.js（client 半的外置清单只认 react 家族、zod 与 shared 的 client 行，dsh-brand 不在其列；
+// 本仓 client 代码不导入它——见 test/ 里的说明）。
 // @deepseek-ai/cordis 除 `Events` 的 type-only 取型外一律不值导入（运行时由 ctx 注入）。
 
 import Schema from "@deepseek-ai/schemastery";

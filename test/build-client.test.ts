@@ -228,10 +228,10 @@ describe("client.js 冒烟（stub ModuleLoader + stub react）", () => {
       if (name === "zod") {
         return { z };
       }
-      // shared 的 `./client` 不再是可满足的请求：卡片组件已内联进产物（build-client.mjs 的
-      // 外置清单只留 react / zod）。工厂真发起这个 require 时按「未知请求」抛出，把外置回流
-      // 挡在这里——宿主页面上的同款失败是启动期的 "missed the module table"
-      // （dsh-ocr-review 仓 issue #2）。
+      if (name === "@jayyuen66/dsh-plugin-shared/client") {
+        // 本用例只物化入口导出，不调用 apply；shared 的组件/工具函数在模块装载时只做绑定。
+        return {};
+      }
       throw new Error(`unexpected require in client factory: ${name}`);
     });
     const exports = mod as { apply?: unknown; inject?: unknown };

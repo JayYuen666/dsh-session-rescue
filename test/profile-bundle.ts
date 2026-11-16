@@ -170,7 +170,8 @@ function patchEntryId(): string {
       }
     }
   }
-  const ownIds = ids;
+  assert.ok(ids.includes("dsh-plugin-shared"), "shared 供应行必须使用固定 id");
+  const ownIds = ids.filter((id) => id !== "dsh-plugin-shared");
   assert.notEqual(ownIds.length, 0, "cordis.patch.yml 里没有本包的裸 `- id:` 条目");
   assert.equal(
     ownIds.length,
@@ -185,7 +186,10 @@ function patchEntryId(): string {
  *  并给 `const` 加词边界：注释或字符串里出现的同名片段不许命中。 */
 function constLiteral(text: string, name: string): string {
   const escaped = name.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
-  const pattern = new RegExp(`(?:^|[^A-Za-z0-9_$])const ${escaped}\\s*=\\s*"(?<value>[^"]*)"`, "u");
+  const pattern = new RegExp(
+    `(?:^|[^A-Za-z0-9_$])(?:const|let|var) ${escaped}\\s*(?::[^=]+)?=\\s*["'\`](?<value>[^"'\`]*)["'\`]`,
+    "u",
+  );
   const value = pattern.exec(text)?.groups?.["value"] ?? "";
   assert.notEqual(value, "", `产物里找不到 const ${name} = "…" 的字面量声明`);
   return value;
@@ -255,7 +259,7 @@ function keyValueAt(span: string, i: number): { literal: string; ident: string }
     cursor += 1;
   }
   const opener = span[cursor] ?? "";
-  if (opener === '"' || opener === "'") {
+  if (opener === '"' || opener === "'" || opener === "`") {
     let end = cursor + 1;
     let literal = "";
     while (end < span.length && span[end] !== opener) {
@@ -301,13 +305,10 @@ function topLevelSlotKey(span: string): { literal: string; ident: string } {
  *  搜索范围限定在本次 register 的对象字面量内：产物里别处也有 `key:` 这个键名（槽位键、
  *  React list key），全局抓会拿错；名字相同的注册必须唯一，否则定位本身就不成立。 */
 function registeredSlotKey(text: string): string {
-  const marker = text.indexOf('name: "plugins.bundle.config"');
+  const markers = [...text.matchAll(/name:\s*["'`]plugins\.bundle\.config["'`]/gu)];
+  assert.equal(markers.length, 1, "产物里必须恰好有一处 plugins.bundle.config 注册");
+  const marker = markers[0]?.index ?? -1;
   assert.notEqual(marker, -1, "产物里没有 plugins.bundle.config 的注册");
-  assert.equal(
-    text.indexOf('name: "plugins.bundle.config"', marker + 1),
-    -1,
-    "产物里有不止一处 plugins.bundle.config 注册：槽位 key 的定位不唯一",
-  );
   const [start, end] = enclosingObjectSpan(text, marker);
   const { literal, ident } = topLevelSlotKey(text.slice(start, end));
   if (literal !== "") {
@@ -351,7 +352,7 @@ function configFormsEntryId(text: string): string {
     `产物里 configForms.get(…) 出现 ${args.length} 次（${args.join(", ")}）：无法断定哪次是卡片命名空间`,
   );
   const arg = args[0] ?? "";
-  const inline = /^"(?<value>[^"]*)"$/u.exec(arg)?.groups?.["value"] ?? "";
+  const inline = /^(?<q>["'`])(?<value>[^"'`]*)\k<q>$/u.exec(arg)?.groups?.["value"] ?? "";
   if (inline !== "") {
     return inline;
   }

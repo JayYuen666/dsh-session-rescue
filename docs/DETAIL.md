@@ -29,3 +29,9 @@ Nothing — no external CLI, interpreter or credential. Request-level rate-limit
 ## Further detail
 
 The scheduler's state machine, how failures are classified and what the turn-tail row and the dock show are in the package README (`README.md` / `README.zh-CN.md`).
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-session-rescue/issues](https://github.com/JayYuen666/dsh-session-rescue/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.
