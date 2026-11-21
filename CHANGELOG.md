@@ -4,6 +4,17 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.17
+
+宿主基线抬到 `0.2.2-rc.5`；会话事件的判别键钉进官方联合，Typert 远端方法的程序化标记收编 shared。
+
+### Changed
+
+- **宿主依赖线抬到 `0.2.2-rc.5`**：devDependencies 全族精确钉 rc.5，`engines.dsh` 与 dsh 家族 peer 同一条窗口；shared 经 catalog 抬到 `^0.2.12`——收编的 `./lib/session-projection` 子路径随 shared 0.2.12 发布，`pnpm-lock.yaml` 经 `pnpm install --lockfile-only` 重解到 registry 现量。两份 README 的支持窗口徽章同步。
+- **事件判别键官方化**：`lib/event-fields.ts` 的五个事件键常量逐枚 `satisfies` 进官方 `SessionEvent` 键联合（`todo/write` 由官方 `dsh-tool-todo` 自带的增补供给）；`lib/turn-facts.ts` 的折叠表改 `switch (event.type)`，case 键获得编译期校验（判别键守卫保留，跨版本日志里的畸形条目仍按无关事件跳过）；`host.ts` 的 `readEvents` 与 sessionQuery 观察面绑定官方 `readonly SessionEvent[]`。字段读取保持防御式 `unknown`（日志条目跨版本缺字段是真事），运行时行为不变。
+- **markRemote 收编**：`host.ts` 内联的装饰器程序化调用删除，改用 shared `./lib/remote-marker`——与 dir-prep / ocr-review 的副本剥注释后 md5 一致，五个仓的形状解释只剩 shared 一份。
+- **投影挂载判别件收编 shared**：`lib/projection-reader.ts` 的三段判别（与 danger-guard 的副本 md5 一致）改从 `./lib/session-projection` 取用；fail-fast 策略留本地。
+
 ## 0.1.16
 
 `cordis.patch.yml` 显式插入固定 id `dsh-plugin-shared` 的 shared 供应行——多消费者共用同一个 id 时宿主把开关标成「无法唯一定位」并禁用，单插件 profile 里不再有能被误关的供应组件，误关导致的 `missed the module table`（dsh-ocr-review 仓 issue #2）路径被堵死；`package.json` 新增 `dsh.client.external` 声明该行，`client.js` 的外置清单从 react 家族 + zod 扩到 shared 的 `./client`。client 产物开启压缩并按新 shared 重建：134,348 B → 53,106 B，体积预算由 136 KB 重定为 67 KB；外部化断言改由冒烟夹具的 stub require 判定，`test/profile-bundle.ts` 随之适配压缩产物的声明形态。`@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`：设置卡吸底保存条的旧固定 id 样式冲突与底色随 shared 修复。双语 README 与 DETAIL 增加 Feedback 入口，「随包发布」一条改述压缩后的产物形态。续跑与重问行为不变。

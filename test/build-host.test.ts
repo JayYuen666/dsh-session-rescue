@@ -85,6 +85,10 @@ describe("buildHost()", () => {
       importsFrom(out, "@jayyuen66/dsh-plugin-shared/lib/record"),
       "shared/record 必须外部化（SP-D 起 isRecord/fieldOf 单点在 shared，内联即复制判据）",
     );
+    assert.ok(
+      importsFrom(out, "@jayyuen66/dsh-plugin-shared/lib/remote-marker"),
+      "shared/remote-marker 必须外部化（markRemote 单点在 shared，内联即复制官方装饰器调用形状）",
+    );
     // 本包自己的读取接口代码确已并入单文件：用**声明形态**判，而不是子串 "sessionRescue"——
     // 后者在产物里只出现在一个字符串常量（RESCUE_REMOTE_NAMESPACE）里，拿它当证据等于没证。
     assert.ok(

@@ -66,10 +66,10 @@ import type { Context, Events, Fiber, Volatile } from "@deepseek-ai/cordis";
 // @deepseek-ai/dsh-session（lib/types/index.d.ts：id :154、header :150、snapshotEvents :224）。
 // 这两个包都只是类型依赖（type-only + 一处 dsh-brand 值导入，见文件头）。
 import type { Agent, AgentRegistry, Inbox } from "@deepseek-ai/dsh-agent";
-import type { Session, SessionId } from "@deepseek-ai/dsh-session";
+import type { Session, SessionEvent, SessionId } from "@deepseek-ai/dsh-session";
 import type { MessageId } from "@deepseek-ai/dsh-llm";
 import type { SettingsForms, SettingsPathOp } from "@deepseek-ai/dsh-settings";
-import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import {
   classifyFailure,
   isRequestRetryWorthy,
@@ -110,6 +110,7 @@ import {
 // try/catch 抓不到 rejection——失败既被静默吞掉又给宿主进程留一枚未处理拒绝。
 // 同步抛错与异步拒绝共用这一个返回路径（三个包的调用点降级规则一致）。
 import { settleLessonCall } from "@jayyuen66/dsh-plugin-shared/lib/lesson-bus";
+import { markRemote } from "@jayyuen66/dsh-plugin-shared/lib/remote-marker";
 import { fieldOf, hasMethods, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { isSettingsConflict } from "@jayyuen66/dsh-plugin-shared/lib/errors";
 // 双路径装载的自保：dshmarket 运行期热装时会在 `<profile>/.dsh-market/` 下造一棵它自己的
@@ -277,9 +278,10 @@ const MAX_TRANSIENT_PASS_PENDING = 64;
  *
  * `snapshotEvents` 的返回就此绑成官方 `readonly SessionEvent[]`（那枚 `@deprecated`
  * "new calls are prohibited" :218-219 也一并进来，见 readEvents 里带理由的 lint 豁免）。
- * 它现在只服务**回退扫描**（主路径是 lib/turn-facts.ts 的投影读）；返回仍交回
- * `readonly unknown[]` 并逐字段守卫（lib/turn-facts.ts 的 `typeOf` / `numIn` /
- * `sourceKindOf`）：日志条目跨版本缺字段是真事，判据不能因为"类型说必存在"就省掉守卫。
+ * 它现在只服务**回退扫描**（主路径是 lib/turn-facts.ts 的投影读）；`readEvents` 的返回
+ * 注解绑同一官方联合（观察 cut 就是这份类型），下游读取器仍按 `unknown` 逐字段守卫
+ * （lib/turn-facts.ts 的 `typeOf` / `numIn` / `sourceKindOf`）：日志条目跨版本缺字段是
+ * 真事，判据不能因为"类型说必存在"就省掉守卫。
  */
 export type SessionEventsLike = Pick<Session, "id"> &
   Partial<Pick<Session, "header" | "snapshotEvents">>;
@@ -504,9 +506,11 @@ export interface RescueAgents {
 
 /** 宿主 sessionQuery 服务的最小读取面（官方 @deepseek-ai/dsh-session-query）：
  *  observeSession 异步交回一份不可变事件 cut（Disposable）。本包只读 events 一位，
- *  用完即 dispose；projectionMode:"none" 不算投影（本包回退路径只要原始事件流）。 */
+ *  用完即 dispose；projectionMode:"none" 不算投影（本包回退路径只要原始事件流）。
+ *  events 元素绑官方 `SessionEvent` 联合（readEvents 的返回随之绑定），下游读取器
+ *  仍按 unknown 逐字段守卫——类型说宿主承诺什么，守卫负责宿主交付什么。 */
 interface SessionObservationLike {
-  readonly events: readonly unknown[];
+  readonly events: readonly SessionEvent[];
   [Symbol.dispose]: () => void;
 }
 interface SessionQueryLike {
@@ -658,7 +662,7 @@ export interface LessonLoopReporter {
 async function readEvents(
   runtime: ApplyRuntime,
   session: SessionEventsLike | undefined,
-): Promise<readonly unknown[]> {
+): Promise<readonly SessionEvent[]> {
   const sessionQuery = runtime.svc.get("sessionQuery");
   const sessionId = fieldOf(session, "id");
   if (sessionQuery === undefined || typeof sessionId !== "string") {
@@ -1464,7 +1468,8 @@ const OFFICIAL_DEFAULT_BACKOFF = {
   jitterRatio: 0.1,
 } as const;
 
-const OFFICIAL_DEFAULT_RETRY_POLICY: Record<string, unknown> = {
+/** 导出仅供单测：test/retry-table.test.ts 把它与 client 侧的码表常量逐项比对钉住漂移。 */
+export const OFFICIAL_DEFAULT_RETRY_POLICY: Record<string, unknown> = {
   mode: "normal",
   maxRetries: 5,
   retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
@@ -2643,22 +2648,6 @@ export class SessionRescueRemoteService extends TypertRemoteService {
       return { ok: false, error: errorText(error), status: 500 };
     }
   }
-}
-
-/** 标准装饰器的程序化调用：标记落到真正的原型上，源码不引装饰器语法。 */
-function markRemote(prototype: SessionRescueRemoteService, methodName: string): void {
-  const context = {
-    kind: "method",
-    name: methodName,
-    static: false,
-    private: false,
-    addInitializer: (initializer: (this: unknown) => void): void => {
-      Reflect.apply(initializer, Object.create(prototype), []);
-    },
-  };
-  // oxlint-disable-next-line eslint/new-cap -- `Remote(…)` 是装饰器工厂，不是大写开头的构造调用
-  const decorate = Remote(methodName);
-  Reflect.apply(decorate, undefined, [Reflect.get(prototype, methodName), context]);
 }
 
 markRemote(SessionRescueRemoteService.prototype, "state");

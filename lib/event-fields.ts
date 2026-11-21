@@ -1,9 +1,23 @@
 // 会话事件读取的共享判据：投影折叠（lib/turn-facts.ts 的 `applyEvent`）与回退扫描（turn-review）必须对同一串
 // 事件逐项同解；两处各抄一份时，任何一侧被单独微调都会让投影读与回退读给出不同答案。
+import type { SessionEvent } from "@deepseek-ai/dsh-session";
+// 空名 type import 只为把 dsh-tool-todo 的 'todo/write' 增补载入本 program（类型-only，
+// 产物里被擦掉），下面的事件键常量才能 satisfies 进官方联合。同款写法见 src/client-entry.ts。
+// oxlint-disable-next-line import/no-empty-named-blocks, unicorn/require-module-specifiers -- 见上
+import type {} from "@deepseek-ai/dsh-tool-todo";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 export const USER_QUESTION_TOOL = "ask_user_question";
 export const SCHEDULE_SOURCE_KIND = "schedule";
+
+/** 本包读取的会话事件键，逐枚 `satisfies` 进官方 `SessionEvent` 的键联合：键名漂移
+ *  （宿主改名、手抄笔误）在编译期红出来，而不是运行期表现为「该键永不命中」。
+ *  折叠表（turn-facts 的 `applyEvent`）在 `switch (event.type)` 上由同一联合收窄校验。 */
+export const TURN_START = "turn/start" satisfies SessionEvent["type"];
+export const TURN_END = "turn/end" satisfies SessionEvent["type"];
+export const USER_MESSAGE = "user/message" satisfies SessionEvent["type"];
+export const TOOL_CALL = "tool/call" satisfies SessionEvent["type"];
+export const TODO_WRITE = "todo/write" satisfies SessionEvent["type"];
 
 /** 官方 `TodoItem.status` 的全部取值（`@deepseek-ai/dsh-tool-todo` 的
  *  `'pending' | 'in_progress' | 'completed'`）。这里按**白名单**收未闭合项，

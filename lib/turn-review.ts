@@ -22,7 +22,9 @@
  */
 
 /** 会话事件的本插件读取接口：元素来自宿主（跨版本字段会缺），一律守卫投影，
- *  不声明成具体 interface——那只会把 `unknown` 换成需要断言的假精确。 */
+ *  不声明成具体 interface——那只会把 `unknown` 换成需要断言的假精确。
+ *  判别键不在此列：比较用的是 event-fields.ts 里逐枚 `satisfies` 进官方
+ *  `SessionEvent` 键联合的常量，键名漂移编译期红。 */
 
 import { fieldOf } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import {
@@ -31,7 +33,12 @@ import {
   numIn,
   openCountOf,
   SCHEDULE_SOURCE_KIND,
+  TODO_WRITE,
+  TOOL_CALL,
+  TURN_END,
+  TURN_START,
   typeOf,
+  USER_MESSAGE,
   USER_QUESTION_TOOL,
 } from "./event-fields.ts";
 
@@ -66,7 +73,7 @@ interface TurnEndInfo {
 function findLastTurnEnd(events: readonly unknown[]): TurnEndInfo | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const ev = events[i];
-    if (typeOf(ev) === "turn/end") {
+    if (typeOf(ev) === TURN_END) {
       const reasonKind = nestedStr(ev, "reason", "kind");
       return {
         lastEndIndex: i,
@@ -95,10 +102,10 @@ function findTurnStart(
   // 从它开始的话第一轮就命中「碰到另一条 turn/end」直接返回 -1。
   for (let i = lastEndIndex - 1; i >= 0; i -= 1) {
     const ev = events[i];
-    if (typeOf(ev) === "turn/end") {
+    if (typeOf(ev) === TURN_END) {
       return -1;
     }
-    if (typeOf(ev) === "turn/start" && (lastTurn === null || numIn(ev, "turn") === lastTurn)) {
+    if (typeOf(ev) === TURN_START && (lastTurn === null || numIn(ev, "turn") === lastTurn)) {
       return i;
     }
   }
@@ -114,7 +121,7 @@ function todosSnapshot(
   // 清单快照（`todo/write`）是 last-wins：倒扫到第一条可用快照即可，常见情况下是 O(1)。
   for (let i = lastEndIndex; i >= 0; i -= 1) {
     const ev = events[i];
-    if (typeOf(ev) === "todo/write") {
+    if (typeOf(ev) === TODO_WRITE) {
       const count = openCountOf(fieldOf(fieldOf(ev, "data"), "todos"));
       if (count !== undefined) {
         return { openTodos: count, todoUpdatedInTurn: inTurn(i) };
@@ -132,7 +139,7 @@ function isAwaitsUserCall(
   inWindow: boolean,
   hasWindow: boolean,
 ): boolean {
-  if (typeOf(ev) !== "tool/call") {
+  if (typeOf(ev) !== TOOL_CALL) {
     return false;
   }
   if (directStr(ev, "name") !== USER_QUESTION_TOOL) {
@@ -188,7 +195,7 @@ function scanScheduleDriven(
   }
   for (let i = scanFrom; i < lastEndIndex; i += 1) {
     const ev = events[i];
-    if (typeOf(ev) === "user/message") {
+    if (typeOf(ev) === USER_MESSAGE) {
       return nestedStr(ev, "source", "kind") === SCHEDULE_SOURCE_KIND;
     }
   }
@@ -275,10 +282,10 @@ export function reviewOpenTurn(
   let turn: number | null = null;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const ev: unknown = events[i];
-    if (typeOf(ev) === "turn/end") {
+    if (typeOf(ev) === TURN_END) {
       return null;
     }
-    if (typeOf(ev) === "turn/start") {
+    if (typeOf(ev) === TURN_START) {
       startIndex = i;
       turn = numIn(ev, "turn") ?? null;
       break;
@@ -292,7 +299,7 @@ export function reviewOpenTurn(
   let windowTodos: number | null = null;
   for (let i = startIndex + 1; i < events.length; i += 1) {
     const ev: unknown = events[i];
-    if (typeOf(ev) === "todo/write") {
+    if (typeOf(ev) === TODO_WRITE) {
       const count = openCountOf(fieldOf(fieldOf(ev, "data"), "todos"));
       if (count !== undefined) {
         windowTodos = count;

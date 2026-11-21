@@ -38,15 +38,14 @@ import {
   numIn,
   openCountOf,
   SCHEDULE_SOURCE_KIND,
+  TURN_START,
   typeOf,
+  USER_MESSAGE,
   USER_QUESTION_TOOL,
 } from "./event-fields.ts";
 
 /** 本包投影单元的注册键（host-only：不声明 wire ⇒ 不进客户端快照）。 */
 export const RESCUE_FACTS_KEY = "session-rescue.turnFacts";
-
-/** 回合开启的日志事件名：折叠表（applyEvent 的 case）与两条回退扫描判的都是它。 */
-const TURN_START_EVENT = "turn/start";
 
 /** opener 窗口：只为最近这么多回合记住「该回合 start 之后首条 user/message 的 kind」。
  *  不在表里 ⇒ `turnOpenerKind` 交回 undefined ⇒ 调用方回退扫描（宁可多扫一次，
@@ -168,8 +167,10 @@ function trim(openers: readonly OpenerRow[]): readonly OpenerRow[] {
 }
 
 // ── 折叠 ────────────────────────────────────────────────────────────────────
-// 折叠侧一律按 `unknown` 读事件（守卫投影），不把 `SessionEvent` 当既成事实：官方类型
+// 折叠的字段读取一律按 `unknown` 守卫投影，不把 `SessionEvent` 的 data 当既成事实：官方类型
 // 说的是宿主承诺什么，日志条目跨版本缺字段是真事（与 host.ts / turn-review.ts 同一纪律）。
+// 判别键不受这条约束：`applyEvent` 收官方 `SessionEvent`，`switch (event.type)` 的每个
+// case 都被键联合编译期校验（'todo/write' 由 event-fields.ts 载入的官方增补供给）。
 
 function foldTurnStart(state: RescueFacts, event: unknown): RescueFacts {
   const turn = numIn(event, "turn");
@@ -275,9 +276,17 @@ function foldTurnEnd(state: RescueFacts, event: unknown): RescueFacts {
  * 自带变更后的完整值，故折叠只就地更新。无变化的事件返回**同一引用**
  * （官方 Object.is 判据：相同引用 = 零下游变更通知）。
  */
-function applyEvent(state: RescueFacts, event: unknown): RescueFacts {
-  switch (typeOf(event)) {
-    case TURN_START_EVENT: {
+function applyEvent(state: RescueFacts, event: SessionEvent): RescueFacts {
+  // 判别键也走守卫：跨版本日志条目与替身夹具可能送来联合之外的形状（null、字符串、
+  // 缺 type 的记录），一律按「无关事件」处理——迁移前 typeOf 的 "" 路径同解，交回同一引用。
+  if (!isRecord(event)) {
+    return state;
+  }
+  // 折叠刻意不穷尽官方联合：契约就是「只认本包读的五枚键，其余键不改状态」，
+  // default 分支即契约本身；逐键列 no-op case 只会养噪音。
+  // oxlint-disable-next-line typescript/switch-exhaustiveness-check -- 见上
+  switch (event.type) {
+    case TURN_START: {
       return foldTurnStart(state, event);
     }
     case "user/message": {
@@ -404,7 +413,7 @@ export function turnOpenerKind(state: RescueFacts, turn: number): string | null 
 export function scanNewerTurn(events: readonly unknown[], failedTurn: number): boolean {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const ev = events[i];
-    if (typeOf(ev) === TURN_START_EVENT) {
+    if (typeOf(ev) === TURN_START) {
       const turn = numIn(ev, "turn");
       if (turn !== undefined && turn > failedTurn) {
         return true;
@@ -423,7 +432,7 @@ export function scanOpenerKind(events: readonly unknown[], turn: number): string
   let startIndex = -1;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const ev = events[i];
-    if (typeOf(ev) === TURN_START_EVENT && numIn(ev, "turn") === turn) {
+    if (typeOf(ev) === TURN_START && numIn(ev, "turn") === turn) {
       startIndex = i;
       break;
     }
@@ -432,7 +441,7 @@ export function scanOpenerKind(events: readonly unknown[], turn: number): string
     return null;
   }
   for (let i = startIndex + 1; i < events.length; i += 1) {
-    if (typeOf(events[i]) === "user/message") {
+    if (typeOf(events[i]) === USER_MESSAGE) {
       return sourceKindOf(events[i]);
     }
   }

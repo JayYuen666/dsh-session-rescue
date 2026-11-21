@@ -157,11 +157,26 @@ export interface UiMessages {
   readonly presetLoading: string;
   /** 官方 retryPolicy 面不可用前缀（后接原因）。 */
   readonly presetFaceUnavailable: string;
+  /** 还没有任何 provider 记录时的空态标题与说明。 */
+  readonly presetEmpty: string;
+  readonly presetEmptyNote: string;
+  /** 429 保存条的干净态状态字（共享 SaveBar 的 cleanLabel 位）。 */
+  readonly presetClean: string;
   /** 保存按钮（有改动时带条数，`{count}` 插值）。 */
   readonly saveCount: string;
   /** 档位区块的未保存提示。 */
   readonly presetDirty: string;
   readonly retrySectionTitle: string;
+  /** 小节标题旁的计数字段徽章（{count} 为字段数）。 */
+  readonly fieldCount: string;
+  /** 429 小节的 Provider 计数徽章。 */
+  readonly retryProviderCount: string;
+  /** 429 明细表的列头。 */
+  readonly retryColProvider: string;
+  readonly retryColPreset: string;
+  readonly retryColStaged: string;
+  readonly retryColState: string;
+  readonly retryColCodes: string;
   readonly retrySectionHint: string;
   /** 远程通道不可用（读不到命名空间或调用被拒），`{target}` 是「provider→preset」。 */
   readonly remoteUnavailable: string;
@@ -329,16 +344,27 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     presetOff: "关闭（不自动重试）",
     presetLoading: "加载 llm-pi-ai providers…",
     presetFaceUnavailable: "官方 retryPolicy 面不可用：{detail}",
+    presetEmpty: "还没有记录到任何重试提供方",
+    presetEmptyNote:
+      "llm-retry 在某次平台级失败后才会登记 provider；出现后这里会列出每一家的档位与码表。",
+    presetClean: "暂无待保存的档位改动",
     saveCount: "保存（{count} 个改动）",
     presetDirty: "有未保存的档位改动",
     retrySectionTitle: "429 重试策略（官方 llm-retry，按平台）",
+    fieldCount: "{count} 字段",
+    retryProviderCount: "{count} Provider",
+    retryColProvider: "Provider",
+    retryColPreset: "档位",
+    retryColStaged: "暂存改动",
+    retryColState: "状态",
+    retryColCodes: "码表",
     retrySectionHint:
       "pi-ai 把 429+配额措辞归码 QUOTA；默认码表不含 QUOTA 时 llm-retry 放行。改档位后点「保存」经官方 settings 落盘，重启不丢。",
     remoteUnavailable: "{target}：远端面不可用（读不到 sessionRescue 命名空间）",
     hostRejected: "{target}：宿主拒绝了这次落盘，但没有给出原因",
     retryProvidersUnavailable: "取不到重试提供方清单：远端面不可用",
     presetOverwriteWarn:
-      "以下 provider 的现行重试配置不是任何档位的标准形状（可能是手写配置），保存会将其覆盖且无法自动恢复：{providers}",
+      "以下 provider 的现行配置带有手写内容（自定义码表或重试次数），所选档位会将其整体覆盖且无法自动恢复：{providers}",
     confirmSave: "仍要保存",
     presetCodesLabel: "自定义重试码",
     presetCodesHint: "逗号分隔；只替换码表，模式/次数/退避沿用当前策略",
@@ -463,12 +489,24 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     presetOff: "Off (no automatic retries)",
     presetLoading: "loading llm-pi-ai providers…",
     presetFaceUnavailable: "official retryPolicy face unavailable: {detail}",
+    presetEmpty: "No retry providers recorded yet",
+    presetEmptyNote:
+      "llm-retry registers a provider only after a platform-level failure; once one appears, its preset and code table show up here.",
+    presetClean: "No pending preset changes",
     // 数与名词脱钩：调用点在 dirtyCount > 0 时就取这条键，1 个改动时
     // “Save (1 changes)” 是错的。模板塞不进条件式，把 count 挪到括号里当独立数字，
     // 任何数量读起来都成立，也不用在渲染侧新增分支。
     saveCount: "Save changes ({count})",
     presetDirty: "Unsaved preset changes",
     retrySectionTitle: "429 retry policy (official llm-retry, per platform)",
+
+    fieldCount: "{count} fields",
+    retryProviderCount: "{count} Provider",
+    retryColProvider: "Provider",
+    retryColPreset: "Preset",
+    retryColStaged: "Staged",
+    retryColState: "State",
+    retryColCodes: "Codes",
     retrySectionHint:
       "pi-ai maps 429 + quota wording onto the QUOTA code; llm-retry passes through when the default code table omits QUOTA. After changing a preset, press Save to persist it through the official settings — it survives restarts.",
     remoteUnavailable:
@@ -477,7 +515,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     retryProvidersUnavailable:
       "Could not load the retry provider list: the remote face is unavailable",
     presetOverwriteWarn:
-      "The current retry policy of {providers} does not match any preset shape (it may be a hand-written config); saving overwrites it and it cannot be restored automatically",
+      "The current retry config of {providers} contains hand-written values (custom retry codes or counts); the selected preset replaces them and they cannot be restored automatically",
     confirmSave: "Save anyway",
     presetCodesLabel: "Custom retry codes",
     presetCodesHint:

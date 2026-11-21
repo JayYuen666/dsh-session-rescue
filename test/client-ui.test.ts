@@ -229,20 +229,13 @@ const BUNDLE_CONFIG_SLOT = "plugins.bundle.config";
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
 const RETRY_SAVE_BUTTON_SELECTOR = '[data-field="retry-save"]';
 const CODES_SAVE_SELECTOR = '[data-field="retry-codes-save-opendesign"]';
+const CODES_INPUT_OPENDESIGN_SELECTOR = '[data-field="retry-codes-opendesign"]';
 const RESUME_DELAY_INPUT_SELECTOR = 'input[data-field="resumeDelayMs"]';
 /** 排除名单输入框（共享 TextField 把字段名写在 data-field 上）。 */
 const EXCLUDES_INPUT_SELECTOR = 'input[data-field="providerExcludes"]';
 /** 「启用自动续跑」开关（role=switch + 字段锚点，zh/en 面通用）。 */
 const ENABLE_TOGGLE_SELECTOR = 'button[role="switch"][data-field="enabled"]';
 /** 档位值 → 下拉里的选项序号（共享 SelectField 按 options 声明顺序渲染）。 */
-const PRESET_ORDER = ["default", "enhanced", "always", "off"] as const;
-/** 档位值 → zh 文案键（断言触发器上显示的就是当前档位）。 */
-const PRESET_LABEL_KEYS: Record<string, string> = {
-  default: "presetDefault",
-  enhanced: "presetEnhanced",
-  always: "presetAlways",
-  off: "presetOff",
-};
 
 // ── 期望值由测试作者写死（不从 src/client-entry.ts 导入，否则断言自证） ──
 /** 会话绑定缺失时卡片该看到的失败码。 */
@@ -351,6 +344,15 @@ function noopMutate(): boolean {
   return true;
 }
 
+/** 悬空分支直测的回调台账：编辑器不渲染，两枚回调永不触发（用例尾部断言台账为空）。 */
+const danglingSink: string[] = [];
+function danglingBusyChange(busy: boolean): void {
+  danglingSink.push(`busy:${String(busy)}`);
+}
+function danglingSaved(): void {
+  danglingSink.push("saved");
+}
+
 // happy-dom 运行环境夹具。本文件有 21 个并列的顶层套件，夹具必须对**每一条用例**生效：
 // 挂在文件顶层会被 vitest/require-top-level-describe 判成"用例与 hook 不在 describe 里"，
 // 塞进其中任意一个套件又只会罩住那一个套件——故夹具做成两个具名函数，由每个套件用
@@ -417,33 +419,37 @@ function reactProps<Props>(element: Element): Props {
 }
 
 /** 卡片里的档位下拉（共享 SelectField 的 combobox 触发器，按渲染顺序）。 */
-function retryComboboxes(el: HTMLElement): HTMLButtonElement[] {
-  return [...el.querySelectorAll<HTMLButtonElement>('button[role="combobox"]')];
+function retrySelects(el: HTMLElement): HTMLSelectElement[] {
+  return [...el.querySelectorAll<HTMLSelectElement>('select[data-field^="retry-preset"]')];
 }
 
-/** 断言第 index 行当前档位（触发器上显示选中项的文案）。 */
+/** 断言第 index 行当前档位（原生 select 的 value 即档位 id）。 */
 function assertPreset(el: HTMLElement, index: number, preset: string): void {
-  const trigger = retryComboboxes(el)[index];
-  assert.ok(trigger, `第 ${String(index)} 行下拉存在`);
-  const labelKey = PRESET_LABEL_KEYS[preset];
-  assert.ok(labelKey !== undefined);
-  assert.equal(trigger.textContent, zhTable[labelKey], `第 ${String(index)} 行的当前档位`);
+  const select = retrySelects(el)[index];
+  assert.ok(select, `第 ${String(index)} 行档位下拉存在`);
+  assert.equal(select.value, preset, `第 ${String(index)} 行的当前档位`);
 }
 
-/** 打开第 index 行的档位下拉并点选目标档位（共享 SelectField 的两步交互）。 */
+/** 第 index 行换档位：经 td 的 fiber 直调该行 onChange（select 元素上取不到 React 键，合成事件又到不了 root）。 */
 async function pickPreset(container: HTMLElement, index: number, preset: string): Promise<void> {
-  const trigger = retryComboboxes(container)[index];
-  assert.ok(trigger, `第 ${String(index)} 行下拉存在`);
+  const select = retrySelects(container)[index];
+  assert.ok(select, `第 ${String(index)} 行档位下拉存在`);
+  const td = select.closest("td");
+  assert.ok(td, "档位下拉在表格单元里");
+  const fiberKey = Object.keys(td).find((keyName) => keyName.startsWith("__reactFiber"));
+  assert.ok(fiberKey !== undefined, "td 缺 fiber 键");
+  const fiber = (
+    td as unknown as Record<
+      string,
+      {
+        memoizedProps: {
+          children: { props: { onChange: (ev: { target: { value: string } }) => void } };
+        };
+      }
+    >
+  )[fiberKey]!;
   await act(async () => {
-    trigger.click();
-  });
-  const wrap = trigger.closest(".dsu-selectWrap");
-  assert.ok(wrap, "下拉触发器在其包裹层里");
-  const options = [...wrap.querySelectorAll<HTMLButtonElement>('button[role="option"]')];
-  const picked = options[PRESET_ORDER.indexOf(preset as (typeof PRESET_ORDER)[number])];
-  assert.ok(picked, `档位 ${preset} 的选项存在`);
-  await act(async () => {
-    picked.click();
+    fiber.memoizedProps.children.props.onChange({ target: { value: preset } });
   });
 }
 
@@ -3048,7 +3054,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: false, body: null };
     });
-    assert.equal(retryComboboxes(container).length, 3);
+    assert.equal(retrySelects(container).length, 3);
     assertPreset(container, 0, "enhanced");
     assertPreset(container, 1, "default");
     assertPreset(container, 2, "always");
@@ -3095,9 +3101,10 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: false, body: null };
     });
-    const codesInput = container.querySelector<HTMLInputElement>(
-      '[data-field="retry-codes-opendesign"]',
-    );
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
+    const codesInput = container.querySelector<HTMLInputElement>(CODES_INPUT_OPENDESIGN_SELECTOR);
     assert.ok(codesInput, "码表输入框存在");
     assert.equal(codesInput.value, "SERVER, TRANSPORT", "初始值镜像现行码表");
     await act(async () => {
@@ -3128,6 +3135,9 @@ describe("RetryPolicySection 重试策略区块", () => {
       ok: true,
       body: { ok: false, error: SETTINGS_REJECT_REASON },
     });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
     const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
     assert.ok(saveCodes);
     await act(async () => {
@@ -3142,6 +3152,9 @@ describe("RetryPolicySection 重试策略区块", () => {
 
   it("自定义码表：宿主拒绝但没给原因 → hostRejected 文案", async () => {
     const { container } = await mountCodesCard({ ok: true, body: { ok: false } });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
     const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
     assert.ok(saveCodes);
     await act(async () => {
@@ -3159,6 +3172,9 @@ describe("RetryPolicySection 重试策略区块", () => {
       body: null,
       rejectWith: new Error(CARRIER_DOWN_MESSAGE),
     });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
     const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
     assert.ok(saveCodes);
     await act(async () => {
@@ -3172,7 +3188,11 @@ describe("RetryPolicySection 重试策略区块", () => {
 
   it("自定义码表：远端读面缺失 → remoteUnavailable 文案", async () => {
     const { container } = await mountCodesCard({ ok: true, body: { ok: true } });
+    // reader 现在是渲染期捕获的 prop：先撤读面再展开编辑器，保存时拿到的就是 undefined。
     rescueState.reader = undefined;
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
     const saveCodes = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
     assert.ok(saveCodes);
     await act(async () => {
@@ -3199,6 +3219,9 @@ describe("RetryPolicySection 重试策略区块", () => {
         return { ok: true, body: { ok: true, csrf: "rp-tok", sessions: {} } };
       }
       return { ok: false, body: null };
+    });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
     });
     const saveCodes = container.querySelector<HTMLButtonElement>(
       '[data-field="retry-codes-save-empty"]',
@@ -3237,7 +3260,8 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: false, body: null };
     });
-    await pickPreset(container, 0, "enhanced");
+    // 目标选 off（整表替换型）：enhanced 只合并不破坏，按新判据永不确认。
+    await pickPreset(container, 0, "off");
     await act(async () => {
       container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
     });
@@ -3270,6 +3294,7 @@ describe("RetryPolicySection 重试策略区块", () => {
   });
 
   it("覆盖警告上的取消：收警告、暂存保留、不落盘", async () => {
+    // 目标选 off（整表替换型）：enhanced 只合并不破坏，按新判据永不确认。
     const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
       if (url === PROVIDERS_URL) {
         return {
@@ -3288,7 +3313,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: false, body: null };
     });
-    await pickPreset(container, 0, "enhanced");
+    await pickPreset(container, 0, "off");
     await act(async () => {
       container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
     });
@@ -3332,7 +3357,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       }
       return { ok: false, body: null };
     });
-    await pickPreset(container, 0, "enhanced");
+    await pickPreset(container, 0, "off");
     await act(async () => {
       container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
     });
@@ -3359,10 +3384,43 @@ describe("RetryPolicySection 重试策略区块", () => {
           body: {
             ok: true,
             providers: [
-              { provider: "p-default", mode: "normal", maxRetries: 5, hasQuota: false },
-              { provider: "p-enhanced", mode: "normal", maxRetries: 12, hasQuota: true },
-              { provider: "p-always", mode: "always", maxRetries: 999, hasQuota: false },
-              { provider: "p-off", mode: "normal", maxRetries: 0, hasQuota: false },
+              // 未配置行：host 对缺 retryPolicy 的 provider 投影 normal/5/码表 []。
+              {
+                provider: "p-default",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: false,
+                retryableCodes: [],
+              },
+              // enhanced 产出（未改造基座）：normal/5/预设六码；次数 12 写不出，改 5。
+              {
+                provider: "p-enhanced",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: true,
+                retryableCodes: [
+                  "EMPTY_RESPONSE",
+                  "RATE_LIMIT",
+                  "SERVER",
+                  "TIMEOUT",
+                  "TRANSPORT",
+                  "QUOTA",
+                ],
+              },
+              {
+                provider: "p-always",
+                mode: "always",
+                maxRetries: 999,
+                hasQuota: false,
+                retryableCodes: [],
+              },
+              {
+                provider: "p-off",
+                mode: "normal",
+                maxRetries: 0,
+                hasQuota: false,
+                retryableCodes: ["RATE_LIMIT"],
+              },
             ],
           },
         };
@@ -3991,7 +4049,7 @@ describe("dock 动作行与 host 写通道", () => {
     });
     assert.equal(stub.calls[0]?.name, "sendSameSession");
     assert.ok(String(stub.calls[0].args[1]).includes("从截断处继续"), "续写文案");
-    assert.equal(container.querySelector(".sr-error"), null, "成功时错误条不渲染");
+    assert.equal(container.querySelector(".dsu-error"), null, "成功时错误条不渲染");
   });
 
   it("停止重问草稿键盘：⌘Enter 确认、空白草稿不动作、Esc 收起、Ctrl+Enter 确认", async () => {
@@ -4575,7 +4633,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
           }
         : { ok: true, body: { ok: true, sessions: {} } },
     );
-    assert.equal(retryComboboxes(container).length, 3, "非对象行丢弃");
+    assert.equal(retrySelects(container).length, 3, "非对象行丢弃");
     assertPreset(container, 0, "off");
     assertPreset(container, 1, "always");
     assertPreset(container, 2, "off");
@@ -4586,6 +4644,74 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
       "always 档的提示行不得出现 max 次数",
     );
     assert.ok(!/always · max /u.test(container.textContent));
+    // always 档的码表编辑器提示走「不可用」那一支：展开 unlim 行（第二行）的编辑器，
+    // hint 是 presetCodesAlways（首行 zero 是 off 档，提示走普通说明）。
+    const alwaysRow = retrySelects(container)[1]!.closest("tr");
+    assert.ok(alwaysRow, "always 行存在");
+    await act(async () => {
+      buttonContaining(alwaysRow, "码表")!.click();
+    });
+    assert.ok(
+      container.textContent.includes("always 模式下码表不生效"),
+      "码表编辑器对 always 档给出不可用说明",
+    );
+  });
+
+  it("码表编辑器指向的行消失时整块不渲染（悬空分支直测）", async () => {
+    // 直接挂载 retryCodesElement：codesProvider 指向的行不在行表里 → 整块 null。
+    // 不经整卡挂载——该路径上「codes 保存后」存在一条微任务自旋（构造 ArrayBuffer，
+    // CPU 190%、RSS →5.7GB 后被 OOM SIGKILL），采样证据留档待查，与本分支无关。
+    const { retryCodesElement } = await import("../src/retry-table.ts");
+    const view = React.createElement(retryCodesElement, {
+      state: {
+        ok: true,
+        providers: [
+          { provider: "kept", mode: "normal", maxRetries: 5, hasQuota: false, retryableCodes: [] },
+        ],
+      },
+      codesProvider: "gone",
+      reader: undefined,
+      saving: false,
+      onBusyChange: danglingBusyChange,
+      onSaved: danglingSaved,
+      t: tZh,
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const cardRoot = createRoot(host);
+    await act(async () => {
+      cardRoot.render(view);
+    });
+    assert.equal(host.querySelector('[data-field="retry-codes-gone"]'), null, "悬空位整块不渲染");
+    assert.equal(danglingSink.length, 0, "悬空分支不触发任何回调");
+    await act(async () => {
+      cardRoot.render(
+        React.createElement(retryCodesElement, {
+          state: {
+            ok: true,
+            providers: [
+              {
+                provider: "gone",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: false,
+                retryableCodes: [],
+              },
+            ],
+          },
+          codesProvider: "gone",
+          reader: undefined,
+          saving: false,
+          onBusyChange: danglingBusyChange,
+          onSaved: danglingSaved,
+          t: tZh,
+        }),
+      );
+    });
+    assert.ok(host.querySelector('[data-field="retry-codes-gone"]'), "行在位时编辑器渲染");
+    await act(async () => {
+      cardRoot.unmount();
+    });
   });
 
   it("连续两次保存各自写到磁盘：成功清空暂存，第二次照常发", async () => {
@@ -4711,6 +4837,402 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     });
     assert.equal(container.textContent.includes("保存（1 个改动）"), false, "撤销后回到无改动");
     assert.equal(callsTo(POLICY_URL), 0, "撤销不发 POST");
+  });
+});
+
+// ── 覆盖确认判据（按目标档位）与码表编辑器状态隔离 ─────────────────────────────
+// 判据期望值独立写死（host 写盘语义见 host.ts RETRY_PRESETS）：enhanced/custom 不破坏，
+// default/off/always 整表替换。
+
+describe("覆盖确认判据与码表编辑器状态", () => {
+  beforeEach(resetDomEnv);
+  afterEach(teardownDomEnv);
+
+  it("手写码表恰为规范次数 → 整表替换档位先确认（例1 回归）", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              {
+                provider: "hand5",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: false,
+                retryableCodes: ["PI_AI_ERROR"],
+              },
+            ],
+          },
+        };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "off");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(
+      container.textContent.includes("hand5") && container.textContent.includes("覆盖"),
+      "手写码表行进警告名单（旧判据只看次数，漏报这一行）",
+    );
+    assert.equal(callsTo(POLICY_URL), 0, "确认前不落盘");
+    const force = buttonByText(container, "仍要保存");
+    assert.ok(force, "仍要保存按钮在警告行上");
+    await act(async () => {
+      force.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(callsTo(POLICY_URL), 1, "仍要保存后落盘");
+  });
+
+  it("enhanced 产状但次数写不出 → 切 default 先确认（例2 回归）", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              {
+                provider: "handq",
+                mode: "normal",
+                maxRetries: 10,
+                hasQuota: true,
+                retryableCodes: [
+                  "EMPTY_RESPONSE",
+                  "RATE_LIMIT",
+                  "SERVER",
+                  "TIMEOUT",
+                  "TRANSPORT",
+                  "QUOTA",
+                ],
+              },
+            ],
+          },
+        };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "default");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(
+      container.textContent.includes("handq") && container.textContent.includes("覆盖"),
+      "旧判据对 enhanced 归类行恒免检，漏报这一行",
+    );
+    assert.equal(callsTo(POLICY_URL), 0, "确认前不落盘");
+    const force = buttonByText(container, "仍要保存");
+    assert.ok(force);
+    await act(async () => {
+      force.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    const post = fetchCalls.findLast((entry) => entry.url === POLICY_URL);
+    assert.ok(post, "仍要保存后落盘");
+    assert.equal((post.init.body as string).includes('"preset":"default"'), true);
+  });
+
+  it("enhanced 目标只合并不破坏：手写行直存不确认", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [{ provider: "custom10", mode: "normal", maxRetries: 10, hasQuota: false }],
+          },
+        };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "enhanced");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(container.textContent.includes("仍要保存"), false, "enhanced 永不确认");
+    assert.equal(callsTo(POLICY_URL), 1, "直接落盘");
+  });
+
+  it("未改造行切整表替换档位：直存不确认（常用路径不添噪）", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "always");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(container.textContent.includes("仍要保存"), false, "未改造行免检");
+    assert.equal(callsTo(POLICY_URL), 1, "直接落盘");
+  });
+
+  it("码表保存在途：两个写入口一起锁，保存条在途守卫拦住重入", async () => {
+    const gate = makeGate();
+    // 行取免检形状（官方默认码表）：否则暂存档位先撞覆盖确认门，与本用例无关。
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              {
+                provider: "opendesign",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: false,
+                retryableCodes: ["EMPTY_RESPONSE", "RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT"],
+              },
+            ],
+          },
+        };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true }, wait: gate.promise };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    // 先暂存一个档位，再打开码表编辑器保存——两条写路径写同一 settings 命名空间。
+    await pickPreset(container, 0, "off");
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
+    const codesSave = container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR);
+    assert.ok(codesSave);
+    await act(async () => {
+      codesSave.click();
+    });
+    const select = retrySelects(container)[0]!;
+    assert.equal(select.disabled, true, "码表写盘在途时档位下拉锁住");
+    const retrySave = container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!;
+    assert.equal(retrySave.disabled, true, "保存条锁住");
+    // 绕过禁用态直调保存条：在途守卫拦住，不发出第二笔写。
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(retrySave).onClick();
+    });
+    assert.equal(callsTo(POLICY_URL), 1, "在途期间只有码表这一笔 POST");
+    gate.release(undefined);
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("码表已保存"), "码表落盘成功");
+    assert.equal(select.disabled, false, "结算后解锁");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    const post = fetchCalls.findLast((entry) => entry.url === POLICY_URL);
+    assert.ok(post, "暂存的档位随后落盘");
+    assert.equal((post.init.body as string).includes('"preset":"off"'), true);
+  });
+
+  it("档位批量在途：保存条守卫拦住重入（陈旧 handler 直调）", async () => {
+    const gate = makeGate();
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true }, wait: gate.promise };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await pickPreset(container, 0, "off");
+    const retrySave = container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!;
+    await act(async () => {
+      retrySave.click();
+    });
+    await act(async () => {
+      reactProps<{ onClick: () => void }>(retrySave).onClick();
+    });
+    assert.equal(callsTo(POLICY_URL), 1, "在途重入不发第二笔");
+    gate.release(undefined);
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(callsTo(POLICY_URL), 1, "结算后也不补发");
+  });
+
+  it("脏草稿在档位保存触发的重读后保留", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return { ok: true, body: { ok: true, providers: [xkiroRow] } };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
+    const codesInput = container.querySelector<HTMLInputElement>(
+      '[data-field="retry-codes-xkiro"]',
+    );
+    assert.ok(codesInput);
+    await act(async () => {
+      reactProps<{ onChange: (event: { target: { value: string } }) => void }>(codesInput).onChange(
+        {
+          target: { value: "MY_CODE" },
+        },
+      );
+    });
+    await pickPreset(container, 0, "off");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(callsTo(POLICY_URL), 1, "档位落盘");
+    const codesInputAfter = container.querySelector<HTMLInputElement>(
+      '[data-field="retry-codes-xkiro"]',
+    );
+    assert.equal(codesInputAfter!.value, "MY_CODE", "重读不得覆盖未保存的码表草稿");
+  });
+
+  it("码表保存成功后重读：编辑器采纳 host 落盘值", async () => {
+    let providersCalls = 0;
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        providersCalls += 1;
+        const codes =
+          providersCalls === 1 ? ["SERVER", "TRANSPORT"] : ["SERVER", "TRANSPORT", "PI_AI_ERROR"];
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              {
+                provider: "opendesign",
+                mode: "normal",
+                maxRetries: 12,
+                hasQuota: false,
+                retryableCodes: codes,
+              },
+            ],
+          },
+        };
+      }
+      if (url === POLICY_URL) {
+        return { ok: true, body: { ok: true, provider: "opendesign", preset: "custom" } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
+    const codesInput = container.querySelector<HTMLInputElement>(CODES_INPUT_OPENDESIGN_SELECTOR);
+    assert.ok(codesInput);
+    assert.equal(codesInput.value, "SERVER, TRANSPORT", "初始值镜像现行码表");
+    await act(async () => {
+      // 草稿多写一个重复项：host 写盘会去重，重读值与草稿由此不同。
+      reactProps<{ onChange: (event: { target: { value: string } }) => void }>(codesInput).onChange(
+        {
+          target: { value: "SERVER, TRANSPORT, PI_AI_ERROR, SERVER" },
+        },
+      );
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(CODES_SAVE_SELECTOR)!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("码表已保存"), "成功提示");
+    assert.ok(providersCalls >= 2, "保存成功后重读了 providers");
+    const codesInputAfter = container.querySelector<HTMLInputElement>(
+      CODES_INPUT_OPENDESIGN_SELECTOR,
+    );
+    assert.equal(
+      codesInputAfter!.value,
+      "SERVER, TRANSPORT, PI_AI_ERROR",
+      "草稿以 host 落盘值（去重）为准",
+    );
+  });
+
+  it("编辑器按 provider 重挂：A 的失败提示不串到 B", async () => {
+    const { container } = await mountSettingsCard({ enabled: true }, {}, undefined, (url) => {
+      if (url === PROVIDERS_URL) {
+        return {
+          ok: true,
+          body: {
+            ok: true,
+            providers: [
+              {
+                provider: "alpha",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: false,
+                retryableCodes: ["PI_AI_ERROR"],
+              },
+              {
+                provider: "beta",
+                mode: "normal",
+                maxRetries: 5,
+                hasQuota: false,
+                retryableCodes: ["QUOTA"],
+              },
+            ],
+          },
+        };
+      }
+      if (url === POLICY_URL) {
+        return { ok: false, body: { ok: false, error: "boom-from-alpha" } };
+      }
+      return { ok: true, body: { ok: true, sessions: {} } };
+    });
+    await act(async () => {
+      buttonContaining(container, "码表")!.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-field="retry-codes-save-alpha"]')!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.ok(container.textContent.includes("alpha→custom: boom-from-alpha"), "失败提示可见");
+    const rowCodesButtons = allButtons(container).filter(
+      (btn) => btn.textContent.trim() === "码表",
+    );
+    assert.equal(rowCodesButtons.length, 2, "两行各一个码表入口（保存钮文案不同）");
+    await act(async () => {
+      rowCodesButtons[1]!.click();
+    });
+    assert.ok(
+      container.querySelector<HTMLButtonElement>('[data-field="retry-codes-save-beta"]'),
+      "编辑器已切到 beta",
+    );
+    assert.equal(
+      container.textContent.includes("alpha→custom"),
+      false,
+      "A 的失败提示随实例卸载，不显示在 B 下",
+    );
+    const betaInput = container.querySelector<HTMLInputElement>('[data-field="retry-codes-beta"]');
+    assert.equal(betaInput!.value, "QUOTA", "B 的草稿来自 B 的现行码表");
   });
 });
 

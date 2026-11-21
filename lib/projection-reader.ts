@@ -9,6 +9,14 @@
 // 新版得到带 `stateOf`/`dispose` 的对象，那才是可靠的分流点。
 
 import { RESCUE_FACTS_KEY, rescueFactsProjection } from "./turn-facts.ts";
+// 双协议的判别件（ProjectionHandle / isDisposer / isProjectionHandle）由 shared
+// `./lib/session-projection` 收编——两仓的这三段 md5 一致；判序「先 handle 后 disposer」
+// 由 shared 的文件头固定。挂载主体的失败策略（本仓 fail-fast 抛给调用方，danger-guard
+// fail-open）是真实分叉，留在本文件。
+import {
+  isDisposer,
+  isProjectionHandle,
+} from "@jayyuen66/dsh-plugin-shared/lib/session-projection";
 
 /**
  * `ctx.sessionProjections` 的本包读取接口。`stateOf` 的第一参按 `unknown` 收（官方钉名义类
@@ -18,30 +26,6 @@ export interface ProjectionsRegistry {
   register: (definition: typeof rescueFactsProjection) => unknown;
   stateOf: (session: unknown, key: typeof RESCUE_FACTS_KEY) => unknown;
 }
-
-/** 新版注册的结果：`await register()` 之后拿到的那一枚。 */
-interface ProjectionHandle {
-  readonly stateOf: (session: unknown) => unknown;
-  readonly dispose: () => Promise<void> | undefined;
-}
-
-/** 旧版注册的结果就是 disposer 本身。 */
-const isDisposer = (value: unknown): value is () => void => typeof value === "function";
-
-/**
- * 新版注册的结果：可读、可释放。
- *
- * 两条要点：①判序在 {@link isDisposer} **之前**；②**可调用的值也算对象**（`typeof === "function"`
- * 也要收）。旧判据只认 `typeof === "object"`，于是新宿主 `register()` 那个「可调用 + 可等待」的
- * 合成值一旦原样成为 handle，就会被宽判据 `typeof === "function"` 当旧 disposer 接走：读者改走
- * `registry.stateOf(session, KEY)`，新宿主没有那个签名，读口恒 `undefined`、判定却以为自己有
- * 投影——没有一条日志会提。真正的 disposer 是裸函数，不带 `stateOf`/`dispose`，不会被误收。
- */
-const isProjectionHandle = (value: unknown): value is ProjectionHandle =>
-  (typeof value === "object" || typeof value === "function") &&
-  value !== null &&
-  typeof (value as { stateOf?: unknown }).stateOf === "function" &&
-  typeof (value as { dispose?: unknown }).dispose === "function";
 
 /**
  * 注册回合事实投影，**成功之后**才把读口交给 `publish`。

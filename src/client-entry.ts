@@ -86,10 +86,9 @@ import type { LocaleNs, Translate, UiMessages } from "./ui-messages.ts";
 import { z } from "zod";
 import {
   CardForm,
-  ListField,
+  FieldTwoCol,
   NumberField,
   Section,
-  SelectField,
   TextField,
   ToggleField,
   claimApply,
@@ -99,7 +98,14 @@ import {
   isRecord,
   splitHint,
 } from "@jayyuen66/dsh-plugin-shared/client";
-import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
+import {
+  needsOverwriteConfirm,
+  parseProviderRow,
+  presetOfRow,
+  retryCodesElement,
+  retryProvidersBody,
+} from "./retry-table.ts";
+import type { RetryPanelState, RetryProviderRow } from "./retry-table.ts";
 import { settingsSaveBar, useInvalidFields } from "./card-invalid.ts";
 import { createRescueReader } from "./remote.ts";
 import type { RescueReader } from "./remote.ts";
@@ -155,24 +161,17 @@ const BUNDLE_PKG = "@jayyuen66/dsh-session-rescue";
 // UI_MESSAGES 双语字典（语言由官方 ctx.locale 决定，见 apply 的 bind）。
 
 /** 主操作按钮的 class（编辑重发 / 停止重问确认 / 崩溃恢复三处同款，sonarjs 门要求单一来源）。 */
-const SR_PRIMARY_BUTTON_CLASS = "sr-button sr-primary";
+/** 通用小号钮（sonarjs 重复字面量门禁收成常量；主操作再叠加 sr-primary 修饰）。 */
+const SR_BUTTON_CLASS = "dsu-btn dsu-btnSm";
+const SR_PRIMARY_BUTTON_CLASS = `${SR_BUTTON_CLASS} sr-primary`;
 
 const CSS = [
   ".sr-row{display:flex;align-items:center;gap:8px;padding:2px 0}",
   // 开关行的 switch 靠右对齐（标签居左、控制件居右，与官方设置行同构）。
   ".sr-row .dsu-switch{margin-left:auto;flex:none}",
-  ".sr-button{appearance:none;border:1px solid var(--dsw-alias-border,#d8dbe2);color:var(--dsw-alias-label-secondary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border-radius:6px;padding:2px 10px;font:inherit;font-size:12px;line-height:20px;cursor:pointer;transition:background .12s ease,border-color .12s ease}",
-  ".sr-button:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05));border-color:var(--dsw-alias-border-l3,#c9ced8)}",
-  ".sr-button:active:not(:disabled){background:var(--dsw-alias-fill-tertiary,rgba(0,0,0,.08))}",
-  ".sr-button:disabled{opacity:.45;cursor:not-allowed}",
-  ".sr-primary{border-color:var(--dsw-alias-brand-primary,#2f6fed);color:var(--dsw-alias-brand-primary,#2f6fed);font-weight:500}",
-  ".sr-primary:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(47,111,237,.06))}",
-  ".sr-button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6fed);outline-offset:1px}",
+  ".sr-primary{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);font-weight:500}",
+  ".sr-primary:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 8%,transparent)}",
   ".sr-editor{display:flex;flex-direction:column;gap:6px}",
-  ".sr-textarea{width:100%;min-height:72px;resize:vertical;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-fill-primary,transparent);border:1px solid var(--dsw-alias-border-l3,#d8dbe2);border-radius:6px;padding:8px;box-sizing:border-box}",
-  ".sr-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6fed);outline-offset:-1px}",
-  ".sr-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99)}",
-  ".sr-error{font-size:12px;color:var(--dsw-alias-text-danger,#d33)}",
   ".sr-retry-row{display:flex;flex-direction:column;gap:6px;padding:6px 0}",
   ".sr-retry-row + .sr-retry-row{border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06))}",
   ".sr-retry-codes{display:flex;flex-direction:column;gap:6px}",
@@ -187,13 +186,13 @@ const CSS = [
   // 按钮用 ghost 形态（无边框、hover 才起底）：紧贴宿主的消息图标操作行，盒子按钮
   // 在这里会显得突兀。主操作（继续中断的回合）保留品牌色文字以区分层级。
   ".sr-tail{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:4px;padding:2px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
-  ".sr-tail .sr-button{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,inherit)}",
-  ".sr-tail .sr-button:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05));border-color:transparent}",
-  ".sr-tail .sr-button:active:not(:disabled){background:var(--dsw-alias-fill-tertiary,rgba(0,0,0,.08))}",
-  ".sr-tail .sr-primary{color:var(--dsw-alias-brand-primary,#2f6fed)}",
+  ".sr-tail .dsu-btn{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,inherit)}",
+  ".sr-tail .dsu-btn:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05));border-color:transparent}",
+  ".sr-tail .dsu-btn:active:not(:disabled){background:var(--dsw-alias-fill-tertiary,rgba(0,0,0,.08))}",
+  ".sr-tail .sr-primary{color:var(--dsw-alias-state-business-primary)}",
   // 倒计时横幅：玻璃面板上的行内强调——品牌色状态点，不再套盒子（面板本身已是容器）
   ".sr-banner{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:var(--dsw-radius-md,6px);background:var(--dsw-alias-fill-secondary,rgba(47,111,237,.05))}",
-  ".sr-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-brand-primary,#2f6fed)}",
+  ".sr-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}",
   ".sr-bannerText{flex:1;min-width:0}",
   // 耗尽提示（shell.overlay 条目）：悬浮层本体 pointer-events:none，子元素自动恢复；
   // 容器自己钉在 frame 右上角，不随滚动走。
@@ -801,7 +800,7 @@ function RescueEditor(props: EditorProps): ReactNode {
           "button",
           {
             type: "button",
-            className: "sr-button",
+            className: SR_BUTTON_CLASS,
             disabled: busy || draft.trim() === "",
             onClick: () => void run(() => actions.forkAndSend(sessionId, target.forkAtSeq, draft)),
           },
@@ -811,7 +810,7 @@ function RescueEditor(props: EditorProps): ReactNode {
     "button",
     {
       type: "button",
-      className: "sr-button",
+      className: SR_BUTTON_CLASS,
       disabled: busy,
       onClick: onDone,
     },
@@ -821,7 +820,7 @@ function RescueEditor(props: EditorProps): ReactNode {
     "div",
     { className: "sr-editor" },
     createElement("textarea", {
-      className: "sr-textarea",
+      className: "dsu-input dsu-textarea",
       value: draft,
       autoFocus: true,
       onChange: (ev: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -830,8 +829,8 @@ function RescueEditor(props: EditorProps): ReactNode {
       onKeyDown,
     }),
     createElement("div", { className: "sr-row" }, sendButton, forkButton, cancelButton),
-    saveError === null ? null : createElement("div", { className: "sr-error" }, saveError),
-    createElement("div", { className: "sr-hint" }, t("editorHint")),
+    saveError === null ? null : createElement("div", { className: "dsu-error" }, saveError),
+    createElement("div", { className: "dsu-hint" }, t("editorHint")),
   );
   return editorRow;
 }
@@ -858,7 +857,7 @@ function bannerElement(
     createElement("span", { className: "sr-bannerText" }, bannerText),
     createElement(
       "button",
-      { type: "button", className: "sr-button", disabled: busy, onClick: onCancel },
+      { type: "button", className: SR_BUTTON_CLASS, disabled: busy, onClick: onCancel },
       t("cancel"),
     ),
   );
@@ -878,11 +877,11 @@ export function stopReaskElement(
     { key: "stop", className: "sr-row" },
     createElement(
       "button",
-      { type: "button", className: "sr-button", disabled: busyStop, onClick: onStop },
+      { type: "button", className: SR_BUTTON_CLASS, disabled: busyStop, onClick: onStop },
       busyStop ? t("stopping") : t("stopAndReask"),
     ),
-    stopNotice === null ? null : createElement("span", { className: "sr-hint" }, stopNotice),
-    stopError === null ? null : createElement("span", { className: "sr-error" }, stopError),
+    stopNotice === null ? null : createElement("span", { className: "dsu-hint" }, stopNotice),
+    stopError === null ? null : createElement("span", { className: "dsu-error" }, stopError),
   );
 }
 
@@ -921,14 +920,14 @@ function stopReaskDraftElement(props: {
   );
   const cancelButton = createElement(
     "button",
-    { type: "button", className: "sr-button", disabled: busyStop, onClick: onCancel },
+    { type: "button", className: SR_BUTTON_CLASS, disabled: busyStop, onClick: onCancel },
     t("cancel"),
   );
   return createElement(
     "div",
     { key: "stop-draft", className: "sr-editor" },
     createElement("textarea", {
-      className: "sr-textarea",
+      className: "dsu-input dsu-textarea",
       value: draft,
       autoFocus: true,
       onChange: (ev: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -937,7 +936,7 @@ function stopReaskDraftElement(props: {
       onKeyDown,
     }),
     createElement("div", { className: "sr-row" }, confirmButton, cancelButton),
-    stopError === null ? null : createElement("div", { className: "sr-error" }, stopError),
+    stopError === null ? null : createElement("div", { className: "dsu-error" }, stopError),
   );
 }
 
@@ -978,7 +977,7 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
   const editButton = unit.canEditDock
     ? createElement(
         "button",
-        { type: "button", className: "sr-button", onClick: unit.onEdit },
+        { type: "button", className: SR_BUTTON_CLASS, onClick: unit.onEdit },
         t("edit"),
       )
     : null;
@@ -987,7 +986,7 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
         "button",
         {
           type: "button",
-          className: "sr-button",
+          className: SR_BUTTON_CLASS,
           disabled: unit.busy,
           title: retryButtonTitle(unit),
           onClick: unit.onRetry,
@@ -1000,7 +999,7 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
         "button",
         {
           type: "button",
-          className: "sr-button",
+          className: SR_BUTTON_CLASS,
           disabled: unit.busy,
           title: t("continueTitle"),
           onClick: unit.onContinue,
@@ -1030,7 +1029,7 @@ function dockActionsElement(unit: DockActionsProps): ReactNode {
     interruptedButton,
     // 失败原因不在这里重复展示：宿主 transcript 的 turn-error/max-tokens 节点已经
     // 把 code 与 message 渲染在原因行上（本行曾与之逐字重复）。
-    unit.error === null ? null : createElement("span", { className: "sr-error" }, unit.error),
+    unit.error === null ? null : createElement("span", { className: "dsu-error" }, unit.error),
   );
 }
 
@@ -1077,7 +1076,7 @@ function toggleRowElement(
   return createElement(
     "div",
     { key: "toggle", className: "sr-row" },
-    createElement("span", { className: "sr-hint" }, label),
+    createElement("span", { className: "dsu-hint" }, label),
     switchButton,
   );
 }
@@ -1253,7 +1252,7 @@ function RescueToastItemView(props: { item: RescueToastItem; t: Translate }): Re
     "button",
     {
       type: "button",
-      className: "sr-button",
+      className: SR_BUTTON_CLASS,
       onClick: () => {
         rescueToasts.dismiss(item.seq);
       },
@@ -1436,7 +1435,7 @@ function RescueDockView(props: DockProps): ReactNode {
   // host 写通道失败（取消/开关）：紧随其操作行显示，不会静默吞掉。
   if (host.error !== null) {
     children.push(
-      createElement("div", { key: "host-action-error", className: "sr-error" }, host.error),
+      createElement("div", { key: "host-action-error", className: "dsu-error" }, host.error),
     );
   }
 
@@ -1651,220 +1650,6 @@ interface SettingsCardProps {
 }
 
 // ── 429 重试策略区块（官方 llm-retry provider 级 retryPolicy 配置）────────────
-// 数据流：remote.sessionRescue.retryProviders()（host 读 llm-pi-ai namespace）
-// → 每 provider 一行下拉；选择 → remote.sessionRescue.retryPolicy() → host 经
-// 官方 settings.mutate 写到磁盘（validator 在写处把关）→ 重拉列表。
-// 档位：default（官方默认 5 次码表）/ enhanced（12 次 + QUOTA + 8s→60s，
-// settings.yaml 四家现行同款）/ always（官方无限重试 + backoff）/ off（0 次）。
-
-/** host 载荷 → 码表数组：非数组回落空表，只保留字符串项（逐字段守卫）。 */
-function retryCodesFromValue(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === "string");
-}
-
-const RETRY_CODES_SCHEMA = z.array(z.string());
-
-const RETRY_PROVIDER_SCHEMA = z.object({
-  provider: z.preprocess((value) => (typeof value === "string" ? value : ""), z.string()),
-  mode: z.preprocess((value) => (typeof value === "string" ? value : ""), z.string()),
-  maxRetries: z.preprocess((value) => (typeof value === "number" ? value : 0), z.number()),
-  hasQuota: z.preprocess((value) => value === true, z.boolean()),
-  retryableCodes: z.preprocess(retryCodesFromValue, RETRY_CODES_SCHEMA),
-});
-
-type RetryProviderRow = z.infer<typeof RETRY_PROVIDER_SCHEMA>;
-
-/** 一行 provider 的逐字段守卫投影（坏类型落回空串/0，`hasQuota` 只认显式 true）。
- *  坏行本身由调用侧的 isRecord 挡下。 */
-function parseProviderRow(rowRaw: Record<string, unknown>): RetryProviderRow {
-  return RETRY_PROVIDER_SCHEMA.parse(rowRaw);
-}
-
-/** preset → 下拉档位文案键（顺序即下拉顺序；文案本体在 UI_MESSAGES 双语字典里）。 */
-const RETRY_PRESET_KEYS: Record<string, keyof UiMessages> = {
-  default: "presetDefault",
-  enhanced: "presetEnhanced",
-  always: "presetAlways",
-  off: "presetOff",
-};
-
-/** 由 provider 行推导下拉当前档位（与 host preset 语义对齐的只读展示推断）。 */
-function presetOfRow(row: RetryProviderRow): string {
-  if (row.mode === "always") {
-    return "always";
-  }
-  if (row.maxRetries === 0) {
-    return "off";
-  }
-  if (row.mode === "normal" && row.hasQuota) {
-    return "enhanced";
-  }
-  return "default";
-}
-
-/** 现行策略是否恰好是它所推断档位的规范形状（四档各自的精确取值）。
- *  手写配置（如 normal/10 自定义码表）会被 presetOfRow 归到最近的档位；对非规范形状的行
- *  写档位会把那份手写配置整个覆盖掉（settings 的 user section 与行配置同文档，没有历史可回滚），
- *  因此非规范形状的行在写之前必须确认。盲区：恰好写成规范形状的手写配置检测不出来。
- *  enhanced 恒为规范：host 侧只**合并**码表（只增不删）并沿用用户现行 mode/maxRetries/backoff，
- *  应用它永不破坏性覆盖，故无需确认（与 always 同档）。其余各档分支只补投影可辨的判据——
- *  mode/maxRetries 的其余约束已由 presetOfRow 的分流保证（always 已先行返回、off 已含
- *  maxRetries===0、enhanced 已含 mode normal + hasQuota），再写一遍会产生测不到的死分支。 */
-function isCanonicalPreset(row: RetryProviderRow): boolean {
-  const preset = presetOfRow(row);
-  if (preset === "always") {
-    return true;
-  }
-  if (preset === "off") {
-    return !row.hasQuota;
-  }
-  if (preset === "enhanced") {
-    return true;
-  }
-  return !row.hasQuota && row.maxRetries === 5;
-}
-
-/** 自定义码表写盘：返回 null=成功，字符串=给用户看的失败原因（与 applyPreset 同形）。 */
-async function applyRetryCodes(
-  t: Translate,
-  provider: string,
-  codes: readonly string[],
-): Promise<string | null> {
-  const target = `${provider}→custom`;
-  const { reader } = rescueState;
-  if (reader === undefined) {
-    return t("remoteUnavailable", { target });
-  }
-  try {
-    const body = await reader.retryPolicy(provider, "custom", codes);
-    if (isRecord(body) && body["ok"] === true) {
-      return null;
-    }
-    const error = fieldOf(body, "error");
-    return typeof error === "string" ? `${target}: ${error}` : t("hostRejected", { target });
-  } catch (error) {
-    return `${target}: ${String(error)}`;
-  }
-}
-
-/** 单行 provider 的自定义码表编辑：草稿 + 独立保存，不参与档位批量保存。 */
-/** 码表编辑器的提示文案：always 档不可用 > 空表 > 普通说明。 */
-function retryCodesHint(row: RetryProviderRow, empty: boolean, t: Translate): string {
-  if (row.mode === "always") {
-    return t("presetCodesAlways");
-  }
-  return empty ? t("presetCodesEmpty") : t("presetCodesHint");
-}
-
-function RetryCodesRow(props: {
-  row: RetryProviderRow;
-  disabled: boolean;
-  t: Translate;
-}): ReactNode {
-  const { row, disabled, t } = props;
-  const [draft, setDraft] = useState<string[]>(row.retryableCodes);
-  const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
-  useEffect(() => {
-    setDraft(row.retryableCodes);
-  }, [row.retryableCodes]);
-  const codesDisabled = disabled || saving || row.mode === "always";
-  const empty = draft.length === 0;
-  const hint = retryCodesHint(row, empty, t);
-  const saveLabel = t("presetCodesSave");
-  const save = async (): Promise<void> => {
-    if (codesDisabled || empty) {
-      return;
-    }
-    setSaving(true);
-    setNotice(null);
-    const failure = await applyRetryCodes(t, row.provider, draft);
-    setSaving(false);
-    setNotice(
-      failure === null
-        ? { text: t("presetCodesSaved"), error: false }
-        : { text: failure, error: true },
-    );
-  };
-  return createElement(
-    "div",
-    { className: "sr-retry-codes" },
-    createElement(ListField, {
-      label: t("presetCodesLabel"),
-      hint,
-      field: `retry-codes-${row.provider}`,
-      value: draft,
-      placeholder: "PI_AI_ERROR, MALFORMED_RESPONSE",
-      disabled: codesDisabled,
-      onChange: (next: string[]): void => {
-        setNotice(null);
-        setDraft(next);
-      },
-    }),
-    createElement(
-      "div",
-      { className: "sr-retry-codes-action" },
-      createElement(
-        "button",
-        {
-          type: "button",
-          className: "sr-button",
-          "data-field": `retry-codes-save-${row.provider}`,
-          disabled: codesDisabled || empty,
-          onClick: (): void => {
-            void save();
-          },
-        },
-        saveLabel,
-      ),
-    ),
-    notice === null
-      ? null
-      : createElement("div", { className: notice.error ? "sr-error" : "sr-hint" }, notice.text),
-  );
-}
-
-/** 单行 provider 的档位下拉 + 自定义码表编辑器（档位选择先暂存，点「保存」批量写到磁盘）。 */
-function retryRowElement(
-  row: RetryProviderRow,
-  pending: Record<string, string>,
-  disabled: boolean,
-  onChange: (row: RetryProviderRow, next: string) => void,
-  t: Translate,
-): ReactNode {
-  const options: SelectOption[] = Object.entries(RETRY_PRESET_KEYS).map(([value, labelKey]) => ({
-    value,
-    label: t(labelKey),
-  }));
-  // 原型链防护：row.provider 来自 host 载荷，取到的名字是 "constructor"、
-  // "toString" 这类自有属性名时 `pending[...]` 会返回原型上的函数，`??` 也就
-  // 不再回落到当前档位——下拉框把函数当 value 渲染成空串。只认自有键。
-  const staged = Object.hasOwn(pending, row.provider) ? pending[row.provider] : undefined;
-  const select = createElement(SelectField, {
-    label: row.provider,
-    // always 档没有次数上限（官方语义 until success），写到磁盘值里也没有 maxRetries 可读
-    // ——宿主兜底的 5 只是 normal 档的官方默认，显示出来会把「无限」读成「5 次上限」。
-    hint:
-      row.mode === "always"
-        ? `always · unlimited · QUOTA ${row.hasQuota ? "✓" : "✗"}`
-        : `${row.mode} · max ${row.maxRetries} · QUOTA ${row.hasQuota ? "✓" : "✗"}`,
-    value: staged ?? presetOfRow(row),
-    options,
-    disabled,
-    onChange: (next: string): void => {
-      onChange(row, next);
-    },
-  });
-  return createElement(
-    "div",
-    { key: row.provider, className: "sr-retry-row" },
-    select,
-    createElement(RetryCodesRow, { row, disabled, t }),
-  );
-}
 
 /** 单个 provider 的写到磁盘（经官方 Remote 的 `sessionRescue.retryPolicy`）。返回 null=已写到磁盘，
  *  返回文案=host 拒绝。失败可能是 `{ok:false, error}` 业务结果，也可能是远程通道拒绝；
@@ -1896,6 +1681,15 @@ const applyPreset = async (
 /** 逐项串行执行档位写到磁盘。host 的 retryPolicy 是「读 revision → 带该 revision 写」的一对，
  *  并行发会在后到的那次撞 settings-revision-conflict；规则禁了 reduce / .then / 循环内
  *  await，串行只能这样逐项递归（层数 = provider 数，很小）。 */
+/** 串行落盘后的结果归并：全部成功交 null，否则给拼好的汇总文案（saveFailed 模板）。 */
+function failuresOf(outcomes: readonly (string | null)[], t: Translate): string | null {
+  const failed = outcomes.filter((outcome): outcome is string => outcome !== null);
+  if (failed.length === 0) {
+    return null;
+  }
+  return t("saveFailed", { detail: failed.join(t("failureJoiner")) });
+}
+
 async function applyPresetsInOrder(
   entries: readonly (readonly [string, string])[],
   index: number,
@@ -1913,35 +1707,8 @@ async function applyPresetsInOrder(
 /** 重试面板的加载状态（判别联合：`ok:true` 必带 providers 数组，load() 的两个 setState
  *  都遵守），因此读侧不再需要 `state.providers ?? []` 的降级——那条 `??` 右支在 ok===true
  *  时结构上不可能命中，是可证明的死分支。 */
-type RetryPanelState =
-  | { ok: true; providers: RetryProviderRow[] }
-  | { ok: false; error?: string }
-  | null;
 
 /** 列表主体的三态渲染（加载中 / 逐 provider 一行 / 面板不可用）。 */
-function retryProvidersBody(
-  state: RetryPanelState,
-  pending: Record<string, string>,
-  saving: boolean,
-  onChange: (row: RetryProviderRow, next: string) => void,
-  t: Translate,
-): ReactNode {
-  if (state === null) {
-    return createElement("div", { className: "sr-hint" }, t("presetLoading"));
-  }
-  if (state.ok) {
-    return createElement(
-      "div",
-      {},
-      state.providers.map((row) => retryRowElement(row, pending, saving, onChange, t)),
-    );
-  }
-  return createElement(
-    "div",
-    { className: "sr-hint" },
-    t("presetFaceUnavailable", { detail: state.error ?? "" }),
-  );
-}
 
 /** 覆盖警告行：点名非规范形状（疑似手写）的 provider，给「仍要保存」与「取消」。
  *  文案先落成常量、按钮先落成常量再进树：t() 与 createElement 的嵌套都在
@@ -1955,20 +1722,57 @@ function overwriteWarnElement(
   const warnText = t("presetOverwriteWarn", { providers: targets.join(t("failureJoiner")) });
   const forceButton = createElement(
     "button",
-    { type: "button", className: "sr-button sr-primary", onClick: onForce },
+    { type: "button", className: "dsu-btn dsu-btnSm sr-primary", onClick: onForce },
     t("confirmSave"),
   );
   const dismissButton = createElement(
     "button",
-    { type: "button", className: "sr-button", onClick: onDismiss },
+    { type: "button", className: SR_BUTTON_CLASS, onClick: onDismiss },
     t("cancel"),
   );
   return createElement(
     "div",
-    { className: "sr-error", role: "alert" },
+    { className: "dsu-error", role: "alert" },
     createElement("span", null, warnText),
     forceButton,
     dismissButton,
+  );
+}
+
+/** 暂存里会被目标档位覆盖手写内容的 provider 名单（写前确认的判定面）。
+ *  按行走（rows 来自最近一次成功加载的列表）：批量里混着免检行时多看一眼比漏报便宜。 */
+function overwriteTargetsOf(
+  rows: readonly RetryProviderRow[],
+  pending: Record<string, string>,
+): string[] {
+  return rows
+    .filter((row) => {
+      const next = pending[row.provider];
+      return next !== undefined && needsOverwriteConfirm(row, next);
+    })
+    .map((row) => row.provider);
+}
+
+/** 覆盖警告行仅在 confirming 且名单非空时出现；组装收在模块级（RetryPolicySection 行数预算）。 */
+function overwriteWarnRowOf(
+  confirming: boolean,
+  targets: readonly string[],
+  t: Translate,
+  saveAll: (force: boolean) => Promise<void>,
+  setConfirming: (next: boolean) => void,
+): ReactNode {
+  if (!confirming || targets.length === 0) {
+    return null;
+  }
+  return overwriteWarnElement(
+    targets,
+    t,
+    () => {
+      void saveAll(true);
+    },
+    () => {
+      setConfirming(false);
+    },
   );
 }
 
@@ -2012,59 +1816,120 @@ function retrySaveBar(props: {
     },
     t("discard"),
   );
-  const statusClass = saveError === null ? "dsu-status" : "dsu-status dsu-statusError";
+  // 与 shared SaveBar 的状态字同构：错误红、脏态琥珀（dsu-statusDirty），干净态灰。
+  // 干净态也留一句状态字——留空的保存条看起来像渲染残缺（共享 SaveBar 的 cleanLabel 位）。
+  // 两条辅助避免嵌套三元（本仓 lint 禁）。
+  const dirtyStatusClass = dirtyCount > 0 ? "dsu-status dsu-statusDirty" : "dsu-status";
+  const statusClass = saveError === null ? dirtyStatusClass : "dsu-status dsu-statusError";
   return createElement(
     "div",
     { className: "dsu-savebar" },
-    saveButton,
-    discardButton,
     createElement(
       "span",
       { className: statusClass },
-      saveError ?? (dirtyCount > 0 ? t("presetDirty") : ""),
+      saveError ?? (dirtyCount > 0 ? t("presetDirty") : t("presetClean")),
     ),
+    discardButton,
+    saveButton,
   );
+}
+
+/** 读一次 providers 载荷并逐字段投影成行表（RetryPolicySection.load 的读取体）。
+ *  坏行直接丢弃（防御纵深，不经 any 断言）；读不到/传输失败都归 ok:false。 */
+async function readProviderRows(
+  t: Translate,
+): Promise<{ ok: true; rows: RetryProviderRow[] } | { ok: false; error?: string }> {
+  try {
+    const parsed: unknown = await rescueState.reader?.retryProviders();
+    if (!isRecord(parsed)) {
+      return { ok: false, error: t("retryProvidersUnavailable") };
+    }
+    const providers: RetryProviderRow[] = [];
+    const tasks = fieldOf(parsed, "providers");
+    if (Array.isArray(tasks)) {
+      for (const rowRaw of tasks) {
+        if (isRecord(rowRaw)) {
+          providers.push(parseProviderRow(rowRaw));
+        }
+      }
+    }
+    return fieldOf(parsed, "ok") === true ? { ok: true, rows: providers } : { ok: false };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+/** saveAll 的落盘体（抽出守 RetryPolicySection 的行数预算）：确认门先行（force 跳过），
+ *  串行写暂存档位，全成功才清暂存并重读。串行的原因见 applyPresetsInOrder 注释。 */
+async function runRetrySave(unit: {
+  rows: readonly RetryProviderRow[];
+  pending: Record<string, string>;
+  dirtyCount: number;
+  /** 任一写路径在途（含本函数自己那档）：在途守卫盖住「仍要保存」绕过禁用态的重入。 */
+  busy: boolean;
+  force: boolean;
+  t: Translate;
+  setConfirmTargets: (targets: string[]) => void;
+  setConfirming: (next: boolean) => void;
+  setSaving: (next: boolean) => void;
+  setSaveError: (next: string | null) => void;
+  setPending: (next: Record<string, string>) => void;
+  onSaved: () => void;
+}): Promise<void> {
+  if (unit.dirtyCount === 0 || unit.busy) {
+    return;
+  }
+  if (!unit.force) {
+    const custom = overwriteTargetsOf(unit.rows, unit.pending);
+    if (custom.length > 0) {
+      unit.setConfirmTargets(custom);
+      unit.setConfirming(true);
+      return;
+    }
+  }
+  unit.setConfirming(false);
+  unit.setSaving(true);
+  unit.setSaveError(null);
+  const outcomes = await applyPresetsInOrder(Object.entries(unit.pending), 0, unit.t);
+  unit.setSaving(false);
+  const failure = failuresOf(outcomes, unit.t);
+  if (failure !== null) {
+    // 保留 pending：失败的档位仍是用户选的意图，重试点一次即可（已成功的
+    // 档位重复写是幂等的——host 侧同一 preset 写同一 retryPolicy）。
+    unit.setSaveError(failure);
+    return;
+  }
+  unit.setPending({});
+  unit.onSaved();
 }
 
 function RetryPolicySection(props: { t: Translate }): ReactNode {
   const { t } = props;
   const [state, setState] = useState<RetryPanelState>(null);
-  // 最近一次成功读到的 provider 行：写前确认按它逐行判「现行配置是否规范形状」。
-  // 与 state 分开存：pending 只在 ok 态下产生，saveAll 读这张表就不必再守 state 的形状。
+  // 最近一次成功读到的 provider 行：写前确认按它逐行判，与 state 分开存。
   const [rows, setRows] = useState<readonly RetryProviderRow[]>([]);
   // 保存条模式：改档位先暂存（provider → preset），点「保存」批量写到磁盘
   const [pending, setPending] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  // 码表写盘在途。两条写路径写同一 llm-pi-ai settings 命名空间：重叠的两次写后到者被宿主
+  // revision 栅栏拒成 409，不重叠时整表替换型档位会盖掉刚落盘的码表——UI 层先锁住。
+  const [codesSaving, setCodesSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // 写前确认：暂存命中非规范形状（疑似手写）的现行配置时，第一次点「保存」
-  // 只亮警告行；「仍要保存」带 force 重入，「取消」只收警告、暂存保留。
+  // 写前确认：暂存命中会覆盖手写内容的档位时，首次保存只亮警告行；「仍要保存」带 force 重入。
   const [confirming, setConfirming] = useState(false);
   const [confirmTargets, setConfirmTargets] = useState<string[]>([]);
+  // 码表编辑器的展开位：一次只展开一个 provider（null=全收起）。
+  const [codesProvider, setCodesProvider] = useState<string | null>(null);
 
-  // load 依赖 t（文案走 UI_MESSAGES），所以用 useCallback 把身份固定下来：它同时被挂载
-  // 那一次和「保存成功后重读」调用，写成裸函数会让 useEffect 的依赖数组没法写对。
+  // load 依赖 t，被挂载与「保存成功后重读」两处调用：裸函数会让 useEffect 依赖写不对。
   const load = useCallback(async (): Promise<void> => {
-    try {
-      const parsed: unknown = await rescueState.reader?.retryProviders();
-      if (!isRecord(parsed)) {
-        setState({ ok: false, error: t("retryProvidersUnavailable") });
-        return;
-      }
-      // 逐字段守卫投影 providers（坏行直接丢弃，防御纵深；不经 any 断言）
-      const providers: RetryProviderRow[] = [];
-      const tasks = fieldOf(parsed, "providers");
-      if (Array.isArray(tasks)) {
-        for (const rowRaw of tasks) {
-          if (isRecord(rowRaw)) {
-            providers.push(parseProviderRow(rowRaw));
-          }
-        }
-      }
-      setState(fieldOf(parsed, "ok") === true ? { ok: true, providers } : { ok: false });
-      setRows(providers);
-    } catch (error) {
-      setState({ ok: false, error: String(error) });
+    const face = await readProviderRows(t);
+    if (face.ok) {
+      setState({ ok: true, providers: face.rows });
+      setRows(face.rows);
+      return;
     }
+    setState(face.error === undefined ? { ok: false } : { ok: false, error: face.error });
   }, [t]);
 
   useEffect(() => {
@@ -2072,42 +1937,25 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   }, [load]);
 
   const dirtyCount = Object.keys(pending).length;
-  const saveAll = async (force: boolean): Promise<void> => {
-    if (dirtyCount === 0) {
-      return;
-    }
-    if (!force) {
-      // 覆盖警告的判定按行走（rows 来自最近一次成功加载的列表）：有暂存的行里只要有一条
-      // 现行配置不是规范形状，整批先确认——批量里混着规范行时多看一眼比漏报便宜。
-      const custom = rows
-        .filter((row) => pending[row.provider] !== undefined && !isCanonicalPreset(row))
-        .map((row) => row.provider);
-      if (custom.length > 0) {
-        setConfirmTargets(custom);
-        setConfirming(true);
-        return;
-      }
-    }
-    setConfirming(false);
-    setSaving(true);
-    setSaveError(null);
-    const entries = Object.entries(pending);
-    // 串行发：host 的 retryPolicy 是「读 revision → 带该 revision 写」的一对，并行时
-    // 后到的那次会以 settings-revision-conflict 失败，而那不是用户选的档位有问题。
-    // 用 promise 链而不是循环里 await（规则禁了 reduce 与 await-in-loop）。
-    const outcomes = await applyPresetsInOrder(entries, 0, t);
-    setSaving(false);
-    const failures = outcomes.filter((outcome): outcome is string => outcome !== null);
-    if (failures.length > 0) {
-      // 保留 pending：失败的档位仍是用户选的意图，重试点一次即可（已成功的
-      // 档位重复写是幂等的——host 侧同一 preset 写同一 retryPolicy）。
-      const detail = failures.join(t("failureJoiner"));
-      setSaveError(t("saveFailed", { detail }));
-      return;
-    }
-    setPending({});
-    void load();
-  };
+  // 两类写入共用一个在途标志：码表或档位任一在途时，表格下拉、码表入口与保存条一起锁。
+  const retryBusy = saving || codesSaving;
+  const saveAll = (force: boolean): Promise<void> =>
+    runRetrySave({
+      rows,
+      pending,
+      dirtyCount,
+      busy: retryBusy,
+      force,
+      t,
+      setConfirmTargets,
+      setConfirming,
+      setSaving,
+      setSaveError,
+      setPending,
+      onSaved: () => {
+        void load();
+      },
+    });
   const discardAll = (): void => {
     setPending({});
     setSaveError(null);
@@ -2126,36 +1974,55 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     });
   };
 
-  // 覆盖警告行：仅 confirming 且名单非空时渲染；组装在模块级 overwriteWarnElement。
-  const overwriteWarnRow =
-    confirming && confirmTargets.length > 0
-      ? overwriteWarnElement(
-          confirmTargets,
-          t,
-          () => {
-            void saveAll(true);
-          },
-          () => {
-            setConfirming(false);
-          },
-        )
-      : null;
+  const overwriteWarnRow = overwriteWarnRowOf(
+    confirming,
+    confirmTargets,
+    t,
+    saveAll,
+    setConfirming,
+  );
 
   return createElement(
     Section,
-    { title: t("retrySectionTitle"), hint: t("retrySectionHint") },
-    retryProvidersBody(state, pending, saving, changePreset, t),
-    overwriteWarnRow,
-    retrySaveBar({
-      saving,
-      dirtyCount,
-      saveError,
+    {
+      title: t("retrySectionTitle"),
+      hint: t("retrySectionHint"),
+      count: t("retryProviderCount", { count: String(rows.length) }),
+    },
+    retryProvidersBody({
+      state,
+      pending,
+      saving: retryBusy,
+      onChange: changePreset,
+      onCodes: setCodesProvider,
       t,
-      onSave: () => {
-        void saveAll(false);
-      },
-      onDiscard: discardAll,
     }),
+    retryCodesElement({
+      state,
+      codesProvider,
+      reader: rescueState.reader,
+      saving: retryBusy,
+      onBusyChange: setCodesSaving,
+      onSaved: () => {
+        void load();
+      },
+      t,
+    }),
+    overwriteWarnRow,
+    // 0 Provider 时整条保存条收起：没有行就没有可暂存的档位，留一条只有禁用按钮的空条
+    // 只会让空态显得像残缺。
+    rows.length === 0
+      ? null
+      : retrySaveBar({
+          saving: retryBusy,
+          dirtyCount,
+          saveError,
+          t,
+          onSave: () => {
+            void saveAll(false);
+          },
+          onDiscard: discardAll,
+        }),
   );
 }
 
@@ -2312,38 +2179,46 @@ function toggleField(inputs: SectionInputs, spec: ToggleSpec): ReactNode {
 function buildResumeSection(inputs: SectionInputs): ReactNode {
   return createElement(
     Section,
-    { title: inputs.t("resumeSection"), hint: inputs.t("formLead") },
+    {
+      title: inputs.t("resumeSection"),
+      hint: inputs.t("formLead"),
+      count: inputs.t("fieldCount", { count: "5" }),
+    },
     toggleField(inputs, { label: "enabledLabel", hint: "enabledHint", field: "enabled" }),
-    secondsField(inputs, {
-      label: "resumeDelayLabel",
-      hint: "resumeDelayHint",
-      field: "resumeDelayMs",
-      min: 1,
-      max: 300,
-      fallbackMs: 10_000,
-    }),
-    secondsField(inputs, {
-      label: "resumeCooldownLabel",
-      hint: "resumeCooldownHint",
-      field: "resumeCooldownMs",
-      min: 5,
-      max: 3600,
-      fallbackMs: 120_000,
-    }),
-    countField(inputs, {
-      label: "maxResumesLabel",
-      hint: "maxResumesHint",
-      field: "maxResumes",
-      fallback: 3,
-    }),
-    secondsField(inputs, {
-      label: "chainDelayLabel",
-      hint: "chainDelayHint",
-      field: "chainResumeDelayMs",
-      min: 1,
-      max: 300,
-      fallbackMs: 60_000,
-    }),
+    createElement(
+      FieldTwoCol,
+      null,
+      secondsField(inputs, {
+        label: "resumeDelayLabel",
+        hint: "resumeDelayHint",
+        field: "resumeDelayMs",
+        min: 1,
+        max: 300,
+        fallbackMs: 10_000,
+      }),
+      secondsField(inputs, {
+        label: "resumeCooldownLabel",
+        hint: "resumeCooldownHint",
+        field: "resumeCooldownMs",
+        min: 5,
+        max: 3600,
+        fallbackMs: 120_000,
+      }),
+      countField(inputs, {
+        label: "maxResumesLabel",
+        hint: "maxResumesHint",
+        field: "maxResumes",
+        fallback: 3,
+      }),
+      secondsField(inputs, {
+        label: "chainDelayLabel",
+        hint: "chainDelayHint",
+        field: "chainResumeDelayMs",
+        min: 1,
+        max: 300,
+        fallbackMs: 60_000,
+      }),
+    ),
   );
 }
 
@@ -2351,29 +2226,33 @@ function buildResumeSection(inputs: SectionInputs): ReactNode {
 function buildContinueSection(inputs: SectionInputs): ReactNode {
   return createElement(
     Section,
-    { title: inputs.t("maxTokensSection") },
-    secondsField(inputs, {
-      label: "continueDelayLabel",
-      hint: "continueDelayHint",
-      field: "continueDelayMs",
-      min: 0.5,
-      max: 300,
-      fallbackMs: 3000,
-    }),
-    secondsField(inputs, {
-      label: "continueCooldownLabel",
-      hint: "continueCooldownHint",
-      field: "continueCooldownMs",
-      min: 5,
-      max: 3600,
-      fallbackMs: 60_000,
-    }),
-    countField(inputs, {
-      label: "maxContinuesLabel",
-      hint: "maxContinuesHint",
-      field: "maxContinues",
-      fallback: 3,
-    }),
+    { title: inputs.t("maxTokensSection"), count: inputs.t("fieldCount", { count: "3" }) },
+    createElement(
+      FieldTwoCol,
+      null,
+      secondsField(inputs, {
+        label: "continueDelayLabel",
+        hint: "continueDelayHint",
+        field: "continueDelayMs",
+        min: 0.5,
+        max: 300,
+        fallbackMs: 3000,
+      }),
+      secondsField(inputs, {
+        label: "continueCooldownLabel",
+        hint: "continueCooldownHint",
+        field: "continueCooldownMs",
+        min: 5,
+        max: 3600,
+        fallbackMs: 60_000,
+      }),
+      countField(inputs, {
+        label: "maxContinuesLabel",
+        hint: "maxContinuesHint",
+        field: "maxContinues",
+        fallback: 3,
+      }),
+    ),
   );
 }
 
@@ -2381,7 +2260,7 @@ function buildContinueSection(inputs: SectionInputs): ReactNode {
 function buildUnfinishedSection(inputs: SectionInputs): ReactNode {
   return createElement(
     Section,
-    { title: inputs.t("unfinishedSection") },
+    { title: inputs.t("unfinishedSection"), count: inputs.t("fieldCount", { count: "5" }) },
     toggleField(inputs, {
       label: "openTodosLabel",
       hint: "openTodosHint",
@@ -2392,28 +2271,32 @@ function buildUnfinishedSection(inputs: SectionInputs): ReactNode {
       hint: "steerModeHint",
       field: "unfinishedSteerMode",
     }),
-    secondsField(inputs, {
-      label: "unfinishedDelayLabel",
-      hint: "unfinishedDelayHint",
-      field: "unfinishedDelayMs",
-      min: 1,
-      max: 300,
-      fallbackMs: 5000,
-    }),
-    secondsField(inputs, {
-      label: "unfinishedCooldownLabel",
-      hint: "unfinishedCooldownHint",
-      field: "unfinishedCooldownMs",
-      min: 5,
-      max: 3600,
-      fallbackMs: 120_000,
-    }),
-    countField(inputs, {
-      label: "maxUnfinishedLabel",
-      hint: "maxUnfinishedHint",
-      field: "maxUnfinished",
-      fallback: 2,
-    }),
+    createElement(
+      FieldTwoCol,
+      null,
+      secondsField(inputs, {
+        label: "unfinishedDelayLabel",
+        hint: "unfinishedDelayHint",
+        field: "unfinishedDelayMs",
+        min: 1,
+        max: 300,
+        fallbackMs: 5000,
+      }),
+      secondsField(inputs, {
+        label: "unfinishedCooldownLabel",
+        hint: "unfinishedCooldownHint",
+        field: "unfinishedCooldownMs",
+        min: 5,
+        max: 3600,
+        fallbackMs: 120_000,
+      }),
+      countField(inputs, {
+        label: "maxUnfinishedLabel",
+        hint: "maxUnfinishedHint",
+        field: "maxUnfinished",
+        fallback: 2,
+      }),
+    ),
   );
 }
 
