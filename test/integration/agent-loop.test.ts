@@ -11,6 +11,7 @@ import { Context } from "@deepseek-ai/cordis";
 import TimerPlugin from "@deepseek-ai/cordis-plugin-timer";
 import { mountAgentLoopTestDependencies } from "@deepseek-ai/dsh-agent-loop-testkit";
 import { AgentLoop } from "@deepseek-ai/dsh-agent-loop";
+import { DeepSeekAuth } from "@deepseek-ai/dsh-deepseek-auth";
 import {
   apply as applyDeepSeek,
   Config as deepSeekConfig,
@@ -129,6 +130,7 @@ async function boot(
         };
       },
     });
+    await ctx.plugin(DeepSeekAuth);
     await ctx.plugin(DeepSeekAdapter, {
       baseURL: server.baseURL,
       ...(options.withAdapterPolicy === false

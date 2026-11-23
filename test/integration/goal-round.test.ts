@@ -13,6 +13,7 @@ import { Context } from "@deepseek-ai/cordis";
 import TimerPlugin from "@deepseek-ai/cordis-plugin-timer";
 import { mountAgentLoopTestDependencies } from "@deepseek-ai/dsh-agent-loop-testkit";
 import { AgentLoop } from "@deepseek-ai/dsh-agent-loop";
+import { DeepSeekAuth } from "@deepseek-ai/dsh-deepseek-auth";
 import {
   apply as applyDeepSeek,
   Config as deepSeekConfig,
@@ -96,6 +97,7 @@ async function bootInto(ctx: Context, server: MockLlmServer): Promise<void> {
       };
     },
   });
+  await ctx.plugin(DeepSeekAuth);
   await ctx.plugin(DeepSeekAdapter, {
     baseURL: server.baseURL,
     // 适配器自带重试压到零次：本层要观测的是回合级的让路/接管，不是请求级退避。

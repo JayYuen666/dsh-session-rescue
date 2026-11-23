@@ -4,6 +4,10 @@
 [语义化版本](https://semver.org/lang/zh-CN/)。这里的偏离是刻意的：版本标题不写发布日期，
 各版发布时间以 npm registry 为准（`npm view <包名> time` 取得到）。
 
+## 0.1.18
+
+宿主基线切到 `dsh 0.2.3-alpha.2`（Node `^24.22.3 || >=26.13.1`），shared 经 catalog 抬到 `^0.2.13`。`llm-deepseek-api-key` 在 alpha.2 新增 `DeepSeekAuth` 注入后，集成与 E2E 台架（agent-loop / abort-semantics / goal-round / rescue-loop）统一补挂官方 `DeepSeekAuth`；devDependencies 补 `@deepseek-ai/dsh-deepseek-auth` 与 `@deepseek-ai/dsh-client-ui-session-status`。设置卡随 shared v3 视觉层更新，并新增 `RescuePanelSection` 会话面板段：避让官方 SessionStatus、保留 `latestActions`，客户端工厂/隐藏/空树/分支用例与双语文案同步。
+
 ## 0.1.17
 
 宿主基线抬到 `0.2.2-rc.5`；会话事件的判别键钉进官方联合，Typert 远端方法的程序化标记收编 shared。

@@ -49,7 +49,7 @@ jobs:
         # 于是 fmt:check 会把每个文件都判成未格式化（内容一字不差）。
         # 本仓用 .gitattributes 钉住 eol=lf，这一格就是它的判据。
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: [24.9]
+        node: [24.22.3]
     runs-on: ${{ matrix.os }}
     # 官方对单 job 的上限是 6 小时，那是「系统允许」不是「应该允许」。不设这一行，
     # 一个卡住的 install 或测试会烧满 6 小时 runner 分钟才被杀，而期间没有任何信号。
@@ -129,9 +129,9 @@ jobs:
           fi
       # 覆盖率只在一次运行的日志里滚一遍就没了，翻起来费劲。落成产物之后，
       # 「这次为什么掉了」可以直接把报告下下来看，而不必重跑一次。
-      # 只收 ubuntu 的 node 24 那一格：其余格各传一份只会得到同样的报告。
+      # 只收 ubuntu 的 node 24.22.3 那一格：其余格各传一份只会得到同样的报告。
       - name: 上传覆盖率报告
-        if: always() && steps.tracked-tree.outcome == 'success' && matrix.os == 'ubuntu-latest' && matrix.node == 24.9
+        if: always() && steps.tracked-tree.outcome == 'success' && matrix.os == 'ubuntu-latest' && matrix.node == '24.22.3'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
@@ -179,7 +179,7 @@ jobs:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.9
+          node-version: 24.22.3
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # 只用 pnpm pack：`npm pack` 不解析 `catalog:`，会把未解析的协议原样写进 tarball 的
