@@ -114,6 +114,11 @@ export interface UiMessages {
   /** 表单开头的一致性说明。 */
   readonly formLead: string;
   readonly resumeSection: string;
+  /** 会话侧栏小节的三个读数标签。 */
+  readonly panelResumes: string;
+  readonly panelNext: string;
+  readonly panelDisabled: string;
+  readonly panelOn: string;
   readonly enabledLabel: string;
   readonly enabledHint: string;
   readonly resumeDelayLabel: string;
@@ -176,7 +181,10 @@ export interface UiMessages {
   readonly retryColPreset: string;
   readonly retryColStaged: string;
   readonly retryColState: string;
+  readonly retryStateCanonical: string;
+  readonly retryStateOverride: string;
   readonly retryColCodes: string;
+  readonly retryTableCaption: string;
   readonly retrySectionHint: string;
   /** 远程通道不可用（读不到命名空间或调用被拒），`{target}` 是「provider→preset」。 */
   readonly remoteUnavailable: string;
@@ -302,6 +310,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     outOfRange: "超出允许范围，未保存",
     formLead: "失败分类为内置安全逻辑，不可配置；以下仅调自动续跑参数（改动点「保存」生效）。",
     resumeSection: "瞬时失败自动续跑",
+    panelResumes: "已续跑",
+    panelNext: "下次续跑",
+    panelDisabled: "已关闭",
+    panelOn: "已启用",
     enabledLabel: "启用自动续跑",
     enabledHint: "关闭后仅保留手动编辑/重试/续写等 UI 能力",
     resumeDelayLabel: "续跑延迟",
@@ -357,7 +369,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     retryColPreset: "档位",
     retryColStaged: "暂存改动",
     retryColState: "状态",
+    retryStateCanonical: "规范",
+    retryStateOverride: "非规范",
     retryColCodes: "码表",
+    retryTableCaption: "各 Provider 的 429 重试档位",
     retrySectionHint:
       "pi-ai 把 429+配额措辞归码 QUOTA；默认码表不含 QUOTA 时 llm-retry 放行。改档位后点「保存」经官方 settings 落盘，重启不丢。",
     remoteUnavailable: "{target}：远端面不可用（读不到 sessionRescue 命名空间）",
@@ -441,6 +456,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     formLead:
       "Failure classification is built-in safety logic and is not configurable; the fields below only tune auto-resume (press Save to apply).",
     resumeSection: "Auto-resume on transient failures",
+    panelResumes: "Resumes",
+    panelNext: "Next resume",
+    panelDisabled: "Off",
+    panelOn: "Enabled",
     enabledLabel: "Enable auto-resume",
     enabledHint: "When off, only the manual edit / retry / continue UI stays available",
     resumeDelayLabel: "Resume delay",
@@ -506,7 +525,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     retryColPreset: "Preset",
     retryColStaged: "Staged",
     retryColState: "State",
+    retryStateCanonical: "Canonical",
+    retryStateOverride: "Override",
     retryColCodes: "Codes",
+    retryTableCaption: "429 retry presets by provider",
     retrySectionHint:
       "pi-ai maps 429 + quota wording onto the QUOTA code; llm-retry passes through when the default code table omits QUOTA. After changing a preset, press Save to persist it through the official settings — it survives restarts.",
     remoteUnavailable:

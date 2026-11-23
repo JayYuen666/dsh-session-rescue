@@ -10,6 +10,7 @@ import {
   DataTable,
   EmptyState,
   ListField,
+  SelectField,
   StatusDot,
   fieldOf,
   isRecord,
@@ -245,7 +246,7 @@ function RetryCodesRow(props: {
   };
   return createElement(
     "div",
-    { className: "sr-retry-codes" },
+    { className: "dsu-actions" },
     createElement(ListField, {
       label: t("presetCodesLabel"),
       hint,
@@ -263,7 +264,7 @@ function RetryCodesRow(props: {
     }),
     createElement(
       "div",
-      { className: "sr-retry-codes-action" },
+      { className: "dsu-actions dsu-actionsEnd" },
       createElement(
         "button",
         {
@@ -305,7 +306,7 @@ export function retryCodesElement(props: {
   }
   return createElement(
     "div",
-    { className: "sr-retry-codes" },
+    { className: "dsu-actions" },
     // key 按 provider：切换编辑对象时强制重挂，草稿/提示互不串行——A 的异步保存结果
     // 与失败提示都不得出现在 B 的编辑器下（成功提示不含 provider 名，串行尤其难辨）。
     createElement(RetryCodesRow, {
@@ -366,25 +367,22 @@ export function retryProvidersBody(props: RetryTableProps): ReactNode {
       Fragment,
       null,
       createElement("span", { className: "dsu-tblMono" }, row.provider),
-      createElement("span", { className: "sr-retry-meta" }, meta),
+      createElement("span", { className: "dsu-tblSub" }, meta),
     );
-    const options = Object.entries(RETRY_PRESET_KEYS).map(([value, labelKey]) =>
-      createElement("option", { key: value, value }, t(labelKey)),
-    );
-    const selectCell = createElement(
-      "select",
-      {
-        className: "dsu-input sr-retry-select",
-        value: staged ?? current,
-        disabled: saving,
-        "aria-label": row.provider,
-        "data-field": `retry-preset-${row.provider}`,
-        onChange: (event: { target: { value: string } }) => {
-          onChange(row, event.target.value);
-        },
+    const selectCell = createElement(SelectField, {
+      bare: true,
+      label: `${t("retryColPreset")} · ${row.provider}`,
+      value: staged ?? current,
+      options: Object.entries(RETRY_PRESET_KEYS).map(([value, labelKey]) => ({
+        value,
+        label: t(labelKey),
+      })),
+      field: `retry-preset-${row.provider}`,
+      disabled: saving,
+      onChange: (next: string) => {
+        onChange(row, next);
       },
-      ...options,
-    );
+    });
     // 两个 ?? 兜底防 host 返回键表之外的档位名（防御性，UI 路径进不去：档位候选
     // 来自 RETRY_PRESET_KEYS 的闭集）。v8 ignore 让防御分支不计入覆盖率分母。
     /* v8 ignore next 3 -- 键表外的档位名在 UI 路径不可达（候选是闭集），兜底只防坏载荷 */
@@ -392,7 +390,13 @@ export function retryProvidersBody(props: RetryTableProps): ReactNode {
       staged === undefined
         ? "—"
         : `${t(RETRY_PRESET_KEYS[current] ?? "presetDefault")} → ${t(RETRY_PRESET_KEYS[staged] ?? "presetDefault")}`;
-    const stateCell = createElement(StatusDot, { tone: isPresetShape(row) ? "ok" : "warn" });
+    const canonical = isPresetShape(row);
+    // 设计稿 B 的状态列是一颗 8px 点（ok / warn + title），不是一枚写着「规范」的胶囊：
+    // 每行都重复同两个词会把表格撑成文字墙。label 仍交给读屏与 title。
+    const stateCell = createElement(StatusDot, {
+      tone: canonical ? "ok" : "warn",
+      label: t(canonical ? "retryStateCanonical" : "retryStateOverride"),
+    });
     const codesCell = createElement(
       "button",
       {
@@ -414,11 +418,12 @@ export function retryProvidersBody(props: RetryTableProps): ReactNode {
   // 配一条孤儿保存条（实测后者像渲染残缺）。空态先落成局部量：嵌套调用层数的上限
   // 挡住了内联写法。
   const emptyNote = createElement("span", { className: "dsu-hint" }, t("presetEmptyNote"));
-  const emptyState = createElement(EmptyState, { title: t("presetEmpty") }, emptyNote);
+  const emptyState = createElement(EmptyState, { title: t("presetEmpty"), plain: true }, emptyNote);
   return createElement(DataTable, {
     columns,
     rows,
     stickyFirst: true,
+    caption: t("retryTableCaption"),
     empty: emptyState,
   });
 }

@@ -9,7 +9,14 @@
 //   running/removed/queue ← useSession
 // 组件合并成 view 后再调 transcript 函数。禁止从 useSession 读 nodes。
 
-import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  createElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -52,6 +59,10 @@ import type {
 // **没有** `open`：`sessions.list` 的注释明写「navigation belongs to view owners」。
 import type { UiWorkspace } from "@deepseek-ai/dsh-client-ui-workspace/client";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
+import type {
+  SessionStatus,
+  UseSessionStatus,
+} from "@deepseek-ai/dsh-client-ui-session-status/client";
 import type { TextBlock } from "@deepseek-ai/dsh-llm";
 import type { SlotRegistry } from "@deepseek-ai/dsh-client-ui-renderer/client";
 import type { ConfigForm } from "@deepseek-ai/dsh-client-ui-settings/client";
@@ -89,8 +100,12 @@ import {
   FieldTwoCol,
   NumberField,
   Section,
+  SectionToggle,
   TextField,
-  ToggleField,
+  ToggleCell,
+  ToggleGrid,
+  KpiGrid,
+  KpiTile,
   claimApply,
   diffTouched,
   ensureCardUiCss,
@@ -172,13 +187,9 @@ const CSS = [
   ".sr-primary{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);font-weight:500}",
   ".sr-primary:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 8%,transparent)}",
   ".sr-editor{display:flex;flex-direction:column;gap:6px}",
-  ".sr-retry-row{display:flex;flex-direction:column;gap:6px;padding:6px 0}",
-  ".sr-retry-row + .sr-retry-row{border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.06))}",
-  ".sr-retry-codes{display:flex;flex-direction:column;gap:6px}",
-  ".sr-retry-codes-action{display:flex;justify-content:flex-end}",
   // dock 面板：官方 QueueDock 同款——玻璃底 + 0.5px 顶边框 + 只有上圆角，负 margin
   // 贴住输入卡（下边由输入卡自己的顶边框收口），宽度按 composer 的 inset 体系算。
-  ".sr-dock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance,16px)*2 - var(--dsh-composer-dock-inset,8px)*2);max-width:calc(var(--dsh-composer-card-max-width,var(--dsh-chat-content-width,748px)) - var(--dsh-composer-dock-inset,8px)*2);margin:0 auto calc(0px - var(--dsh-composer-stack-gap,6px) - 3px);display:flex;flex-direction:column;gap:6px;padding:6px var(--dsh-composer-dock-inset,8px) 8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit);background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));backdrop-filter:var(--dsw-menu-backdrop-filter,none);border:0.5px solid var(--dsw-alias-border-l1,#d8dbe2);border-bottom:none;border-radius:var(--dsw-radius-lg,10px) var(--dsw-radius-lg,10px) 0 0}",
+  ".sr-dock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance,16px)*2 - var(--dsh-composer-dock-inset,8px)*2);max-width:calc(var(--dsh-composer-card-max-width,var(--dsh-chat-content-width,748px)) - var(--dsh-composer-dock-inset,8px)*2);margin:0 auto calc(0px - var(--dsh-composer-stack-gap,6px) - 3px);display:flex;flex-direction:column;gap:6px;padding:6px var(--dsh-composer-dock-inset,8px) 8px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit);background:var(--dsw-menu-surface-fill,var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff)));backdrop-filter:var(--dsw-menu-backdrop-filter,none);border:0.5px solid var(--dsw-alias-border-l1,#d8dbe2);border-bottom:none;border-radius:var(--dsw-radius-lg,10px) var(--dsw-radius-lg,10px) 0 0}",
   // 上面这条 display:flex 会盖掉 UA 的 [hidden]{display:none}：没有内容时容器不会隐藏，
   // 仍以 padding 占一行高度。显式补一条，hidden 才是真的隐藏。
   ".sr-dock[hidden]{display:none}",
@@ -187,17 +198,18 @@ const CSS = [
   // 在这里会显得突兀。主操作（继续中断的回合）保留品牌色文字以区分层级。
   ".sr-tail{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:4px;padding:2px 0;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary,inherit)}",
   ".sr-tail .dsu-btn{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,inherit)}",
-  ".sr-tail .dsu-btn:hover:not(:disabled){background:var(--dsw-alias-fill-secondary,rgba(0,0,0,.05));border-color:transparent}",
-  ".sr-tail .dsu-btn:active:not(:disabled){background:var(--dsw-alias-fill-tertiary,rgba(0,0,0,.08))}",
+  ".sr-tail .dsu-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));border-color:transparent}",
+  ".sr-tail .dsu-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.08))}",
   ".sr-tail .sr-primary{color:var(--dsw-alias-state-business-primary)}",
-  // 倒计时横幅：玻璃面板上的行内强调——品牌色状态点，不再套盒子（面板本身已是容器）
-  ".sr-banner{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:var(--dsw-radius-md,6px);background:var(--dsw-alias-fill-secondary,rgba(47,111,237,.05))}",
+  // 倒计时横幅：画板 F 的 dock-banner——品牌色状态点 + 文案，底为 interactive-bg-hover，
+  // 不做实心警示条（它贴着输入卡，不是独立的错误块）。
+  ".sr-banner{display:flex;align-items:center;gap:8px;padding:4px;border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-interactive-bg-hover,rgba(47,111,237,.05))}",
   ".sr-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}",
   ".sr-bannerText{flex:1;min-width:0}",
   // 耗尽提示（shell.overlay 条目）：悬浮层本体 pointer-events:none，子元素自动恢复；
   // 容器自己钉在 frame 右上角，不随滚动走。
   ".sr-toasts{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;max-width:360px;z-index:30}",
-  ".sr-toast{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border,#d8dbe2);border-left:3px solid var(--dsw-alias-text-danger,#d33);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 4px 12px rgba(0,0,0,.1);font-size:12px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
+  ".sr-toast{display:flex;align-items:center;gap:8px;border:0.5px solid var(--dsw-alias-border-l2,#d8dbe2);border-left:4px solid var(--dsw-alias-state-error-primary,#d33);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-card-fill,#fff);box-shadow:0 4px 12px rgba(0,0,0,.1);font-size:12px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
   ".sr-toastText{flex:1;min-width:0}",
 ].join("\n");
 
@@ -857,7 +869,12 @@ function bannerElement(
     createElement("span", { className: "sr-bannerText" }, bannerText),
     createElement(
       "button",
-      { type: "button", className: SR_BUTTON_CLASS, disabled: busy, onClick: onCancel },
+      {
+        type: "button",
+        className: `${SR_BUTTON_CLASS} dsu-btnGhost`,
+        disabled: busy,
+        onClick: onCancel,
+      },
       t("cancel"),
     ),
   );
@@ -1776,64 +1793,6 @@ function overwriteWarnRowOf(
   );
 }
 
-/** 保存条（保存/丢弃/状态提示）：保存中或脏数为 0 时两个按钮一起禁点。 */
-function retrySaveBar(props: {
-  saving: boolean;
-  dirtyCount: number;
-  saveError: string | null;
-  t: Translate;
-  onSave: () => void;
-  onDiscard: () => void;
-}): ReactNode {
-  const { saving, dirtyCount, saveError, t, onSave, onDiscard } = props;
-  let saveLabel: string;
-  if (saving) {
-    saveLabel = t("saving");
-  } else if (dirtyCount > 0) {
-    saveLabel = t("saveCount", { count: dirtyCount });
-  } else {
-    saveLabel = t("save");
-  }
-  const saveButton = createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsu-btn dsu-btnPrimary",
-      "data-field": "retry-save",
-      disabled: saving || dirtyCount === 0,
-      onClick: onSave,
-    },
-    saveLabel,
-  );
-  const discardButton = createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsu-btn",
-      "data-field": "retry-discard",
-      disabled: saving || dirtyCount === 0,
-      onClick: onDiscard,
-    },
-    t("discard"),
-  );
-  // 与 shared SaveBar 的状态字同构：错误红、脏态琥珀（dsu-statusDirty），干净态灰。
-  // 干净态也留一句状态字——留空的保存条看起来像渲染残缺（共享 SaveBar 的 cleanLabel 位）。
-  // 两条辅助避免嵌套三元（本仓 lint 禁）。
-  const dirtyStatusClass = dirtyCount > 0 ? "dsu-status dsu-statusDirty" : "dsu-status";
-  const statusClass = saveError === null ? dirtyStatusClass : "dsu-status dsu-statusError";
-  return createElement(
-    "div",
-    { className: "dsu-savebar" },
-    createElement(
-      "span",
-      { className: statusClass },
-      saveError ?? (dirtyCount > 0 ? t("presetDirty") : t("presetClean")),
-    ),
-    discardButton,
-    saveButton,
-  );
-}
-
 /** 读一次 providers 载荷并逐字段投影成行表（RetryPolicySection.load 的读取体）。
  *  坏行直接丢弃（防御纵深，不经 any 断言）；读不到/传输失败都归 ok:false。 */
 async function readProviderRows(
@@ -1903,10 +1862,21 @@ async function runRetrySave(unit: {
   unit.onSaved();
 }
 
-function RetryPolicySection(props: { t: Translate }): ReactNode {
-  const { t } = props;
+/** 重试面板交给整卡保存条的三个句柄：脏数、在途、错误与动作。 */
+export interface RetrySectionActions {
+  readonly save: () => Promise<void>;
+  readonly discard: () => void;
+}
+
+function RetryPolicySection(props: {
+  t: Translate;
+  onDirtyCount: (count: number) => void;
+  onBusy: (busy: boolean) => void;
+  onError: (error: string | null) => void;
+  onActions: (actions: RetrySectionActions) => void;
+}): ReactNode {
+  const { t, onDirtyCount, onBusy, onError, onActions } = props;
   const [state, setState] = useState<RetryPanelState>(null);
-  // 最近一次成功读到的 provider 行：写前确认按它逐行判，与 state 分开存。
   const [rows, setRows] = useState<readonly RetryProviderRow[]>([]);
   // 保存条模式：改档位先暂存（provider → preset），点「保存」批量写到磁盘
   const [pending, setPending] = useState<Record<string, string>>({});
@@ -1920,7 +1890,6 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   const [confirmTargets, setConfirmTargets] = useState<string[]>([]);
   // 码表编辑器的展开位：一次只展开一个 provider（null=全收起）。
   const [codesProvider, setCodesProvider] = useState<string | null>(null);
-
   // load 依赖 t，被挂载与「保存成功后重读」两处调用：裸函数会让 useEffect 依赖写不对。
   const load = useCallback(async (): Promise<void> => {
     const face = await readProviderRows(t);
@@ -1935,11 +1904,10 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
   useEffect(() => {
     void load();
   }, [load]);
-
   const dirtyCount = Object.keys(pending).length;
   // 两类写入共用一个在途标志：码表或档位任一在途时，表格下拉、码表入口与保存条一起锁。
   const retryBusy = saving || codesSaving;
-  const saveAll = (force: boolean): Promise<void> =>
+  const saveAll = (force = false): Promise<void> =>
     runRetrySave({
       rows,
       pending,
@@ -1956,11 +1924,33 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
         void load();
       },
     });
-  const discardAll = (): void => {
+  // 把内部状态抬到整卡保存条：设计稿要求全卡只有一个 SaveBar，重试面板不再自绘第二条。
+  // 初值直接复用本轮的两个真实函数（不是占位空函数）：effect 首次提交后读到的就是它们，
+  // 而每次 render 末尾都会把新一版句柄写回去，保存条因此永远拿到最新状态。
+  const discardPending = (): void => {
     setPending({});
     setSaveError(null);
     setConfirming(false);
   };
+  const latestActions = useRef<RetrySectionActions>({ save: saveAll, discard: discardPending });
+  latestActions.current = { save: saveAll, discard: discardPending };
+  useEffect(() => {
+    onDirtyCount(dirtyCount);
+  }, [dirtyCount, onDirtyCount]);
+  useEffect(() => {
+    onBusy(retryBusy);
+  }, [retryBusy, onBusy]);
+  useEffect(() => {
+    onError(saveError);
+  }, [saveError, onError]);
+  useEffect(() => {
+    onActions({
+      save: () => latestActions.current.save(),
+      discard: () => {
+        latestActions.current.discard();
+      },
+    });
+  }, [onActions]);
 
   const changePreset = (row: RetryProviderRow, next: string): void => {
     setConfirming(false);
@@ -1982,12 +1972,17 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
     setConfirming,
   );
 
+  // 计数只在「读到了」之后成立：加载中与读取失败时 rows 仍是空数组，写 0 Provider
+  // 会把「还没读」误报成「一个都没有」，与设计稿的三态读面（loading / failure / 0 Provider）冲突。
+  const providerCount =
+    state?.ok === true ? t("retryProviderCount", { count: String(rows.length) }) : undefined;
+
   return createElement(
     Section,
     {
       title: t("retrySectionTitle"),
       hint: t("retrySectionHint"),
-      count: t("retryProviderCount", { count: String(rows.length) }),
+      ...(providerCount === undefined ? {} : { count: providerCount }),
     },
     retryProvidersBody({
       state,
@@ -2009,20 +2004,6 @@ function RetryPolicySection(props: { t: Translate }): ReactNode {
       t,
     }),
     overwriteWarnRow,
-    // 0 Provider 时整条保存条收起：没有行就没有可暂存的档位，留一条只有禁用按钮的空条
-    // 只会让空态显得像残缺。
-    rows.length === 0
-      ? null
-      : retrySaveBar({
-          saving: retryBusy,
-          dirtyCount,
-          saveError,
-          t,
-          onSave: () => {
-            void saveAll(false);
-          },
-          onDiscard: discardAll,
-        }),
   );
 }
 
@@ -2155,36 +2136,25 @@ function countField(inputs: SectionInputs, spec: CountSpec): ReactNode {
   });
 }
 
-interface ToggleSpec {
-  label: keyof UiMessages;
-  hint: keyof UiMessages;
-  field: string;
-}
-
-/** 布尔字段：快照缺省按开处理（宿主 schema 的缺省值同为 true）。 */
-function toggleField(inputs: SectionInputs, spec: ToggleSpec): ReactNode {
-  return createElement(ToggleField, {
-    label: inputs.t(spec.label),
-    ...splitHint(inputs.t(spec.hint)),
-    field: spec.field,
-    checked: inputs.eff(spec.field) !== false,
-    disabled: inputs.disabled,
-    onChange: (next: boolean): void => {
-      inputs.setField(spec.field, next);
-    },
-  });
-}
-
 /** 自动续跑小节：总开关与瞬时失败路径的四个参数。 */
 function buildResumeSection(inputs: SectionInputs): ReactNode {
+  const enabledToggle = createElement(SectionToggle, {
+    field: "enabled",
+    label: inputs.t("enabledLabel"),
+    checked: inputs.eff("enabled") === true,
+    disabled: inputs.disabled,
+    onChange: (next: boolean) => {
+      inputs.setField("enabled", next);
+    },
+  });
   return createElement(
     Section,
     {
       title: inputs.t("resumeSection"),
       hint: inputs.t("formLead"),
       count: inputs.t("fieldCount", { count: "5" }),
+      toggle: enabledToggle,
     },
-    toggleField(inputs, { label: "enabledLabel", hint: "enabledHint", field: "enabled" }),
     createElement(
       FieldTwoCol,
       null,
@@ -2258,19 +2228,30 @@ function buildContinueSection(inputs: SectionInputs): ReactNode {
 
 /** 待办补跑小节。 */
 function buildUnfinishedSection(inputs: SectionInputs): ReactNode {
+  const openTodosCell = createElement(ToggleCell, {
+    label: inputs.t("openTodosLabel"),
+    ...splitHint(inputs.t("openTodosHint")),
+    field: "resumeOnOpenTodos",
+    checked: inputs.eff("resumeOnOpenTodos") === true,
+    disabled: inputs.disabled,
+    onChange: (next: boolean) => {
+      inputs.setField("resumeOnOpenTodos", next);
+    },
+  });
+  const steerModeCell = createElement(ToggleCell, {
+    label: inputs.t("steerModeLabel"),
+    ...splitHint(inputs.t("steerModeHint")),
+    field: "unfinishedSteerMode",
+    checked: inputs.eff("unfinishedSteerMode") === true,
+    disabled: inputs.disabled,
+    onChange: (next: boolean) => {
+      inputs.setField("unfinishedSteerMode", next);
+    },
+  });
   return createElement(
     Section,
     { title: inputs.t("unfinishedSection"), count: inputs.t("fieldCount", { count: "5" }) },
-    toggleField(inputs, {
-      label: "openTodosLabel",
-      hint: "openTodosHint",
-      field: "resumeOnOpenTodos",
-    }),
-    toggleField(inputs, {
-      label: "steerModeLabel",
-      hint: "steerModeHint",
-      field: "unfinishedSteerMode",
-    }),
+    createElement(ToggleGrid, null, openTodosCell, steerModeCell),
     createElement(
       FieldTwoCol,
       null,
@@ -2341,18 +2322,27 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
   const [saveError, setSaveError] = useState<string | null>(null);
   // 越界草稿不进 touched（`NumberField` 对它不调 `onChange`），与「草稿为空」在保存条上同形。
   const invalid = useInvalidFields();
+  // 429 面板的暂存与在途也抬到整卡：设计稿明确全卡只有一个 SaveBar。
+  const [retryDirty, setRetryDirty] = useState(0);
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const retryActions = useRef<RetrySectionActions | null>(null);
+  const onRetryActions = useCallback((actions: RetrySectionActions): void => {
+    retryActions.current = actions;
+  }, []);
   const eff = (field: string): unknown => (field in touched ? touched[field] : value[field]);
   const excludesBaseline = excludesText(value);
   const excludesDraft = excludesEdit ?? excludesBaseline;
   const excludesDirty = excludesEdit !== null && excludesEdit !== excludesBaseline;
-  const dirtyCount = diffTouched(touched, value).length + (excludesDirty ? 1 : 0);
+  const mainDirtyCount = diffTouched(touched, value).length + (excludesDirty ? 1 : 0);
+  const dirtyCount = mainDirtyCount + retryDirty;
   const dirty = dirtyCount > 0;
   const setField = (field: string, val: SettingsPathValue): void => {
     setTouched((prev) => ({ ...prev, [field]: val }));
   };
-  const save = async (): Promise<void> => {
+  const saveMain = async (): Promise<boolean> => {
     if (!dirty || invalid.blocked) {
-      return;
+      return true;
     }
     setBusy(true);
     setSaveError(null);
@@ -2368,12 +2358,13 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
     setBusy(false);
     if (failure !== null) {
       setSaveError(failure);
-      return;
+      return false;
     }
     // 宿主已受理整批写入 → 交回「没动过」态，草稿跟着快照走。
     setTouched({});
     setExcludesEdit(null);
     invalid.clear();
+    return true;
   };
   const discard = (): void => {
     setTouched({});
@@ -2384,20 +2375,40 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
 
   // 越界那两位直接由 `useInvalidFields()` 摊进来（`SectionInputs` 只认它们，多余键不参与渲染）。
   const inputs: SectionInputs = { t, disabled, eff, setField, ...invalid };
+  const commitAll = (): void => {
+    if (invalid.blocked) {
+      return;
+    }
+    void (async () => {
+      const mainOk = await saveMain();
+      if (mainOk) {
+        await retryActions.current?.save();
+      }
+    })();
+  };
+  const discardAll = (): void => {
+    discard();
+    retryActions.current?.discard();
+  };
   const saveBar = settingsSaveBar({
     t,
     dirty,
-    busy,
+    busy: busy || retryBusy,
     writable: !disabled,
-    saveError,
+    saveError: saveError ?? retryError,
     blocked: invalid.blocked,
     dirtyCount,
-    onSave: () => {
-      void save();
-    },
-    onDiscard: discard,
+    onSave: commitAll,
+    onDiscard: discardAll,
   });
-  const retrySection = createElement(RetryPolicySection, { key: "retry-policy", t });
+  const retrySection = createElement(RetryPolicySection, {
+    key: "retry-policy",
+    t,
+    onDirtyCount: setRetryDirty,
+    onBusy: setRetryBusy,
+    onError: setRetryError,
+    onActions: onRetryActions,
+  });
 
   // 0.1.6：page 视图只渲染表单主体——标题/描述/卡片外层的 外壳 由插件管理页统一绘制，
   // 不再自绘 RescuePluginCard（旧自绘的那层 wrapper 属于已删除的 settings.plugin.item）。
@@ -2408,8 +2419,8 @@ function RescueSettingsForm(props: SettingsCardProps): ReactNode {
     buildContinueSection(inputs),
     buildUnfinishedSection(inputs),
     buildExcludesSection({ ...inputs, draft: excludesDraft, onDraft: setExcludesEdit }),
-    saveBar,
     retrySection,
+    saveBar,
   );
 }
 
@@ -2425,6 +2436,87 @@ function RescueSettingsCard(props: SettingsCardProps): ReactNode {
 }
 
 // ── 装配 ────────────────────────────────────────────────────────────────
+
+/** 会话侧栏小节槽位名（与下面 SlotMap 声明及宿主契约逐字一致）。 */
+const SESSION_PANEL_SECTION = "conversation.session.panel.section";
+
+/**
+ * session-panel 的 SlotMap 合并来自 @deepseek-ai/dsh-client-ui-session-panel/client。
+ * 本包不声明该 UI 包作依赖（它只在宿主里提供槽位，不进本包发布面），这里按
+ * `lib/types/client/slots.d.ts` 的 list 契约就地补一条声明。
+ */
+declare module "@deepseek-ai/dsh-client-ui-slots" {
+  interface SlotMap {
+    "conversation.session.panel.section": {
+      kind: "list";
+      scope: "session";
+      owner: {
+        readonly presentation: "docked" | "overlay";
+        readonly dismissOverlay: () => void;
+      };
+    };
+  }
+}
+
+/** 会话侧栏的自动续跑小节：本会话的续跑次数、下一次倒计时与开关状态。 */
+export function RescuePanelSection(props: {
+  readonly t: Translate;
+  readonly sessionId: SessionId;
+  readonly reader: RescueReader | undefined;
+  readonly useSessionStatus: UseSessionStatus;
+}): ReactNode {
+  const { t, reader, sessionId, useSessionStatus } = props;
+  // 状态表是整张 Map；选择器保持恒等，取本会话那一格放到 hook 外，避免每次 render
+  // 新建闭包导致快照选择抖动。
+  const statuses = useSessionStatus((value) => value);
+  const status: SessionStatus | undefined = statuses.get(sessionId);
+  const [body, setBody] = useState<RescueStateBody | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = async (): Promise<void> => {
+      if (reader === undefined) {
+        return;
+      }
+      try {
+        const raw = await reader.state();
+        const next = isRecord(raw) ? parseStateBody(raw) : null;
+        if (live) {
+          setBody(next);
+        }
+      } catch {
+        // 侧栏小节允许静默缺席：读不到就不画。
+      }
+    };
+    void load();
+    return () => {
+      live = false;
+    };
+  }, [reader]);
+  const entry = body?.sessions?.[sessionId];
+  // 避让等待用户输入的会话（最高优先级交互在等回答），以及最近一次未读完成是失败的
+  // 会话：这两类应由对话区自己提示，侧栏再叠一张“下次自动续跑”只会误导。
+  if (
+    status?.pendingInteraction !== undefined ||
+    status?.completionFailed === true ||
+    reader === undefined ||
+    entry === undefined
+  ) {
+    return null;
+  }
+  const { pending } = entry;
+  const nextText =
+    pending === null ? "—" : `${Math.max(1, Math.ceil(pending.remainingMs / 1000))}s`;
+  return createElement(
+    KpiGrid,
+    null,
+    createElement(KpiTile, { label: t("panelResumes"), value: entry.count, count: entry.count }),
+    createElement(KpiTile, { label: t("panelNext"), value: nextText }),
+    createElement(KpiTile, {
+      label: t("enabledLabel"),
+      value: entry.disabled === true ? t("panelDisabled") : t("panelOn"),
+    }),
+  );
+}
 
 export interface ClientCtx {
   /** cordis 官方效应面（installed `@deepseek-ai/cordis/lib/types/fiber.d.ts` 的
@@ -2567,6 +2659,19 @@ function apply(ctx: ClientCtx): void {
     "session-rescue-card: locale dictionaries",
   );
   const t = ctx.locale.bind(NS);
+
+  ctx.slots.inject(SESSION_PANEL_SECTION, () =>
+    ctx.slots.register(
+      {
+        name: SESSION_PANEL_SECTION,
+        id: "session-rescue-status",
+        order: 110,
+        label: () => t("resumeSection"),
+        inject: () => ({ t, reader }),
+      },
+      RescuePanelSection,
+    ),
+  );
 
   // 官方 `Context['get']` 对已声明的服务名直接交出 `UiWorkspace | undefined`
   //（installed cordis/lib/types/reflect.d.ts:14），无需断言也无需本地投影。

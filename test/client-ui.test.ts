@@ -33,6 +33,7 @@ import {
   postToggle,
   notifyHostConnected,
   apply as clientApply,
+  RescuePanelSection,
 } from "../src/client-entry.ts";
 // 0.1.7 隐式注册的唯一来源测试替身：条目 id 直接读 cordis.patch.yml，不在测试里抄一遍。
 import { patchEntryId } from "./config-refs.ts";
@@ -47,6 +48,10 @@ import {
 } from "../lib/reask-action.ts";
 import type { ReaskRequest } from "../lib/reask-action.ts";
 import type { RescueReader } from "../src/remote.ts";
+import type {
+  SessionStatus,
+  UseSessionStatus,
+} from "@deepseek-ai/dsh-client-ui-session-status/client";
 import { brandString } from "@deepseek-ai/dsh-brand";
 import type { SessionId } from "@deepseek-ai/dsh-session/types";
 // 注册 ns 在本文件写字面量：src/ui-messages.ts 那枚本源经 `LocaleNs` 标注钉在
@@ -227,12 +232,13 @@ const BUNDLE_CONFIG_SLOT = "plugins.bundle.config";
 
 // ── DOM 稳定锚点：卡片/ dock 的 data-field 选择器（组件改结构时这里一处跟）。 ──
 const SAVE_BUTTON_SELECTOR = '[data-field="save"]';
-const RETRY_SAVE_BUTTON_SELECTOR = '[data-field="retry-save"]';
+const RETRY_SAVE_BUTTON_SELECTOR = '[data-field="save"]';
 const CODES_SAVE_SELECTOR = '[data-field="retry-codes-save-opendesign"]';
 const CODES_INPUT_OPENDESIGN_SELECTOR = '[data-field="retry-codes-opendesign"]';
 const RESUME_DELAY_INPUT_SELECTOR = 'input[data-field="resumeDelayMs"]';
 /** 排除名单输入框（共享 TextField 把字段名写在 data-field 上）。 */
 const EXCLUDES_INPUT_SELECTOR = 'input[data-field="providerExcludes"]';
+const DISCARD_BUTTON_SELECTOR = '[data-field="discard"]';
 /** 「启用自动续跑」开关（role=switch + 字段锚点，zh/en 面通用）。 */
 const ENABLE_TOGGLE_SELECTOR = 'button[role="switch"][data-field="enabled"]';
 /** 档位值 → 下拉里的选项序号（共享 SelectField 按 options 声明顺序渲染）。 */
@@ -419,38 +425,33 @@ function reactProps<Props>(element: Element): Props {
 }
 
 /** 卡片里的档位下拉（共享 SelectField 的 combobox 触发器，按渲染顺序）。 */
-function retrySelects(el: HTMLElement): HTMLSelectElement[] {
-  return [...el.querySelectorAll<HTMLSelectElement>('select[data-field^="retry-preset"]')];
+function retrySelects(el: HTMLElement): HTMLButtonElement[] {
+  return [...el.querySelectorAll<HTMLButtonElement>('button[data-field^="retry-preset"]')];
 }
 
-/** 断言第 index 行当前档位（原生 select 的 value 即档位 id）。 */
+/** 断言第 index 行当前档位（data-value 是共享 SelectField 暴露的档位 id）。 */
 function assertPreset(el: HTMLElement, index: number, preset: string): void {
   const select = retrySelects(el)[index];
   assert.ok(select, `第 ${String(index)} 行档位下拉存在`);
-  assert.equal(select.value, preset, `第 ${String(index)} 行的当前档位`);
+  assert.equal(select.dataset["value"], preset, `第 ${String(index)} 行的当前档位`);
 }
 
-/** 第 index 行换档位：经 td 的 fiber 直调该行 onChange（select 元素上取不到 React 键，合成事件又到不了 root）。 */
+/** 第 index 行换档位：打开共享 SelectField 浮层，点选目标档位。 */
 async function pickPreset(container: HTMLElement, index: number, preset: string): Promise<void> {
   const select = retrySelects(container)[index];
   assert.ok(select, `第 ${String(index)} 行档位下拉存在`);
-  const td = select.closest("td");
-  assert.ok(td, "档位下拉在表格单元里");
-  const fiberKey = Object.keys(td).find((keyName) => keyName.startsWith("__reactFiber"));
-  assert.ok(fiberKey !== undefined, "td 缺 fiber 键");
-  const fiber = (
-    td as unknown as Record<
-      string,
-      {
-        memoizedProps: {
-          children: { props: { onChange: (ev: { target: { value: string } }) => void } };
-        };
-      }
-    >
-  )[fiberKey]!;
   await act(async () => {
-    fiber.memoizedProps.children.props.onChange({ target: { value: preset } });
+    select.click();
   });
+  await flush();
+  const option = [
+    ...container.querySelectorAll<HTMLButtonElement>('button[role="option"][data-value]'),
+  ].find((node) => node.dataset["value"] === preset && node.closest("[hidden]") === null);
+  assert.ok(option, `档位 ${preset} 的候选项存在`);
+  await act(async () => {
+    option.click();
+  });
+  await flush();
 }
 
 function allButtons(el: HTMLElement): HTMLButtonElement[] {
@@ -468,7 +469,14 @@ function buttonByText(el: HTMLElement, text: string): HTMLButtonElement | null {
 }
 
 function buttonContaining(el: HTMLElement, text: string): HTMLButtonElement | null {
-  return allButtons(el).find((btn) => btn.textContent.includes(text)) ?? null;
+  return (
+    allButtons(el).find(
+      (btn) =>
+        btn.textContent.includes(text) &&
+        btn.closest("[hidden]") === null &&
+        btn.closest(".dsu-selectWrap") === null,
+    ) ?? null
+  );
 }
 
 // ── rescueState 轮询（快慢两档、自排循环、订阅启停）───────────────────────
@@ -817,6 +825,8 @@ describe("notifyHostConnected 守卫", () => {
 
 interface TestSlotReg {
   name: string;
+  id?: string;
+  label?: () => string;
   key?: string;
   order?: number;
   inject?: () => Record<string, unknown>;
@@ -1078,11 +1088,11 @@ describe("apply 装配（幂等守卫 / slot 注册 / css effect）", () => {
   beforeEach(resetDomEnv);
   afterEach(teardownDomEnv);
 
-  it("注册 dock、turnTail、toast 与 settings 四个 slot；重复 apply 幂等", () => {
+  it("注册 dock、turnTail、toast、settings 与会话侧栏五个 slot；重复 apply 幂等", () => {
     const ctx = applyWithCtx();
-    assert.equal(ctx.slots.size, 4);
+    assert.equal(ctx.slots.size, 5);
     clientApply(ctx as never);
-    assert.equal(ctx.slots.size, 4, "重复 apply 不得重复注册");
+    assert.equal(ctx.slots.size, 5, "重复 apply 不得重复注册");
     assert.equal(ctx.registers.length, 0, "slot factory 未调用前不注册");
     // 触发 dock factory → 注册 conversation.input.dock（order 30：排在官方 queue(20) 之后）
     ctx.slots.get(DOCK_SLOT)?.();
@@ -1121,6 +1131,23 @@ describe("apply 装配（幂等守卫 / slot 注册 / css effect）", () => {
     );
     cleanup?.();
     assert.equal(ctx.registers.length, 3, "unregister 生效");
+    // 会话侧栏工厂 → 注册 conversation.session.panel.section（id 固定、order 110、
+    // label 走本包字典、inject 交 t 与读取器）。工厂不跑就等于这个面从未装配。
+    const panelFactory = ctx.slots.get("conversation.session.panel.section");
+    assert.ok(panelFactory, "会话侧栏 slot 工厂已登记");
+    const panelCleanup = panelFactory();
+    assert.equal(ctx.registers.length, 4);
+    const panelReg = ctx.registers.at(3);
+    assert.ok(panelReg, "panel 注册已登记");
+    assert.equal(panelReg.name, "conversation.session.panel.section");
+    assert.equal(panelReg.id, "session-rescue-status");
+    assert.equal(panelReg.order, 110);
+    assert.equal(panelReg.label?.(), tZh("resumeSection"));
+    const panelInject = panelReg.inject?.() as { t?: unknown; reader?: unknown };
+    assert.ok(panelInject.t !== undefined, "panel inject 面带翻译器");
+    assert.ok("reader" in panelInject, "panel inject 面带读取器键（装配期可能尚未就绪）");
+    panelCleanup?.();
+    assert.equal(ctx.registers.length, 3, "panel unregister 生效");
   });
 
   it("effect：apply claim 与 css 在卸载时清理", () => {
@@ -2904,6 +2931,34 @@ describe("RescueSettingsCard 设置卡", () => {
     );
   });
 
+  it("成组布尔：两个 ToggleCell 各自写回 touched", async () => {
+    const { container, writes: setCalls } = await mountSettingsCard({
+      resumeOnOpenTodos: false,
+      unfinishedSteerMode: false,
+    });
+    const clickSwitch = async (field: string): Promise<void> => {
+      const cell = container.querySelector<HTMLButtonElement>(
+        `button[role="switch"][data-field="${field}"]`,
+      );
+      assert.ok(cell, `${field} 的开关存在`);
+      await act(async () => {
+        cell.click();
+      });
+    };
+    await clickSwitch("resumeOnOpenTodos");
+    await clickSwitch("unfinishedSteerMode");
+    const saveBtn = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
+    assert.equal(saveBtn!.disabled, false, "两个成组开关都进了草稿");
+    await act(async () => {
+      saveBtn!.click();
+    });
+    await act(async () => {
+      await flush();
+    });
+    assert.equal(setCalls.find((entry) => entry.field === "resumeOnOpenTodos")?.value, true);
+    assert.equal(setCalls.find((entry) => entry.field === "unfinishedSteerMode")?.value, true);
+  });
+
   it("撤销：清空 touched 草稿", async () => {
     const { container } = await mountSettingsCard({ enabled: true, providerExcludes: [] });
     const input = container.querySelector<HTMLInputElement>(EXCLUDES_INPUT_SELECTOR);
@@ -2916,7 +2971,7 @@ describe("RescueSettingsCard 设置卡", () => {
     const save0 = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.equal(save0!.disabled, false, "有改动保存可点");
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-field="discard"]')!.click();
+      container.querySelector<HTMLButtonElement>(DISCARD_BUTTON_SELECTOR)!.click();
     });
     const saveAfter = container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR);
     assert.equal(saveAfter!.disabled, true, "撤销后回到无改动");
@@ -3060,7 +3115,7 @@ describe("RetryPolicySection 重试策略区块", () => {
     assertPreset(container, 2, "always");
     // 改 openrouter 档位为 off
     await pickPreset(container, 1, "off");
-    assert.ok(container.textContent.includes("保存（1 个改动）"), "保存条计数");
+    assert.ok(container.textContent.includes("已修改 1 项"), "保存条计数");
     const saveBtn = container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR);
     assert.ok(saveBtn);
     await act(async () => {
@@ -3330,7 +3385,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       await flush();
     });
     assert.equal(container.textContent.includes("仍要保存"), false, "警告收起");
-    assert.ok(container.textContent.includes("保存（1 个改动）"), "暂存保留，可改完再存");
+    assert.ok(container.textContent.includes("已修改 1 项"), "暂存保留，可改完再存");
     assert.equal(
       fetchCalls.some((entry) => entry.url === POLICY_URL),
       false,
@@ -3364,7 +3419,7 @@ describe("RetryPolicySection 重试策略区块", () => {
     await act(async () => {
       await flush();
     });
-    const discard = container.querySelector<HTMLButtonElement>('[data-field="retry-discard"]');
+    const discard = container.querySelector<HTMLButtonElement>(DISCARD_BUTTON_SELECTOR);
     assert.ok(discard);
     await act(async () => {
       discard.click();
@@ -3373,7 +3428,7 @@ describe("RetryPolicySection 重试策略区块", () => {
       await flush();
     });
     assert.equal(container.textContent.includes("仍要保存"), false, "确认态随暂存一起清");
-    assert.equal(container.textContent.includes("保存（1 个改动）"), false, "暂存清空");
+    assert.equal(container.textContent.includes("已修改 1 项"), false, "暂存清空");
   });
 
   it("四档规范形状整批直存：不出警告，逐行落盘", async () => {
@@ -4565,7 +4620,7 @@ describe("设置卡保存闭环（真实 hooks.card + mutate）", () => {
     const saveBtn = (): HTMLButtonElement =>
       container.querySelector<HTMLButtonElement>(SAVE_BUTTON_SELECTOR)!;
     const discardBtn = (): HTMLButtonElement =>
-      container.querySelector<HTMLButtonElement>('[data-field="discard"]')!;
+      container.querySelector<HTMLButtonElement>(DISCARD_BUTTON_SELECTOR)!;
     const delayInput = (): HTMLInputElement =>
       container.querySelector<HTMLInputElement>(RESUME_DELAY_INPUT_SELECTOR)!;
     // 先落一处合法改动：dirty 成立后越界必须能把它拦回去——只按 dirty 判的门禁在这里会放行。
@@ -4735,7 +4790,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     });
     await pickPreset(container, 0, "off");
     await clickRetrySave(container);
-    assert.equal(container.textContent.includes("保存（1 个改动）"), false, "落盘成功清空暂存");
+    assert.equal(container.textContent.includes("已修改 1 项"), false, "落盘成功清空暂存");
     await pickPreset(container, 1, "always");
     await clickRetrySave(container);
     assert.equal(callsTo(POLICY_URL), 2, "第二次保存仍发出写请求");
@@ -4754,7 +4809,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     await pickPreset(container, 0, "off");
     await clickRetrySave(container);
     assert.ok(container.textContent.includes(SETTINGS_REJECT_REASON), "host 文案可见");
-    assert.ok(container.textContent.includes("保存（1 个改动）"), "失败的档位仍是用户意图");
+    assert.ok(container.textContent.includes("已修改 1 项"), "失败的档位仍是用户意图");
     assert.equal(callsTo(POLICY_URL), 1, "被拒一次就交回用户，不自动重试");
   });
 
@@ -4790,7 +4845,7 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     assert.ok(
       container.textContent.includes("xkiro→off：远端面不可用（读不到 sessionRescue 命名空间）"),
     );
-    assert.ok(container.textContent.includes("保存（1 个改动）"), "未落盘的档位必须留着");
+    assert.ok(container.textContent.includes("已修改 1 项"), "未落盘的档位必须留着");
     rescueState.reader = readerFromFetch();
   });
 
@@ -4815,9 +4870,9 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
       return { ok: true, body: { ok: true, csrf: "tok-1", sessions: {} } };
     });
     await pickPreset(container, 0, "off");
-    assert.ok(container.textContent.includes("保存（1 个改动）"));
+    assert.ok(container.textContent.includes("已修改 1 项"));
     await pickPreset(container, 0, "default");
-    assert.equal(container.textContent.includes("保存（1 个改动）"), false, "改回原档位即无改动");
+    assert.equal(container.textContent.includes("已修改 1 项"), false, "改回原档位即无改动");
     const retrySave = container.querySelector<HTMLButtonElement>(RETRY_SAVE_BUTTON_SELECTOR);
     assert.ok(retrySave);
     assert.equal(retrySave.disabled, true);
@@ -4830,12 +4885,12 @@ describe("RetryPolicySection 传输面与暂存语义", () => {
     });
     assert.equal(callsTo(POLICY_URL), 0, "无暂存时一个 POST 都不发");
     await pickPreset(container, 0, "always");
-    const discard = container.querySelector<HTMLButtonElement>('[data-field="retry-discard"]');
+    const discard = container.querySelector<HTMLButtonElement>(DISCARD_BUTTON_SELECTOR);
     assert.ok(discard);
     await act(async () => {
       discard.click();
     });
-    assert.equal(container.textContent.includes("保存（1 个改动）"), false, "撤销后回到无改动");
+    assert.equal(container.textContent.includes("已修改 1 项"), false, "撤销后回到无改动");
     assert.equal(callsTo(POLICY_URL), 0, "撤销不发 POST");
   });
 });
@@ -5350,5 +5405,125 @@ describe("卡片双语（@deepseek-ai/dsh-client-locale 契约）", () => {
         `${key} 占位符不一致`,
       );
     }
+  });
+});
+
+/** 侧栏小节用例的 SessionStatus 夹具：只写本包关心的四位，其余按官方必选补齐。 */
+function panelStatusOf(over: Partial<SessionStatus> = {}): SessionStatus {
+  return {
+    running: false,
+    pendingInteraction: undefined,
+    completionUnread: false,
+    completionFailed: false,
+    ...over,
+  };
+}
+
+describe("会话侧栏小节：SessionStatus 避让", () => {
+  beforeEach(resetDomEnv);
+  afterEach(teardownDomEnv);
+
+  const panelReader = {
+    state: async () => ({
+      ok: true,
+      sessions: { s1: { count: 2, lastFireAt: 0, pending: null, disabled: false } },
+    }),
+  } as unknown as RescueReader;
+
+  async function renderPanel(
+    status: SessionStatus,
+    reader: RescueReader | undefined = panelReader,
+  ): Promise<void> {
+    const snapshot = new Map([[brandString("s1") as unknown as SessionId, status]]);
+    const useSessionStatus: UseSessionStatus = (selector) => selector(snapshot);
+    await mount(
+      React.createElement(RescuePanelSection, {
+        t: tZh,
+        sessionId: brandString("s1") as unknown as SessionId,
+        reader,
+        useSessionStatus,
+      }),
+    );
+  }
+
+  it("普通会话渲染已续跑计数与开关态", async () => {
+    await renderPanel(panelStatusOf());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.match(mountHost.textContent, /已续跑/u);
+    assert.match(mountHost.textContent, /已启用/u);
+  });
+
+  it("读取器返回非对象 → 空树", async () => {
+    const rawArray = { state: async () => [] } as unknown as RescueReader;
+    await renderPanel(panelStatusOf(), rawArray);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.equal(mountHost.textContent, "");
+  });
+
+  it("pending 与 disabled 都走非默认分支", async () => {
+    const pendingReader = {
+      state: async () => ({
+        ok: true,
+        sessions: {
+          s1: {
+            count: 1,
+            lastFireAt: 0,
+            pending: { turn: 1, kind: "rate_limit", fireAt: 0, remainingMs: 2500 },
+            disabled: true,
+          },
+        },
+      }),
+    } as unknown as RescueReader;
+    await renderPanel(panelStatusOf(), pendingReader);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.match(mountHost.textContent, /3s/u);
+    assert.match(mountHost.textContent, /已关闭/u);
+  });
+
+  it("读取器缺席 → 空树（effect 首跳直接收）", async () => {
+    const snapshot = new Map<SessionId, SessionStatus>();
+    const useSessionStatus: UseSessionStatus = (selector) => selector(snapshot);
+    await mount(
+      React.createElement(RescuePanelSection, {
+        t: tZh,
+        sessionId: brandString("s1") as unknown as SessionId,
+        reader: undefined,
+        useSessionStatus,
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.equal(mountHost.textContent, "");
+  });
+
+  it("等待用户输入 → 整段不渲染", async () => {
+    await renderPanel(
+      panelStatusOf({
+        pendingInteraction: {
+          key: "ask-1",
+          kind: "ask",
+          sessionId: brandString("s1") as unknown as SessionId,
+        },
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.equal(mountHost.textContent.includes("已续跑"), false);
+  });
+
+  it("最近一次完成失败 → 整段不渲染", async () => {
+    await renderPanel(panelStatusOf({ completionFailed: true }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    assert.equal(mountHost.textContent.includes("已续跑"), false);
   });
 });

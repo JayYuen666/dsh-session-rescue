@@ -96,7 +96,7 @@ async function start(): Promise<Rig> {
       installAnchor: path.join(home, PKG_JSON),
       cwd: home,
       home,
-      overlays: [],
+      overlayPaths: [],
       telemetryDisabledEnv: undefined,
     };
     const ctx = await boot(
